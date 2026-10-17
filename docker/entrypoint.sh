@@ -17,8 +17,19 @@ fi
 
 # 1. Prepare persistent storage directories
 DATA_DIR="${ALBERTO_DATA_DIR:-/data}"
+
+# If running as root, initialize persistent storage, ensure ownership, and step down to alberto user
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "Initializing persistent storage ownership at: ${DATA_DIR}..."
+  mkdir -p "${DATA_DIR}/db" "${DATA_DIR}/chroma" "${DATA_DIR}/memory" "${DATA_DIR}/logs" "${DATA_DIR}/config"
+  chown -R alberto:alberto "${DATA_DIR}" /app
+  chmod 775 "${DATA_DIR}"
+  export ALBERTO_DATA_DIR="${DATA_DIR}"
+  exec gosu alberto "$0" "$@"
+fi
+
 echo "Configuring persistent storage at: ${DATA_DIR}"
-mkdir -p "${DATA_DIR}/db" "${DATA_DIR}/chroma" "${DATA_DIR}/memory" "${DATA_DIR}/logs" "${DATA_DIR}/config"
+mkdir -p "${DATA_DIR}/db" "${DATA_DIR}/chroma" "${DATA_DIR}/memory" "${DATA_DIR}/logs" "${DATA_DIR}/config" || true
 export ALBERTO_DATA_DIR="${DATA_DIR}"
 
 # 2. Database Migrations

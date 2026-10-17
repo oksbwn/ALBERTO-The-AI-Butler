@@ -128,6 +128,7 @@ jobs:
         run: |
           echo "Starting container smoke test..."
           TEST_DATA="$(mktemp -d)"
+          chmod 777 "$TEST_DATA"
 
           # Start unified container with mounted data volume
           docker run -d \

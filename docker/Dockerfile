@@ -38,9 +38,9 @@ ENV PYTHONUNBUFFERED=1 \
     FORGE_FASTEMBED_CACHE_DIR=/app/.fastembed-cache \
     ALBERTO_DATA_DIR=/data
 
-# Install runtime utilities and C++ runtime for Node
+# Install runtime utilities, gosu for root-drop, and C++ runtime for Node
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates libstdc++6 build-essential \
+        curl ca-certificates libstdc++6 build-essential gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Node binary & standard modules from official node image
@@ -88,8 +88,6 @@ RUN apt-get purge -y --auto-remove build-essential \
 RUN useradd --create-home --uid 10001 alberto \
     && mkdir -p /app/data /data \
     && chown -R alberto:alberto /app /data
-
-USER alberto
 
 VOLUME ["/data"]
 EXPOSE 3000 8000
