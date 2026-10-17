@@ -8,10 +8,11 @@ Revision ID: 0001_baseline
 Revises:
 Create Date: 2026-06-14
 """
+
 from alembic import op
+from forge.db.base import Base
 
 import forge.models  # noqa: F401 - register tables
-from forge.db.base import Base
 
 revision = "0001_baseline"
 down_revision = None
