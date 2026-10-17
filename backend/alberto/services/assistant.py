@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from alberto.config import settings
 from alberto.db.base import SessionLocal
-from alberto.engine.models import default_model_for_credentials, resolve_model
+from alberto.engine.models import resolve_model
 from alberto.models import Agent, AuthProvider, KbSource, Project, QaPair, Tool, Workflow
 from alberto.services.knowledge import KnowledgeService
 from alberto.services.runtime import build_compile_context

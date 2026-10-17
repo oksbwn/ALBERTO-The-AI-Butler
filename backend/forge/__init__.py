@@ -1,6 +1,7 @@
 """Compatibility shim for legacy Forge namespace."""
 
 import sys
+
 import alberto
 
 # Mirror alberto into forge

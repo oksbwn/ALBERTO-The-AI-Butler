@@ -88,8 +88,8 @@ async def version_info() -> dict:
     if not settings.expose_metrics:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
     return {
-        "name": "forge-api",
-        "version": forge.__version__,
+        "name": "alberto-api",
+        "version": alberto.__version__,
         "langchain": _v("langchain"),
         "langgraph": _v("langgraph"),
     }

@@ -14,7 +14,12 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alberto.deps import CurrentUser, current_tenant_id, get_current_user, get_session, require_role
-from alberto.services.versions import ACTIVITY_TYPES, VersionService, activity_title, versioned_types
+from alberto.services.versions import (
+    ACTIVITY_TYPES,
+    VersionService,
+    activity_title,
+    versioned_types,
+)
 
 router = APIRouter(prefix="/v1/versions", tags=["versions"])
 

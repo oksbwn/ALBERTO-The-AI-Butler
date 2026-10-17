@@ -99,8 +99,9 @@ async def get_current_user(request: Request) -> CurrentUser:
 
     tenant_id = getattr(request.app.state, "tenant_id", None)
     if not tenant_id:
-        from alberto.models import Tenant
         from sqlalchemy import select
+
+        from alberto.models import Tenant
 
         async with SessionLocal() as s:
             tenant_id = (await s.execute(select(Tenant.id).limit(1))).scalar_one_or_none()

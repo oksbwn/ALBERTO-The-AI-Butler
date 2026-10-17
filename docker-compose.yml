@@ -1,53 +1,45 @@
-# Alberto - Zero-Infra Local-First AI Home Butler Stack
-# Starts FastAPI backend (SQLite + ChromaDB + Async Queue) and Next.js frontend.
+# Alberto - Single-Image Local-First AI Home Butler Stack
+# Starts unified container hosting FastAPI backend (SQLite + ChromaDB) and Next.js frontend.
 #
 #   docker compose up --build
 #
 
 services:
-  api:
+  alberto:
     build:
       context: .
-      dockerfile: backend/Dockerfile
+      dockerfile: docker/Dockerfile
+    image: ghcr.io/oksbwn/alberto:latest
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      ALBERTO_ENVIRONMENT: ${ALBERTO_ENVIRONMENT:-${FORGE_ENVIRONMENT:-production}}
+      ALBERTO_ENVIRONMENT: ${ALBERTO_ENVIRONMENT:-production}
       # Embedded local SQLite database & checkpointer
-      ALBERTO_DATABASE_URL: sqlite+aiosqlite:///app/data/alberto.db
+      ALBERTO_DATA_DIR: /data
+      ALBERTO_DATABASE_URL: sqlite+aiosqlite:///data/db/alberto.db
       ALBERTO_CHECKPOINT_BACKEND: sqlite
-      # In-process background queue (no Redis required)
+      # In-process background queue and scheduler
       ALBERTO_ENABLE_SCHEDULER: "true"
       ALBERTO_SCHEDULER_LEADER: "true"
-      ALBERTO_JWT_SECRET: ${ALBERTO_JWT_SECRET:-${FORGE_JWT_SECRET:-alberto-local-secret-key-32chars-min!}}
-      ALBERTO_BOOTSTRAP_ADMIN_EMAIL: ${ALBERTO_BOOTSTRAP_ADMIN_EMAIL:-${FORGE_BOOTSTRAP_ADMIN_EMAIL:-admin@alberto.local}}
-      ALBERTO_BOOTSTRAP_ADMIN_PASSWORD: ${ALBERTO_BOOTSTRAP_ADMIN_PASSWORD:-${FORGE_BOOTSTRAP_ADMIN_PASSWORD:-alberto-admin}}
-      ALBERTO_PUBLIC_BASE_URL: ${ALBERTO_PUBLIC_BASE_URL:-${FORGE_PUBLIC_BASE_URL:-http://localhost:8000}}
-      ALBERTO_PUBLIC_CONSOLE_URL: ${ALBERTO_PUBLIC_CONSOLE_URL:-${FORGE_PUBLIC_CONSOLE_URL:-http://localhost:3000}}
+      ALBERTO_JWT_SECRET: ${ALBERTO_JWT_SECRET:-alberto-local-secret-key-32chars-min!}
+      ALBERTO_BOOTSTRAP_ADMIN_EMAIL: ${ALBERTO_BOOTSTRAP_ADMIN_EMAIL:-admin@alberto.local}
+      ALBERTO_BOOTSTRAP_ADMIN_PASSWORD: ${ALBERTO_BOOTSTRAP_ADMIN_PASSWORD:-alberto-admin}
+      ALBERTO_PUBLIC_BASE_URL: ${ALBERTO_PUBLIC_BASE_URL:-http://localhost:8000}
+      ALBERTO_PUBLIC_CONSOLE_URL: ${ALBERTO_PUBLIC_CONSOLE_URL:-http://localhost:3000}
       ALBERTO_CORS_ORIGINS: '["http://localhost:3000"]'
-      ALBERTO_SERVICE_API_TOKEN: ${ALBERTO_SERVICE_API_TOKEN:-${FORGE_SERVICE_API_TOKEN:-}}
+      ALBERTO_SERVICE_API_TOKEN: ${ALBERTO_SERVICE_API_TOKEN:-}
       ALBERTO_EGRESS_ALLOW_PRIVATE_HOSTS: '["host.docker.internal"]'
       RES_OPTIONS: ${RES_OPTIONS:-no-aaaa}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       # Persistent local storage for SQLite databases, ChromaDB vectors, and encryption keys
-      - alberto-data:/app/data
+      - alberto-data:/data
     ports:
-      - "8000:8000"
-
-  web:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-      args:
-        ALBERTO_API_URL: http://api:8000
-        FORGE_API_URL: http://api:8000
-    depends_on:
-      api:
-        condition: service_healthy
-    ports:
+      # Web UI console (Next.js proxies /api/alberto to backend)
       - "3000:3000"
+      # Direct backend API access
+      - "8000:8000"
 
 volumes:
   alberto-data:

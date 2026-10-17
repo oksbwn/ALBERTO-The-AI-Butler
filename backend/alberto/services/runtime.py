@@ -14,7 +14,6 @@ from sqlalchemy import select
 from alberto.auth_providers.resolver import AuthResolver
 from alberto.config import settings
 from alberto.engine.context import CompileContext
-from alberto.engine.models import default_model_for_credentials
 from alberto.models import Agent, Project, Tool, Workflow
 from alberto.secrets.store import SecretStore
 from alberto.tools.materialize import materialize_tool
