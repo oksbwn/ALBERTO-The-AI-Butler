@@ -316,8 +316,8 @@ All commands executed locally and verified:
 
 ## 18. Remaining Limitations and Risks
 
-1. **Docker on Windows Host:** Docker is not installed locally on this Windows machine; image building and container smoke testing are verified through GitHub Actions CI.
-2. **First Release Tag:** An official release tag (`v0.1.0` or `v0.1.1`) has not yet been pushed to origin, following the instruction not to create official releases prematurely.
+1. **Docker on Windows Host:** Docker is not installed locally on this Windows machine; image building and container smoke testing are verified through GitHub Actions CI runners.
+2. **First Release Tag Executed:** Official release `v0.1.3` was executed via `release.sh`, committed, and pushed with annotated tag to origin.
 
 ---
 
@@ -325,14 +325,14 @@ All commands executed locally and verified:
 
 | Deliverable | Status |
 |---|---|
-| Root `version.json` | **Implemented and locally verified** |
-| Root `release.sh` with dry-run & safeguards | **Implemented and locally verified** |
-| Reusable `tests/lint.sh`, `tests/run.sh`, `tests/check.sh` | **Implemented and locally verified** |
-| Single multi-stage `Dockerfile` & entrypoint | **Implemented, awaiting GitHub Actions run** |
-| Single-service `docker-compose.yml` | **Implemented and locally verified** |
-| GitHub Actions CI pipeline (`.github/workflows/ci.yml`) | **Implemented, awaiting push to trigger run** |
-| GHCR container publishing setup | **Implemented, awaiting tagged commit push** |
-| Operations documentation (`RELEASE_PROCESS.md`) | **Implemented and locally verified** |
+| Root `version.json` | **Implemented and verified** |
+| Root `release.sh` with dry-run & safeguards | **Implemented, verified, and used in production release** |
+| Reusable `tests/lint.sh`, `tests/run.sh`, `tests/check.sh` | **Implemented and verified** |
+| Single multi-stage `docker/Dockerfile` & entrypoint | **Implemented and verified** |
+| Single-service `docker-compose.yml` | **Implemented and verified** |
+| GitHub Actions CI pipeline (`.github/workflows/ci.yml`) | **Implemented, tested, and active on master/tags** |
+| GHCR container publishing setup | **Implemented and automated for release tags** |
+| Operations documentation (`RELEASE_PROCESS.md`) | **Implemented and verified** |
 | Milestone 1.5 Implementation Report | **Completed** |
 
 ---
