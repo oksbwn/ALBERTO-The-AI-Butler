@@ -112,9 +112,9 @@ jobs:
           fi
 
           # 4. Confirm the tag is an annotated tag (not a lightweight tag)
-          TAG_OBJECT_TYPE="$(git cat-file -t "$GITHUB_REF")"
-          if [[ "$TAG_OBJECT_TYPE" != "tag" ]]; then
-            echo "❌ Error: Tag '$TAG_NAME' must be an annotated git tag (found: '$TAG_OBJECT_TYPE')" >&2
+          # In Git, an annotated tag has a dereferenced commit object peeled via ^{} in ls-remote
+          if ! git ls-remote origin "refs/tags/$TAG_NAME^{}" | grep -q "$TAG_NAME"; then
+            echo "❌ Error: Tag '$TAG_NAME' must be an annotated git tag" >&2
             exit 1
           fi
 
