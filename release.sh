@@ -164,7 +164,7 @@ fi
 CURRENT_VERSION="$("$PYTHON" -c "
 import json, sys, re
 try:
-    with open('$VERSION_FILE', 'r', encoding='utf-8') as f:
+    with open('version.json', 'r', encoding='utf-8') as f:
         data = json.load(f)
     v = data.get('version', '')
     t = data.get('tag', '')
@@ -288,7 +288,7 @@ echo "--> [4/4] Executing Official Release Sequence for $NEXT_TAG..."
 # Update version.json
 "$PYTHON" -c "
 import json
-with open('$VERSION_FILE', 'w', encoding='utf-8') as f:
+with open('version.json', 'w', encoding='utf-8') as f:
     json.dump({'version': '$NEXT_VERSION', 'tag': '$NEXT_TAG'}, f, indent=2)
     f.write('\n')
 "
@@ -296,7 +296,7 @@ with open('$VERSION_FILE', 'w', encoding='utf-8') as f:
 # Validate new version.json
 "$PYTHON" -c "
 import json
-with open('$VERSION_FILE', 'r', encoding='utf-8') as f:
+with open('version.json', 'r', encoding='utf-8') as f:
     data = json.load(f)
 assert data['version'] == '$NEXT_VERSION'
 assert data['tag'] == '$NEXT_TAG'
