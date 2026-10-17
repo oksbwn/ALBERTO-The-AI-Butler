@@ -14,7 +14,7 @@ RUN corepack enable
 
 COPY pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY frontend/package.json frontend/package.json
-RUN pnpm install --frozen-lockfile || pnpm install
+RUN pnpm config set node-linker hoisted && (pnpm install --frozen-lockfile || pnpm install)
 
 COPY . .
 RUN mkdir -p frontend/public
@@ -35,6 +35,7 @@ FROM python:3.12-slim AS runner
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     NODE_ENV=production \
+    NODE_PATH=/app/node_modules:/app/frontend/node_modules \
     FORGE_FASTEMBED_CACHE_DIR=/app/.fastembed-cache \
     ALBERTO_DATA_DIR=/data
 
@@ -77,6 +78,7 @@ COPY --from=frontend-builder /repo/frontend/.next/static ./frontend/.next/static
 COPY --from=frontend-builder /repo/frontend/.next/static ./.next/static
 COPY --from=frontend-builder /repo/frontend/public ./frontend/public
 COPY --from=frontend-builder /repo/frontend/public ./public
+COPY --from=frontend-builder /repo/node_modules ./node_modules
 
 # Copy entrypoint script
 COPY docker/entrypoint.sh /app/docker-entrypoint.sh

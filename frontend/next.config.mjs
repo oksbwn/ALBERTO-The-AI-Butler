@@ -1,3 +1,8 @@
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
@@ -5,6 +10,9 @@ const nextConfig = {
   // Gated on an env var: the standalone copy step uses symlinks that fail on Windows dev
   // (EPERM) - the Docker build sets NEXT_OUTPUT=standalone; local `pnpm build` stays plain.
   output: process.env.NEXT_OUTPUT === "standalone" ? "standalone" : undefined,
+  experimental: {
+    outputFileTracingRoot: path.join(__dirname, "../"),
+  },
   env: {
     // Browser-facing base for DIRECT client calls (e.g. split-origin SSE). Leave EMPTY for
     // container / single-origin deploys so the browser uses the same-origin /api/alberto proxy.

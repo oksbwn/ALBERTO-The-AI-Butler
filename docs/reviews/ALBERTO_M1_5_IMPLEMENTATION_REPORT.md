@@ -330,6 +330,7 @@ All commands executed locally and verified:
 3. **Standalone Static Resolution:** Mapped Next.js static assets and public assets to both `./frontend/` and `./` roots with dynamic `server.js` path discovery.
 4. **Pipeline Deduplication:** Decoupled branch CI and tag release workflows; branch CI automatically ignores `chore(release):` commits so only 1 pipeline executes per release.
 5. **Preflight Flexibility:** Updated `release.sh` to allow uncommitted changes, running the quality gate against them and committing them directly into the tagged release commit.
+6. **Next.js Standalone Monorepo Tracing:** Added `outputFileTracingRoot: path.join(__dirname, "../")` in `frontend/next.config.mjs`, configured `node-linker hoisted` for pnpm, copied hoisted `node_modules` into the runtime container, and set `NODE_PATH` so `server.js` resolves `next` and all dependencies reliably.
 
 ---
 
