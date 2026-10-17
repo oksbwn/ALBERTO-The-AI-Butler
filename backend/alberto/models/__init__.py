@@ -13,6 +13,7 @@ from alberto.models.entities import (
     KbSource,
     McpClient,
     Memory,
+    MemoryLearningEvent,
     ModelServer,
     OAuthClient,
     Project,
@@ -39,7 +40,7 @@ from alberto.models.evals import EvalResult, EvalRun
 __all__ = [
     "Tenant", "User", "Project", "Workflow", "Thread", "Run", "Trace", "Span",
     "Tool", "ToolSet", "ToolSetMember", "AuthProvider", "Secret", "McpClient", "Agent", "KbSource", "QaPair",
-    "AuditLog", "Trigger", "Channel", "Component", "HandoffRequest", "Dataset", "Memory",
+    "AuditLog", "Trigger", "Channel", "Component", "HandoffRequest", "Dataset", "Memory", "MemoryLearningEvent",
     "EntityVersion", "EvalRun", "EvalResult", "OAuthClient", "ConnectorInstall",
     "ModelServer", "RegisteredModel",
 ]

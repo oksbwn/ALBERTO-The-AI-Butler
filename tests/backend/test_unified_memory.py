@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from alberto.config import settings
 from alberto.db import SessionLocal
 from alberto.knowledge.graph import LadybugGraphAdapter, set_graph_adapter
 from alberto.models.entities import Project
@@ -67,10 +66,13 @@ async def test_storage_status_across_engines(setup_unified_env, sample_project: 
         # 4. ChromaDB status
         assert status["chroma"]["available"] is True
 
-        # 5. Markdown memory status (inactive writer deferred to M2.1)
-        assert status["markdown"]["status"] == "planned"
-        assert status["markdown"]["active_writer"] is False
-        assert status["markdown"]["deferred_milestone"] == "2.1"
+        # 5. Markdown memory status (active writer in Milestone 2.1)
+        assert status["markdown"]["status"] in ("planned", "active")
+        if status["markdown"]["status"] == "active":
+            assert status["markdown"]["active_writer"] is True
+        else:
+            assert status["markdown"]["active_writer"] is False
+            assert status["markdown"]["deferred_milestone"] == "2.1"
 
 
 @pytest.mark.asyncio

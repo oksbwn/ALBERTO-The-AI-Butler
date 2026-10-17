@@ -88,6 +88,30 @@ class UnifiedMemoryManager:
             except Exception as e:
                 logger.warning("MemoryService recall error: %s", e)
 
+            # Direct SQLite fallback if vector store yields no hits or is unavailable
+            if not any(r.source == "chroma_memory" for r in results):
+                try:
+                    all_active = await MemoryService.list(session, tenant_id, project_id, status="active")
+                    query_lower = query.lower()
+                    query_words = {w for w in query_lower.split() if len(w) > 2}
+                    for mem in all_active:
+                        mem_lower = mem.text.lower()
+                        mem_words = set(mem_lower.split())
+                        if (query_words & mem_words) or (mem_lower in query_lower) or (query_lower in mem_lower):
+                            results.append(
+                                UnifiedMemoryRecord(
+                                    source="sqlite_memory",
+                                    record_id=mem.id,
+                                    content=mem.text,
+                                    metadata={"scope": mem.scope, "kind": mem.kind},
+                                    provenance=mem.provenance,
+                                )
+                            )
+                            if len(results) >= top_k:
+                                break
+                except Exception as e:
+                    logger.warning("SQLite memory fallback recall error: %s", e)
+
         # 2. LadybugDB Knowledge Graph
         if "graph" in enabled_sources or "ladybug" in enabled_sources:
             try:
@@ -171,6 +195,35 @@ class UnifiedMemoryManager:
             except Exception as e:
                 logger.warning("KnowledgeService search error: %s", e)
 
+        # 5. Markdown memory retrieval
+        if "markdown" in enabled_sources or "notes" in enabled_sources:
+            try:
+                from alberto.services.markdown_memory import MarkdownMemoryService
+
+                files = MarkdownMemoryService.list_files(tenant_id, project_id)
+                q_lower = query.lower()
+                for f_info in files:
+                    content = MarkdownMemoryService.read_file(tenant_id, project_id, f_info["filename"])
+                    if not content:
+                        continue
+                    for line in content.splitlines():
+                        if line.startswith("- [mem:") and (q_lower in line.lower() or any(w in line.lower() for w in q_lower.split() if len(w) > 3)):
+                            clean_text = line.lstrip("- ").strip()
+                            results.append(
+                                UnifiedMemoryRecord(
+                                    source="markdown_memory",
+                                    record_id=f"md_{f_info['filename']}",
+                                    content=clean_text,
+                                    score=0.9,
+                                    metadata={"filename": f_info["filename"], "category": f_info["category"]},
+                                    provenance=f"markdown:{f_info['filename']}",
+                                )
+                            )
+                            if len(results) >= top_k * 2:
+                                break
+            except Exception as e:
+                logger.warning("Markdown memory recall error: %s", e)
+
         max_allowed = top_k if len(enabled_sources) == 1 else top_k * len(enabled_sources)
         return results[:max_allowed]
 
@@ -184,11 +237,13 @@ class UnifiedMemoryManager:
         target: str = "memory",
         scope: str = "default",
         kind: str = "note",
+        confidence: float = 1.0,
+        provenance: str = "manual",
+        status: str = "active",
         entity_kind: str = "concept",
         entity_name: str | None = None,
     ) -> dict[str, Any]:
-        """Explicit deterministic storage routing.
-        No automated LLM extraction occurs in Milestone 2.0."""
+        """Deterministic explicit storage routing."""
         if target == "graph":
             adapter = get_graph_adapter()
             name = entity_name or text[:40].strip()
@@ -201,17 +256,211 @@ class UnifiedMemoryManager:
                 name=name,
                 canonical_name=name.lower(),
                 description=text,
-                source="manual",
-                confidence=1.0,
+                source=provenance,
+                confidence=confidence,
             )
             saved = await adapter.create_or_update_entity(entity)
             return {"target": "graph", "id": saved.id, "kind": saved.kind, "name": saved.name}
 
-        # Default target: SQLite long-term memory
+        # Default target: SQLite long-term memory + ChromaDB + Markdown
         m = await MemoryService.remember(
-            session, tenant_id, project_id, text, scope=scope, kind=kind
+            session,
+            tenant_id,
+            project_id,
+            text,
+            scope=scope,
+            kind=kind,
+            confidence=confidence,
+            provenance=provenance,
+            status=status,
         )
-        return {"target": "memory", "id": m.id, "scope": m.scope, "text": m.text}
+
+        # Sync into persistent Markdown memory
+        try:
+            from alberto.services.markdown_memory import MarkdownMemoryService
+
+            MarkdownMemoryService.sync_memory(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                memory_id=m.id,
+                text=m.text,
+                kind=m.kind,
+                confidence=m.confidence,
+                status=m.status,
+            )
+        except Exception as e:
+            logger.warning("Markdown memory sync warning: %s", e)
+
+        return {"target": "memory", "id": m.id, "scope": m.scope, "text": m.text, "status": m.status}
+
+    @staticmethod
+    async def list_memories(
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        *,
+        scope: str | None = None,
+        status: str | None = "active",
+        kind: str | None = None,
+    ) -> list[Memory]:
+        """List authoritative memories with filtering."""
+        return await MemoryService.list(
+            session, tenant_id, project_id, scope=scope, status=status, kind=kind
+        )
+
+    @staticmethod
+    async def get_memory(
+        session: AsyncSession, tenant_id: str, project_id: str, memory_id: str
+    ) -> Memory | None:
+        """Get an authoritative memory record by ID."""
+        return await MemoryService.get(session, tenant_id, project_id, memory_id)
+
+    @staticmethod
+    async def update_memory(
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        memory_id: str,
+        *,
+        text: str | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+        confidence: float | None = None,
+    ) -> Memory | None:
+        """Update/correct an authoritative memory and sync projections."""
+        m = await MemoryService.update(
+            session,
+            tenant_id,
+            project_id,
+            memory_id,
+            text=text,
+            kind=kind,
+            status=status,
+            confidence=confidence,
+        )
+        if m:
+            try:
+                from alberto.services.markdown_memory import MarkdownMemoryService
+
+                MarkdownMemoryService.sync_memory(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    memory_id=m.id,
+                    text=m.text,
+                    kind=m.kind,
+                    confidence=m.confidence,
+                    status=m.status,
+                )
+            except Exception as e:
+                logger.warning("Markdown memory sync warning on update: %s", e)
+        return m
+
+    @staticmethod
+    async def delete_memory(
+        session: AsyncSession, tenant_id: str, project_id: str, memory_id: str
+    ) -> bool:
+        """Delete an authoritative memory, updating Chroma, Markdown, and LadybugDB."""
+        m = await MemoryService.get(session, tenant_id, project_id, memory_id)
+        if not m:
+            return False
+        kind = m.kind
+        source_ref = m.source_ref
+        deleted = await MemoryService.delete(session, tenant_id, project_id, memory_id)
+        if deleted:
+            try:
+                from alberto.services.markdown_memory import MarkdownMemoryService
+
+                MarkdownMemoryService.remove_memory(tenant_id, project_id, memory_id, kind=kind)
+            except Exception as e:
+                logger.warning("Markdown memory removal warning: %s", e)
+
+            # Invalidate graph relationships supported exclusively by this memory's source_ref
+            if source_ref and source_ref != "manual":
+                try:
+                    # Check if any other active memory still shares this source_ref
+                    other_active = (
+                        await session.execute(
+                            select(Memory).where(
+                                Memory.tenant_id == tenant_id,
+                                Memory.project_id == project_id,
+                                Memory.source_ref == source_ref,
+                                Memory.status == "active",
+                            )
+                        )
+                    ).scalars().first()
+
+                    if not other_active:
+                        adapter = get_graph_adapter()
+                        res = adapter._execute(
+                            """
+                            MATCH ()-[r:RelatesTo]->()
+                            WHERE r.tenant_id = $tenant_id AND r.project_id = $project_id AND r.source = $source
+                            RETURN r.id
+                            """,
+                            {"tenant_id": tenant_id, "project_id": project_id, "source": source_ref},
+                        )
+                        rel_ids_to_delete = []
+                        while res.has_next():
+                            rel_ids_to_delete.append(res.get_next()[0])
+
+                        for r_id in rel_ids_to_delete:
+                            await adapter.delete_relationship(tenant_id, project_id, r_id)
+                except Exception as e:
+                    logger.warning("Graph relationship cleanup warning on delete: %s", e)
+
+        return deleted
+
+    @staticmethod
+    async def get_learning_events(
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        *,
+        status: str | None = None,
+    ) -> list[Any]:
+        """List learning events for this project scope."""
+        from alberto.models import MemoryLearningEvent
+
+        q = select(MemoryLearningEvent).where(
+            MemoryLearningEvent.tenant_id == tenant_id,
+            MemoryLearningEvent.project_id == project_id,
+        )
+        if status:
+            q = q.where(MemoryLearningEvent.status == status)
+        res = await session.execute(q.order_by(MemoryLearningEvent.created_at.desc()))
+        return list(res.scalars())
+
+    @staticmethod
+    async def approve_learning_event(
+        session: AsyncSession, tenant_id: str, project_id: str, event_id: str
+    ) -> Any | None:
+        """Approve pending learning candidates in a review_required event."""
+        from alberto.services.learning_coordinator import LearningCoordinator
+
+        return await LearningCoordinator.approve_event(session, tenant_id, project_id, event_id)
+
+    @staticmethod
+    async def reject_learning_event(
+        session: AsyncSession, tenant_id: str, project_id: str, event_id: str
+    ) -> Any | None:
+        """Reject pending learning candidates."""
+        from alberto.services.learning_coordinator import LearningCoordinator
+
+        return await LearningCoordinator.reject_event(session, tenant_id, project_id, event_id)
+
+    @staticmethod
+    def list_markdown_files(tenant_id: str, project_id: str) -> list[dict[str, Any]]:
+        """List Markdown memory files in project scope."""
+        from alberto.services.markdown_memory import MarkdownMemoryService
+
+        return MarkdownMemoryService.list_files(tenant_id, project_id)
+
+    @staticmethod
+    def get_markdown_file(tenant_id: str, project_id: str, filename: str) -> str | None:
+        """Read content of a Markdown memory file."""
+        from alberto.services.markdown_memory import MarkdownMemoryService
+
+        return MarkdownMemoryService.read_file(tenant_id, project_id, filename)
 
     @staticmethod
     async def get_storage_status(
@@ -221,7 +470,9 @@ class UnifiedMemoryManager:
         # 1. SQLite
         mem_raw = await session.scalar(
             select(func.count()).select_from(Memory).where(
-                Memory.tenant_id == tenant_id, Memory.project_id == project_id
+                Memory.tenant_id == tenant_id,
+                Memory.project_id == project_id,
+                Memory.status == "active",
             )
         )
         qa_raw = await session.scalar(
@@ -252,14 +503,17 @@ class UnifiedMemoryManager:
             "path": settings.chroma_path,
         }
 
-        # 4. Markdown memory
+        # 4. Markdown memory (Active Writer in Milestone 2.1)
+        from alberto.services.markdown_memory import MarkdownMemoryService
+
         markdown_dir = settings.data_dir / "memory"
+        md_files = MarkdownMemoryService.list_files(tenant_id, project_id)
         markdown_status = {
-            "status": "planned",
-            "active_writer": False,
-            "deferred_milestone": "2.1",
+            "status": "active",
+            "active_writer": True,
             "path": str(markdown_dir),
             "directory_exists": markdown_dir.exists(),
+            "file_count": len(md_files),
         }
 
         return {

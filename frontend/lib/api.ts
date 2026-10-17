@@ -262,7 +262,60 @@ export interface MemoryStatus {
   sqlite: { memory_count: number; qa_count: number };
   ladybug_graph: { available: boolean; entity_count: number; relationship_count: number; path?: string; error?: string };
   chroma: { available: boolean; path: string };
-  markdown: { status: string; active_writer: boolean; deferred_milestone: string; path: string; directory_exists: boolean };
+  markdown: { status: string; active_writer: boolean; deferred_milestone?: string; path: string; directory_exists: boolean; file_count?: number };
+}
+
+export interface MemoryRecordDetail {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  scope: string;
+  text: string;
+  kind: string;
+  confidence: number;
+  provenance: string;
+  status: string;
+  source_ref?: string | null;
+  superseded_by?: string | null;
+  metadata?: Record<string, any>;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface MemoryLearningSettings {
+  memory_learning_enabled: boolean;
+  memory_curator_model: string;
+  memory_curator_effective_model: string;
+  graph_manager_model: string;
+  graph_manager_effective_model: string;
+  operational_state: string;
+  last_learning_at?: string | null;
+}
+
+export interface LearningEventItem {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  source_event_id: string;
+  source_type: string;
+  status: string;
+  extraction_payload: Record<string, any>;
+  error?: string | null;
+  retry_count: number;
+  requires_review: boolean;
+  applied_memory_ids: string[];
+  applied_graph_entity_ids: string[];
+  applied_graph_rel_ids: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface MarkdownMemoryFile {
+  filename: string;
+  category: string;
+  size_bytes: number;
+  updated_at: string;
+  content?: string | null;
 }
 
 export interface StatRollup { runs: number; tokens: number; cost_usd: number; avg_latency_ms: number; errors?: number; error_rate?: number; }
@@ -652,6 +705,29 @@ export const api = {
   deleteQa: (pid: string, qid: string) => fetch(`${BASE}/v1/projects/${pid}/qa-pairs/${qid}`, { method: "DELETE", headers: authHeader() }),
   graphStats: (pid: string) => json<GraphStats>(`/v1/projects/${pid}/graph/stats`),
   memoryStatus: (pid: string) => json<MemoryStatus>(`/v1/projects/${pid}/memory/status`),
+  listMemoryRecords: (pid: string, opts?: { status?: string; kind?: string }) => {
+    const q = new URLSearchParams();
+    if (opts?.status) q.set("status", opts.status);
+    if (opts?.kind) q.set("kind", opts.kind);
+    const qs = q.toString();
+    return json<MemoryRecordDetail[]>(`/v1/projects/${pid}/memory/records${qs ? `?${qs}` : ""}`);
+  },
+  updateMemoryRecord: (pid: string, id: string, body: { text?: string; kind?: string; status?: string }) =>
+    json<MemoryRecordDetail>(`/v1/projects/${pid}/memory/records/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteMemoryRecord: (pid: string, id: string) =>
+    fetch(`${BASE}/v1/projects/${pid}/memory/records/${id}`, { method: "DELETE", headers: authHeader() }),
+  getMemoryLearningSettings: (pid: string) =>
+    json<MemoryLearningSettings>(`/v1/projects/${pid}/memory/learning/settings`),
+  updateMemoryLearningSettings: (pid: string, body: { memory_learning_enabled?: boolean; memory_curator_model?: string; graph_manager_model?: string }) =>
+    json<MemoryLearningSettings>(`/v1/projects/${pid}/memory/learning/settings`, { method: "PATCH", body: JSON.stringify(body) }),
+  listLearningEvents: (pid: string, status?: string) =>
+    json<LearningEventItem[]>(`/v1/projects/${pid}/memory/learning/events${status ? `?status=${status}` : ""}`),
+  approveLearningEvent: (pid: string, id: string) =>
+    json<LearningEventItem>(`/v1/projects/${pid}/memory/learning/events/${id}/approve`, { method: "POST" }),
+  rejectLearningEvent: (pid: string, id: string) =>
+    json<LearningEventItem>(`/v1/projects/${pid}/memory/learning/events/${id}/reject`, { method: "POST" }),
+  listMarkdownMemoryFiles: (pid: string, filename?: string) =>
+    json<MarkdownMemoryFile[]>(`/v1/projects/${pid}/memory/markdown${filename ? `?filename=${encodeURIComponent(filename)}` : ""}`),
   // traces + conversations (Traces view)
   listTraces: (pid: string) => json<Trace[]>(`/v1/projects/${pid}/traces`),
   getTrace: (pid: string, trid: string) => json<{ trace: Trace; spans: Span[] }>(`/v1/projects/${pid}/traces/${trid}`),

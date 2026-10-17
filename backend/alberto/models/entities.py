@@ -416,6 +416,34 @@ class Memory(PkTimestamp, Base):
     scope: Mapped[str] = mapped_column(String(120), default="default", index=True)
     text: Mapped[str] = mapped_column(Text)
     kind: Mapped[str] = mapped_column(String(30), default="note")
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    provenance: Mapped[str] = mapped_column(String(120), default="manual")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    source_ref: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    superseded_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    meta: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+
+
+class MemoryLearningEvent(PkTimestamp, Base):
+    """Tracks durable memory learning events from conversation turns."""
+
+    __tablename__ = "memory_learning_events"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "project_id", "source_event_id", name="uq_learning_events_tenant_project_source"),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_event_id: Mapped[str] = mapped_column(String(120), index=True)
+    source_type: Mapped[str] = mapped_column(String(40), default="conversation_turn")
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)  # pending|extracted|validated|applying|completed|review_required|failed
+    extraction_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    requires_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    applied_memory_ids: Mapped[list] = mapped_column(JSON, default=list)
+    applied_graph_entity_ids: Mapped[list] = mapped_column(JSON, default=list)
+    applied_graph_rel_ids: Mapped[list] = mapped_column(JSON, default=list)
+
 
 
 class Dataset(PkTimestamp, Base):

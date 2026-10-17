@@ -4,7 +4,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "../icons";
 import { Drawer, Field, Modal, Segmented, StatusPill } from "../primitives";
-import { api, ActivityEntry, GraphStats, KbSource, MemoryStatus, QaPair, SearchHit } from "@/lib/api";
+import {
+  api, ActivityEntry, GraphStats, KbSource, MemoryStatus, QaPair, SearchHit,
+  LearningEventItem, MarkdownMemoryFile, MemoryLearningSettings, MemoryRecordDetail,
+} from "@/lib/api";
 import { ChunkMap } from "./chunk-map";
 
 const VTABS = [
@@ -719,8 +722,18 @@ function SearchDebugger({ project }: { project: any }) {
 function KnowledgeGraphView({ project }: { project: any }) {
   const [stats, setStats] = useState<GraphStats | null>(null);
   const [memStatus, setMemStatus] = useState<MemoryStatus | null>(null);
+  const [learningSettings, setLearningSettings] = useState<MemoryLearningSettings | null>(null);
+  const [records, setRecords] = useState<MemoryRecordDetail[]>([]);
+  const [reviewEvents, setReviewEvents] = useState<LearningEventItem[]>([]);
+  const [mdFiles, setMdFiles] = useState<MarkdownMemoryFile[]>([]);
+  const [selectedMd, setSelectedMd] = useState<string | null>(null);
+  const [mdContent, setMdContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [editingRecord, setEditingRecord] = useState<MemoryRecordDetail | null>(null);
+  const [editText, setEditText] = useState("");
+  const [editKind, setEditKind] = useState("note");
+  const [togglingLearning, setTogglingLearning] = useState(false);
 
   const reload = useCallback(() => {
     if (!project?.id) return;
@@ -729,10 +742,18 @@ function KnowledgeGraphView({ project }: { project: any }) {
     Promise.all([
       api.graphStats(project.id).catch((e) => { console.warn(e); return null; }),
       api.memoryStatus(project.id).catch((e) => { console.warn(e); return null; }),
+      api.getMemoryLearningSettings(project.id).catch((e) => { console.warn(e); return null; }),
+      api.listMemoryRecords(project.id, { status: "active" }).catch((e) => { console.warn(e); return []; }),
+      api.listLearningEvents(project.id, "review_required").catch((e) => { console.warn(e); return []; }),
+      api.listMarkdownMemoryFiles(project.id).catch((e) => { console.warn(e); return []; }),
     ])
-      .then(([g, m]) => {
+      .then(([g, m, s, r, evs, mdf]) => {
         setStats(g);
         setMemStatus(m);
+        setLearningSettings(s);
+        setRecords(r || []);
+        setReviewEvents(evs || []);
+        setMdFiles(mdf || []);
       })
       .catch((e: any) => setErr(e?.message || "Failed to load Knowledge Graph status."))
       .finally(() => setLoading(false));
@@ -741,6 +762,78 @@ function KnowledgeGraphView({ project }: { project: any }) {
   useEffect(() => {
     reload();
   }, [reload]);
+
+  const toggleLearning = async () => {
+    if (!project?.id || !learningSettings) return;
+    setTogglingLearning(true);
+    try {
+      const updated = await api.updateMemoryLearningSettings(project.id, {
+        memory_learning_enabled: !learningSettings.memory_learning_enabled,
+      });
+      setLearningSettings(updated);
+      reload();
+    } catch (e: any) {
+      alert(`Failed to update learning settings: ${e?.message || e}`);
+    } finally {
+      setTogglingLearning(false);
+    }
+  };
+
+  const handleApprove = async (eventId: string) => {
+    if (!project?.id) return;
+    try {
+      await api.approveLearningEvent(project.id, eventId);
+      reload();
+    } catch (e: any) {
+      alert(`Approval error: ${e?.message || e}`);
+    }
+  };
+
+  const handleReject = async (eventId: string) => {
+    if (!project?.id) return;
+    try {
+      await api.rejectLearningEvent(project.id, eventId);
+      reload();
+    } catch (e: any) {
+      alert(`Rejection error: ${e?.message || e}`);
+    }
+  };
+
+  const handleDeleteRecord = async (recordId: string) => {
+    if (!project?.id || !confirm("Delete this memory record?")) return;
+    try {
+      await api.deleteMemoryRecord(project.id, recordId);
+      reload();
+    } catch (e: any) {
+      alert(`Delete error: ${e?.message || e}`);
+    }
+  };
+
+  const handleSaveEdit = async () => {
+    if (!project?.id || !editingRecord) return;
+    try {
+      await api.updateMemoryRecord(project.id, editingRecord.id, {
+        text: editText,
+        kind: editKind,
+      });
+      setEditingRecord(null);
+      reload();
+    } catch (e: any) {
+      alert(`Update error: ${e?.message || e}`);
+    }
+  };
+
+  const openMdFile = async (filename: string) => {
+    if (!project?.id) return;
+    setSelectedMd(filename);
+    try {
+      const files = await api.listMarkdownMemoryFiles(project.id, filename);
+      const target = files.find((f) => f.filename === filename);
+      setMdContent(target?.content || "(empty file)");
+    } catch (e: any) {
+      setMdContent(`Error loading file: ${e?.message || e}`);
+    }
+  };
 
   return (
     <div className="col gap4">
@@ -795,7 +888,7 @@ function KnowledgeGraphView({ project }: { project: any }) {
       <div className="card" style={{ padding: 20 }}>
         <div className="t-h2" style={{ marginBottom: 6 }}>Unified Memory Architecture</div>
         <div className="fg-1" style={{ marginBottom: 16 }}>
-          Alberto Milestone 2.0 coordinates four purpose-built storage engines under <code>/data</code> through a Unified Memory Manager.
+          Alberto Milestone 2.1 coordinates four purpose-built storage engines under <code>/data</code> through a Unified Memory Manager.
         </div>
 
         <div className="col gap2">
@@ -807,11 +900,11 @@ function KnowledgeGraphView({ project }: { project: any }) {
                 <span className="badge">Authoritative</span>
               </div>
               <div className="fg-2 t-caption" style={{ marginTop: 2 }}>
-                Structured long-term memory notes and Q&amp;A knowledge records.
+                Authoritative store for long-term memory records, verification status, and learning event metadata.
               </div>
             </div>
             <div className="row gap3">
-              <span className="chip chip-mono">{memStatus?.sqlite?.memory_count ?? 0} memories</span>
+              <span className="chip chip-mono">{memStatus?.sqlite?.memory_count ?? records.length} memories</span>
               <span className="chip chip-mono">{memStatus?.sqlite?.qa_count ?? 0} Q&amp;A</span>
             </div>
           </div>
@@ -821,10 +914,10 @@ function KnowledgeGraphView({ project }: { project: any }) {
             <div>
               <div className="row gap2" style={{ alignItems: "center" }}>
                 <span className="mono" style={{ fontWeight: 600 }}>ChromaDB</span>
-                <span className="badge">Authoritative</span>
+                <span className="badge">Semantic Index</span>
               </div>
               <div className="fg-2 t-caption" style={{ marginTop: 2 }}>
-                Embedded vector index with FastEmbed &amp; BM25 Reciprocal Rank Fusion for document RAG.
+                Embedded vector index for active semantic memory recall &amp; document RAG chunks.
               </div>
             </div>
             <span className="badge" style={{ color: "var(--ok, #22c55e)" }}>Active</span>
@@ -844,39 +937,225 @@ function KnowledgeGraphView({ project }: { project: any }) {
             <span className="chip chip-mono">{stats?.entity_count ?? 0} nodes · {stats?.relationship_count ?? 0} edges</span>
           </div>
 
-          {/* Markdown */}
-          <div className="card row spread" style={{ padding: 12, alignItems: "center", background: "var(--bg-1)", opacity: 0.85 }}>
+          {/* Markdown Memory */}
+          <div className="card row spread" style={{ padding: 12, alignItems: "center", background: "var(--bg-1)" }}>
             <div>
               <div className="row gap2" style={{ alignItems: "center" }}>
                 <span className="mono" style={{ fontWeight: 600 }}>Markdown Memory</span>
-                <span className="badge" style={{ opacity: 0.7 }}>Planned M2.1</span>
+                <span className="badge" style={{ background: "rgba(34, 197, 94, 0.15)", color: "var(--ok, #22c55e)" }}>Active Writer</span>
               </div>
               <div className="fg-2 t-caption" style={{ marginTop: 2 }}>
-                Human-readable durable summaries under <code>/data/memory</code> (active writer deferred to Milestone 2.1).
+                Human-readable durable projections under <code>/data/memory</code> with atomic UTF-8 writes.
               </div>
             </div>
-            <span className="badge" style={{ opacity: 0.6 }}>Inactive Writer</span>
+            <div className="row gap2">
+              <span className="chip chip-mono">{mdFiles.length} category files</span>
+              {mdFiles.length > 0 && (
+                <button className="btn btn-secondary btn-sm" onClick={() => openMdFile(mdFiles[0].filename)}>
+                  <Icon name="knowledge" size={13} /> View Files
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
-      {/* 3. Automatic Learning Configuration (Locked in M2.0) */}
+      {/* 3. Automatic Learning Configuration & Control */}
       <div className="card" style={{ padding: 20 }}>
-        <div className="row spread" style={{ alignItems: "center" }}>
+        <div className="row spread" style={{ alignItems: "flex-start" }}>
           <div>
             <div className="row gap2" style={{ alignItems: "center" }}>
               <span className="t-h2">Autonomous Memory Learning</span>
-              <span className="badge" style={{ background: "rgba(107, 114, 128, 0.2)", color: "var(--fg-2)" }}>Planned Milestone 2.1</span>
+              <span
+                className="badge"
+                style={{
+                  background: learningSettings?.memory_learning_enabled ? "rgba(34, 197, 94, 0.15)" : "rgba(107, 114, 128, 0.2)",
+                  color: learningSettings?.memory_learning_enabled ? "var(--ok, #22c55e)" : "var(--fg-2)",
+                }}
+              >
+                {learningSettings?.memory_learning_enabled ? "Enabled" : "Disabled (Default)"}
+              </span>
             </div>
             <div className="fg-2 t-caption" style={{ marginTop: 4, maxWidth: 640 }}>
-              Automatic conversation fact extraction, autonomous graph curation, and background memory consolidation are deferred to Milestone 2.1. <code>memory_learning_enabled</code> remains strictly disabled by default.
+              When enabled, Alberto inspects completed conversation turns via the Memory Curator, performs single-pass extraction of durable facts and typed entities, resolves canonical identities in LadybugDB, and updates persistent storage asynchronously without blocking user turns.
+            </div>
+            <div className="row gap3" style={{ marginTop: 8 }}>
+              <span className="t-micro fg-2">
+                Curator Model: <strong>{learningSettings?.memory_curator_effective_model || "Global Default"}</strong>
+              </span>
+              <span className="t-micro fg-2">
+                Graph Manager: <strong>{learningSettings?.graph_manager_effective_model || "Global Default"}</strong>
+              </span>
             </div>
           </div>
-          <div className="row gap2" style={{ alignItems: "center" }}>
-            <span className="badge" style={{ background: "rgba(239, 68, 68, 0.1)", color: "var(--err)", padding: "4px 8px" }}>Disabled (Locked)</span>
-          </div>
+          <button
+            className={`btn btn-sm ${learningSettings?.memory_learning_enabled ? "btn-secondary" : "btn-primary"}`}
+            onClick={toggleLearning}
+            disabled={togglingLearning}
+          >
+            {learningSettings?.memory_learning_enabled ? "Disable Learning" : "Enable Learning"}
+          </button>
         </div>
       </div>
+
+      {/* 4. Review Queue (Candidate Knowledge Requiring Human Review) */}
+      {reviewEvents.length > 0 && (
+        <div className="card" style={{ padding: 20, border: "1px solid var(--accent, #6366f1)" }}>
+          <div className="row spread" style={{ alignItems: "center", marginBottom: 12 }}>
+            <div className="row gap2" style={{ alignItems: "center" }}>
+              <span className="t-h2">Review Queue: Candidate Knowledge</span>
+              <span className="badge" style={{ background: "rgba(99, 102, 241, 0.2)", color: "var(--accent, #6366f1)" }}>
+                {reviewEvents.length} Pending Review
+              </span>
+            </div>
+          </div>
+          <div className="col gap3">
+            {reviewEvents.map((ev) => {
+              const mems = ev.extraction_payload?.memories || [];
+              const ents = ev.extraction_payload?.entities || [];
+              const rels = ev.extraction_payload?.relationships || [];
+              return (
+                <div key={ev.id} className="card" style={{ padding: 14, background: "var(--bg-1)" }}>
+                  <div className="row spread" style={{ alignItems: "flex-start" }}>
+                    <div>
+                      <div className="t-body-sm fg-1">Source: Turn {ev.source_event_id.slice(0, 10)}…</div>
+                      <div className="t-micro fg-2" style={{ marginTop: 2 }}>Status: {ev.status}</div>
+                    </div>
+                    <div className="row gap2">
+                      <button className="btn btn-secondary btn-sm" onClick={() => handleApprove(ev.id)}>
+                        <Icon name="check" size={13} /> Approve
+                      </button>
+                      <button className="btn btn-secondary btn-sm" onClick={() => handleReject(ev.id)}>
+                        <Icon name="close" size={13} /> Reject
+                      </button>
+                    </div>
+                  </div>
+                  <div className="col gap1" style={{ marginTop: 8 }}>
+                    {mems.map((m: any, idx: number) => (
+                      <div key={idx} className="t-body-sm">
+                        • <strong>[{m.kind}]</strong> {m.content} <span className="chip chip-mono t-micro">conf {m.confidence}</span>
+                      </div>
+                    ))}
+                    {ents.length > 0 && (
+                      <div className="t-caption fg-2" style={{ marginTop: 4 }}>
+                        Entities: {ents.map((e: any) => `${e.name} (${e.kind})`).join(", ")}
+                      </div>
+                    )}
+                    {rels.length > 0 && (
+                      <div className="t-caption fg-2">
+                        Relationships: {rels.map((r: any) => `${r.source_ref} -[${r.kind}]-> ${r.target_ref}`).join(", ")}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 5. Authoritative Long-Term Memories Table */}
+      <div className="card" style={{ padding: 20 }}>
+        <div className="row spread" style={{ alignItems: "center", marginBottom: 14 }}>
+          <div>
+            <div className="t-h2">Accepted Long-Term Memories</div>
+            <div className="fg-2 t-caption" style={{ marginTop: 2 }}>
+              Authoritative durable memories stored in SQLite, indexed in ChromaDB, and projected to Markdown.
+            </div>
+          </div>
+          <span className="chip chip-mono">{records.length} records</span>
+        </div>
+
+        {records.length === 0 ? (
+          <div className="fg-2" style={{ padding: 24, textAlign: "center" }}>
+            No memories recorded yet. Enable learning or add explicit memories using <code>remember</code>.
+          </div>
+        ) : (
+          <div className="col gap2">
+            {records.map((r) => (
+              <div key={r.id} className="card row spread" style={{ padding: 12, alignItems: "center", background: "var(--bg-1)" }}>
+                <div style={{ flex: 1, minWidth: 0, marginRight: 16 }}>
+                  <div className="row gap2" style={{ alignItems: "center", marginBottom: 4 }}>
+                    <span className="typechip">{r.kind}</span>
+                    <span className="badge" style={{ color: "var(--ok, #22c55e)" }}>{r.status}</span>
+                    <span className="t-micro fg-2 mono">{r.provenance}</span>
+                    {r.confidence < 1.0 && <span className="chip chip-mono t-micro">{Math.round(r.confidence * 100)}%</span>}
+                  </div>
+                  <div className="t-body-sm" style={{ whiteSpace: "pre-wrap" }}>{r.text}</div>
+                </div>
+                <div className="row gap2" style={{ flex: "none" }}>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => {
+                      setEditingRecord(r);
+                      setEditText(r.text);
+                      setEditKind(r.kind);
+                    }}
+                  >
+                    <Icon name="edit" size={13} /> Edit
+                  </button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => handleDeleteRecord(r.id)}>
+                    <Icon name="trash" size={13} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Edit Modal */}
+      {editingRecord && (
+        <Modal open={true} onClose={() => setEditingRecord(null)} title="Correct Memory Record">
+          <div className="col gap3" style={{ padding: 16 }}>
+            <Field label="Memory Content">
+              <textarea
+                className="input mono-sm"
+                rows={4}
+                value={editText}
+                onChange={(e) => setEditText(e.target.value)}
+              />
+            </Field>
+            <Field label="Category / Kind">
+              <input
+                className="input"
+                value={editKind}
+                onChange={(e) => setEditKind(e.target.value)}
+                placeholder="preference, fact, technology, home, profile"
+              />
+            </Field>
+            <div className="row gap2 end" style={{ marginTop: 12 }}>
+              <button className="btn btn-secondary" onClick={() => setEditingRecord(null)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleSaveEdit}>Save Correction</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Markdown Files Viewer Modal */}
+      {selectedMd && (
+        <Modal open={true} onClose={() => setSelectedMd(null)} title={`Markdown Memory: ${selectedMd}`}>
+          <div className="col gap3" style={{ padding: 16 }}>
+            <div className="row gap2">
+              {mdFiles.map((f) => (
+                <button
+                  key={f.filename}
+                  className={`btn btn-sm ${selectedMd === f.filename ? "btn-primary" : "btn-secondary"}`}
+                  onClick={() => openMdFile(f.filename)}
+                >
+                  {f.filename}
+                </button>
+              ))}
+            </div>
+            <pre className="card" style={{ padding: 14, background: "var(--bg-0)", maxHeight: 400, overflowY: "auto", whiteSpace: "pre-wrap", fontSize: 13 }}>
+              {mdContent || "Loading…"}
+            </pre>
+            <div className="row end">
+              <button className="btn btn-secondary" onClick={() => setSelectedMd(null)}>Close</button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

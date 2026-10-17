@@ -231,6 +231,8 @@ class Settings(BaseSettings):
 
     # --- Memory Learning (Milestone 2.1 toggle, disabled by default) ---
     memory_learning_enabled: bool = False
+    memory_learning_timeout_seconds: float = 30.0
+    memory_learning_max_retries: int = 3
 
 
     # --- Secrets (Fernet master key; file-backed locally, KMS/Vault in prod) ---

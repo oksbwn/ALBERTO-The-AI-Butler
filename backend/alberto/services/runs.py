@@ -1346,6 +1346,24 @@ class RunService:
 
         otel.export(spans, trace_name="run")
 
+        # Milestone 2.1: Asynchronous Conversation Turn Learning Hook (Opt-in per project)
+        if status == "done":
+            try:
+                user_text = _last_user_text(values) or _last_user_text(run.input if isinstance(run.input, dict) else {})
+                ai_text = _last_ai_text(values) or _last_ai_text(serialized_output if isinstance(serialized_output, dict) else {})
+                if user_text and ai_text:
+                    from alberto.services.learning_coordinator import LearningCoordinator
+
+                    await LearningCoordinator.schedule_turn_learning(
+                        tenant_id=run.tenant_id,
+                        project_id=run.project_id,
+                        source_event_id=run.id,
+                        user_message=user_text,
+                        ai_response=ai_text,
+                    )
+            except Exception as e:
+                log.warning("Failed to schedule turn learning for run %s: %s", run.id, e)
+
     async def _finalize_error(self, session, run: Run, tracer: ForgeTracer, error: str, snapshot=None, termination_reason: str | None = None) -> None:
         """Error path: persist the partial trace/spans (so failures are observable, F5),
         mark the run errored via atomic CAS, and never raise."""

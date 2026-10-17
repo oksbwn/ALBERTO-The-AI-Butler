@@ -188,6 +188,13 @@ async def lifespan(app: FastAPI):
         )
         if reaped:
             logging.getLogger("forge.startup").info("Startup sweep reaped %d stale/abandoned runs", reaped)
+    # Immediate startup sweep for pending/interrupted memory learning events (Milestone 2.1)
+    with contextlib.suppress(Exception):
+        from alberto.services.learning_coordinator import LearningCoordinator
+
+        recovered = await LearningCoordinator.recover_pending_events()
+        if recovered:
+            logging.getLogger("forge.startup").info("Startup sweep recovered %d pending learning events", recovered)
     if settings.otel_enabled:
         from alberto.tracing import otel
 

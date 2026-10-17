@@ -105,6 +105,14 @@ def _ensure_new_columns(conn) -> None:
             "tool_calls_count": "INTEGER NOT NULL DEFAULT 0",
             "termination_reason": "VARCHAR(64)",
         },
+        "memories": {
+            "confidence": "FLOAT NOT NULL DEFAULT 1.0",
+            "provenance": "VARCHAR(120) NOT NULL DEFAULT 'manual'",
+            "status": "VARCHAR(20) NOT NULL DEFAULT 'active'",
+            "source_ref": "VARCHAR(120)",
+            "superseded_by": "VARCHAR(36)",
+            "metadata": "JSON DEFAULT '{}'",
+        },
     }
     inspector = inspect(conn)
     for table, columns in wanted.items():
