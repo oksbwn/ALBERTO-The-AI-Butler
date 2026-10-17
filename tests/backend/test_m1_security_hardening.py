@@ -122,7 +122,7 @@ async def test_builtin_side_effect_prevented_when_unauthorized():
             await s.execute(select(Memory).where(Memory.tenant_id == t_id, Memory.project_id == p_id))
         ).scalars().all()
         assert len(mems) == 1
-        assert mems[0].content == secret_fact
+        assert mems[0].text == secret_fact
 
 
 @pytest.mark.asyncio
