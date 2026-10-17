@@ -74,7 +74,9 @@ RUN python -c "import os; from fastembed import TextEmbedding; TextEmbedding(mod
 # Copy Next.js standalone application
 COPY --from=frontend-builder /repo/frontend/.next/standalone ./
 COPY --from=frontend-builder /repo/frontend/.next/static ./frontend/.next/static
+COPY --from=frontend-builder /repo/frontend/.next/static ./.next/static
 COPY --from=frontend-builder /repo/frontend/public ./frontend/public
+COPY --from=frontend-builder /repo/frontend/public ./public
 
 # Copy entrypoint script
 COPY docker/entrypoint.sh /app/docker-entrypoint.sh

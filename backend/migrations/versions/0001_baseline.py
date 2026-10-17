@@ -10,9 +10,9 @@ Create Date: 2026-06-14
 """
 
 from alembic import op
-from forge.db.base import Base
+from alberto.db.base import Base
 
-import forge.models  # noqa: F401 - register tables
+import alberto.models  # noqa: F401 - register tables
 
 revision = "0001_baseline"
 down_revision = None

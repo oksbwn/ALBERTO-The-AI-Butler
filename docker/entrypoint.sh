@@ -46,6 +46,7 @@ FRONTEND_PID=""
 SHUTTING_DOWN=0
 
 cleanup() {
+  local exit_code=$?
   if [[ "$SHUTTING_DOWN" -eq 1 ]]; then
     return
   fi
@@ -77,10 +78,10 @@ cleanup() {
   fi
 
   echo "Alberto shutdown complete."
-  exit 0
+  exit "$exit_code"
 }
 
-trap cleanup SIGINT SIGTERM EXIT
+trap cleanup SIGINT SIGTERM
 
 # 5. Start FastAPI Backend
 echo "Starting FastAPI backend on port ${BACKEND_PORT}..."
@@ -102,10 +103,23 @@ for i in $(seq 1 30); do
 done
 
 # 6. Start Next.js Frontend (standalone server)
-echo "Starting Next.js frontend on port ${FRONTEND_PORT}..."
+if [[ -f "frontend/server.js" ]]; then
+  SERVER_SCRIPT="frontend/server.js"
+elif [[ -f "server.js" ]]; then
+  SERVER_SCRIPT="server.js"
+else
+  SERVER_SCRIPT="$(find . -maxdepth 3 -name server.js 2>/dev/null | head -n 1)"
+fi
+
+if [[ -z "$SERVER_SCRIPT" || ! -f "$SERVER_SCRIPT" ]]; then
+  echo "❌ Error: Could not find Next.js server.js in /app" >&2
+  exit 1
+fi
+
+echo "Starting Next.js frontend with ${SERVER_SCRIPT} on port ${FRONTEND_PORT}..."
 export PORT="${FRONTEND_PORT}"
 export HOSTNAME="0.0.0.0"
-node frontend/server.js &
+node "$SERVER_SCRIPT" &
 FRONTEND_PID=$!
 
 sleep 1

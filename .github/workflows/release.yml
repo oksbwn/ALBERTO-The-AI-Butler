@@ -160,14 +160,23 @@ jobs:
           fi
 
           echo "Testing frontend accessibility (http://127.0.0.1:3000)..."
-          FRONTEND_HTTP="$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000)"
-          if [[ "$FRONTEND_HTTP" != "200" && "$FRONTEND_HTTP" != "307" && "$FRONTEND_HTTP" != "308" ]]; then
-            echo "❌ Error: Frontend returned unexpected HTTP status: $FRONTEND_HTTP" >&2
+          FRONTEND_OK=0
+          for i in $(seq 1 30); do
+            FRONTEND_HTTP="$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000 || echo "000")"
+            if [[ "$FRONTEND_HTTP" == "200" || "$FRONTEND_HTTP" == "307" || "$FRONTEND_HTTP" == "308" ]]; then
+              FRONTEND_OK=1
+              echo "✓ Frontend responded with HTTP $FRONTEND_HTTP after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          if [[ "$FRONTEND_OK" -ne 1 ]]; then
+            echo "❌ Error: Frontend failed to respond within 30s (last HTTP: $FRONTEND_HTTP). Container logs:" >&2
             docker logs alberto-smoke >&2
             docker rm -f alberto-smoke >/dev/null 2>&1 || true
             exit 1
           fi
-          echo "✓ Frontend responded with HTTP $FRONTEND_HTTP"
 
           echo "Testing version endpoint..."
           VERSION_HTTP="$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/readyz)"
