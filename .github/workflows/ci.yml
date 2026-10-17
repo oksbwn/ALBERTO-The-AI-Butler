@@ -1,26 +1,24 @@
-name: Alberto CI/CD Pipeline
+name: Alberto CI
 
 on:
   push:
     branches: ["**"]
-    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
   pull_request:
     branches: ["**"]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  # ============================================================================
-  # 1. Quality Gate (Runs for all branches and pull requests)
-  # ============================================================================
   validate:
     name: Lint, Test & Build Validation
     runs-on: ubuntu-latest
+    # Skip branch push CI if the commit is an official release commit (Release pipeline runs on the tag)
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -53,180 +51,3 @@ jobs:
         run: |
           chmod +x tests/check.sh tests/lint.sh tests/run.sh
           ./tests/check.sh
-
-  # ============================================================================
-  # 2. Release Gate & GHCR Publication (Strictly triggered by release tags)
-  # ============================================================================
-  release:
-    name: Release Gate & GHCR Publishing
-    runs-on: ubuntu-latest
-    needs: [validate]
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout Tagged Commit
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # ------------------------------------------------------------------------
-      # Independent Release Safeguards
-      # ------------------------------------------------------------------------
-      - name: Validate Release Tag Integrity & History
-        run: |
-          TAG_NAME="${GITHUB_REF#refs/tags/}"
-          echo "Inspecting release tag: $TAG_NAME"
-
-          # 1. Validate full semver format (vMAJOR.MINOR.PATCH)
-          if ! [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "❌ Error: Tag '$TAG_NAME' does not match strict semver format vX.Y.Z" >&2
-            exit 1
-          fi
-
-          # 2. Confirm tag matches canonical version.json
-          if [[ ! -f "version.json" ]]; then
-            echo "❌ Error: version.json not found in repository root" >&2
-            exit 1
-          fi
-
-          JSON_VERSION="$(jq -r .version version.json)"
-          JSON_TAG="$(jq -r .tag version.json)"
-
-          if [[ "$TAG_NAME" != "$JSON_TAG" ]]; then
-            echo "❌ Error: Tag mismatch: git tag is '$TAG_NAME' but version.json tag is '$JSON_TAG'" >&2
-            exit 1
-          fi
-
-          if [[ "v$JSON_VERSION" != "$JSON_TAG" ]]; then
-            echo "❌ Error: Inconsistent version.json: version '$JSON_VERSION' does not match tag '$JSON_TAG'" >&2
-            exit 1
-          fi
-
-          # 3. Confirm tagged commit belongs to master branch history
-          git fetch origin master
-          if ! git merge-base --is-ancestor HEAD origin/master; then
-            echo "❌ Error: Tagged commit $(git rev-parse HEAD) is NOT in master branch history" >&2
-            exit 1
-          fi
-
-          # 4. Confirm the tag is an annotated tag (not a lightweight tag)
-          # In Git, an annotated tag has a dereferenced commit object peeled via ^{} in ls-remote
-          if ! git ls-remote origin "refs/tags/$TAG_NAME^{}" | grep -q "$TAG_NAME"; then
-            echo "❌ Error: Tag '$TAG_NAME' must be an annotated git tag" >&2
-            exit 1
-          fi
-
-          echo "✓ All release tag integrity safeguards passed."
-
-      # ------------------------------------------------------------------------
-      # Single Docker Image Build & Validation
-      # ------------------------------------------------------------------------
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Unified Docker Image (Local Test Target)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./docker/Dockerfile
-          load: true
-          tags: alberto:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Container Smoke Test & Lifecycle Validation
-        run: |
-          echo "Starting container smoke test..."
-          TEST_DATA="$(mktemp -d)"
-
-          # Start unified container with mounted data volume
-          docker run -d \
-            --name alberto-smoke \
-            -p 3000:3000 \
-            -p 8000:8000 \
-            -v "$TEST_DATA:/data" \
-            -e ALBERTO_ENVIRONMENT=test \
-            -e ALBERTO_DATA_DIR=/data \
-            -e ALBERTO_JWT_SECRET=test-secret-key-for-container-smoke-testing-32chars \
-            alberto:test
-
-          echo "Polling health endpoint (http://127.0.0.1:8000/readyz)..."
-          READY=0
-          for i in $(seq 1 45); do
-            if curl -fsS http://127.0.0.1:8000/readyz >/dev/null 2>&1; then
-              READY=1
-              echo "✓ Backend healthcheck passed after ${i}s"
-              break
-            fi
-            sleep 1
-          done
-
-          if [[ "$READY" -ne 1 ]]; then
-            echo "❌ Error: Backend failed to become ready within 45s. Container logs:" >&2
-            docker logs alberto-smoke >&2
-            docker rm -f alberto-smoke >/dev/null 2>&1 || true
-            exit 1
-          fi
-
-          echo "Testing frontend accessibility (http://127.0.0.1:3000)..."
-          FRONTEND_HTTP="$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000)"
-          if [[ "$FRONTEND_HTTP" != "200" && "$FRONTEND_HTTP" != "307" && "$FRONTEND_HTTP" != "308" ]]; then
-            echo "❌ Error: Frontend returned unexpected HTTP status: $FRONTEND_HTTP" >&2
-            docker logs alberto-smoke >&2
-            docker rm -f alberto-smoke >/dev/null 2>&1 || true
-            exit 1
-          fi
-          echo "✓ Frontend responded with HTTP $FRONTEND_HTTP"
-
-          echo "Testing version endpoint..."
-          VERSION_HTTP="$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/readyz)"
-          if [[ "$VERSION_HTTP" != "200" ]]; then
-            echo "❌ Error: Health probe failed: $VERSION_HTTP" >&2
-            exit 1
-          fi
-          echo "✓ Health probe returned 200"
-
-          echo "Testing persistent storage mount..."
-          if [[ ! -d "$TEST_DATA/db" ]]; then
-            echo "❌ Error: Persistent /data/db directory was not initialized" >&2
-            exit 1
-          fi
-          echo "✓ Persistent storage /data initialized successfully"
-
-          echo "Testing graceful container shutdown..."
-          docker stop --time 15 alberto-smoke
-          docker rm alberto-smoke
-          rm -rf "$TEST_DATA"
-          echo "✓ Container smoke tests passed completely."
-
-      # ------------------------------------------------------------------------
-      # GHCR Single-Image Publication
-      # ------------------------------------------------------------------------
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Docker Image Metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/alberto
-          tags: |
-            type=semver,pattern={{version}}
-            type=sha,prefix=sha-
-            type=raw,value=latest
-
-      - name: Publish Unified Image to GHCR
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./docker/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha

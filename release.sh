@@ -89,26 +89,15 @@ if [[ "$CURRENT_BRANCH" != "master" ]]; then
 fi
 echo "    ✓ Current branch is 'master'"
 
-# Check git working tree and staging area are clean
-if ! git diff --quiet; then
-  echo "❌ Error: Git working tree contains unstaged changes. Repository must be clean." >&2
-  git status --short >&2
-  exit 1
+# Check git working tree status
+HAS_UNCOMMITTED=false
+if ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git status --porcelain)" ]]; then
+  HAS_UNCOMMITTED=true
+  echo "    ℹ Working tree contains uncommitted changes. These will be validated and included in the release commit:"
+  git status --short
+else
+  echo "    ✓ Git working tree is clean"
 fi
-
-if ! git diff --cached --quiet; then
-  echo "❌ Error: Git staging area contains uncommitted changes. Repository must be clean." >&2
-  git status --short >&2
-  exit 1
-fi
-
-UNTRACKED="$(git status --porcelain | grep '^??' || true)"
-if [[ -n "$UNTRACKED" ]]; then
-  echo "❌ Error: Untracked files present in repository:" >&2
-  echo "$UNTRACKED" >&2
-  exit 1
-fi
-echo "    ✓ Git working tree and staging area are clean"
 
 # Check remote origin exists
 if ! git remote get-url origin >/dev/null 2>&1; then
@@ -124,17 +113,20 @@ git fetch origin master --tags --quiet || {
   exit 1
 }
 
-# Verify local master is synchronized with origin/master
+# Verify local master is not behind origin/master
 LOCAL_SHA="$(git rev-parse HEAD)"
-REMOTE_SHA="$(git rev-parse origin/master)"
-if [[ "$LOCAL_SHA" != "$REMOTE_SHA" ]]; then
-  echo "❌ Error: Local master ($LOCAL_SHA) is not synchronized with origin/master ($REMOTE_SHA)." >&2
-  BEHIND="$(git rev-list --count HEAD..origin/master)"
-  AHEAD="$(git rev-list --count origin/master..HEAD)"
-  echo "   Local master is $AHEAD commit(s) ahead, $BEHIND commit(s) behind origin/master." >&2
+BEHIND="$(git rev-list --count HEAD..origin/master)"
+if [[ "$BEHIND" -gt 0 ]]; then
+  echo "❌ Error: Local master is behind origin/master by $BEHIND commit(s). Pull or rebase before releasing." >&2
   exit 1
 fi
-echo "    ✓ Local master is synchronized with origin/master ($LOCAL_SHA)"
+
+AHEAD="$(git rev-list --count origin/master..HEAD)"
+if [[ "$AHEAD" -gt 0 ]]; then
+  echo "    ℹ Local master is $AHEAD commit(s) ahead of origin/master (will be pushed together)."
+else
+  echo "    ✓ Local master is synchronized with origin/master ($LOCAL_SHA)"
+fi
 
 # Validate version.json
 VERSION_FILE="$REPO_ROOT/version.json"
@@ -239,7 +231,10 @@ if [[ "$DRY_RUN" == true ]]; then
   echo " Branch Target     : master -> origin/master"
   echo " Validation Action : Would execute ./tests/check.sh"
   echo " Mutation Action   : Would update version.json to version: $NEXT_VERSION, tag: $NEXT_TAG"
-  echo " Git Commit Action : chore(release): $NEXT_TAG"
+  echo " Git Commit Action : Stage all changes (git add -A) and commit: chore(release): $NEXT_TAG"
+  if [[ "$HAS_UNCOMMITTED" == true ]]; then
+    echo " Files Included    : Uncommitted working tree changes will be included in the release commit"
+  fi
   echo " Git Tag Action    : Annotated tag $NEXT_TAG"
   echo " Git Push Action   : Atomic push to origin master and tag $NEXT_TAG"
   echo ""
@@ -272,12 +267,7 @@ if [[ "$CHECK_BRANCH" != "master" ]]; then
   echo "❌ Error: Branch changed unexpectedly during quality checks (now '$CHECK_BRANCH'). Aborting." >&2
   exit 1
 fi
-
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "❌ Error: Working tree became dirty during quality checks. Aborting." >&2
-  git status --short >&2
-  exit 1
-fi
+echo "    ✓ Branch verified on 'master'"
 
 # ------------------------------------------------------------------------------
 # 5. Version Update, Commit, Tag, Push
@@ -302,8 +292,8 @@ assert data['version'] == '$NEXT_VERSION'
 assert data['tag'] == '$NEXT_TAG'
 "
 
-# Stage only version.json
-git add version.json
+# Stage all files including version.json and uncommitted changes
+git add -A
 
 # Commit
 git commit -m "chore(release): $NEXT_TAG"

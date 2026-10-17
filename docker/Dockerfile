@@ -17,6 +17,7 @@ COPY frontend/package.json frontend/package.json
 RUN pnpm install --frozen-lockfile || pnpm install
 
 COPY . .
+RUN mkdir -p frontend/public
 
 # Server-side proxy target: defaults to local backend at 127.0.0.1:8000
 ARG ALBERTO_API_URL=http://127.0.0.1:8000

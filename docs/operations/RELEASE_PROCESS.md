@@ -60,17 +60,17 @@ Alberto strictly follows [Semantic Versioning 2.0.0](https://semver.org/):
 
 Before modifying any file, `./release.sh` verifies:
 1. **Branch Restriction:** Must be executed on the `master` branch. Detached HEAD and other branches are rejected immediately.
-2. **Clean Workspace:** Unstaged changes, staged changes, and untracked files are rejected.
-3. **Remote Synchronization:** Remote `origin` must exist, and local `master` must match `origin/master` exactly.
+2. **Working Tree Status:** Uncommitted files (modified, untracked, or staged) are permitted. If present, they are reported and will be validated and included in the release commit.
+3. **Remote Synchronization:** Remote `origin` must exist, and local `master` must not be behind `origin/master`.
 4. **Tag Availability:** The proposed release tag must not exist locally or on `origin`.
-5. **Quality Verification:** Executes `./tests/check.sh` completely before touching `version.json`.
+5. **Quality Verification:** Executes `./tests/check.sh` completely over the working tree before touching `version.json`.
 
 ### Release Execution Sequence
 
 When all checks pass:
 1. Calculates the next semantic version.
 2. Updates `version.json`.
-3. Stages only `version.json`.
+3. Stages all changes (`git add -A`), including `version.json` and any uncommitted workspace changes.
 4. Creates an annotated Git commit: `chore(release): vX.Y.Z`.
 5. Creates an annotated Git tag: `vX.Y.Z`.
 6. Executes an atomic push of branch and tag to `origin`: `git push --atomic origin master vX.Y.Z`.
@@ -98,32 +98,33 @@ Run the complete gate locally at any time:
 
 ## 5. CI/CD Architecture (GitHub Actions)
 
-Workflow file: `.github/workflows/ci.yml`
+Alberto separates continuous integration and release delivery into two dedicated pipelines to eliminate redundant concurrent runs:
 
-### Regular Branch Pushes & Pull Requests
+### 1. Continuous Integration (`.github/workflows/ci.yml`)
 
-Triggered on pushes to any branch and pull requests.
-- Runs: `./tests/check.sh` in a clean Ubuntu runner.
-- **Does NOT** tag, release, or publish Docker images.
+- **Trigger:** Pushes to branches and pull requests.
+- **Deduplication:** Automatically skips commits with message starting with `chore(release):` since the release pipeline will run on the tag.
+- **Workflow:** Runs `./tests/check.sh` in a clean Ubuntu runner. Does NOT build or publish Docker images.
 
-### Release Tag Pushes (`v*`)
+### 2. Release & Publish Pipeline (`.github/workflows/release.yml`)
 
-Triggered strictly by tags matching `v[0-9]+.[0-9]+.[0-9]+*`.
-1. **Independent CI Verification:**
-   - Validates semver tag syntax.
-   - Verifies `tag` in `version.json` matches git tag.
-   - Verifies tagged commit is an ancestor of `master`.
-   - Validates that the git tag is an annotated tag.
-2. **Quality Gate:** Re-executes `./tests/check.sh`.
-3. **Docker Build:** Builds unified multi-stage Docker image.
-4. **Container Smoke Testing:**
-   - Starts container with mounted test volume.
-   - Probes FastAPI readiness (`/readyz`).
-   - Verifies Next.js frontend responds (`:3000`).
-   - Verifies `/data` persistent structure initialization.
-   - Tests graceful container termination (`SIGTERM`).
-5. **GHCR Publishing:**
-   - Publishes to `ghcr.io/<owner>/alberto:vX.Y.Z`, `latest`, and `sha-<commit>`.
+- **Trigger:** Strictly triggered by version tags matching `v[0-9]+.[0-9]+.[0-9]+*`.
+- **Workflow:**
+  1. **Quality Gate:** Re-executes `./tests/check.sh`.
+  2. **Independent CI Verification:**
+     - Validates semver tag syntax.
+     - Verifies `tag` in `version.json` matches git tag.
+     - Verifies tagged commit is an ancestor of `master`.
+     - Validates that the git tag is an annotated tag.
+  3. **Docker Build:** Builds unified multi-stage Docker image with Buildx caching.
+  4. **Container Smoke Testing:**
+     - Starts container with mounted test volume.
+     - Probes FastAPI readiness (`/readyz`).
+     - Verifies Next.js frontend responds (`:3000`).
+     - Verifies `/data` persistent structure initialization.
+     - Tests graceful container termination (`SIGTERM`).
+  5. **GHCR Publishing:**
+     - Publishes to `ghcr.io/<owner>/alberto:vX.Y.Z`, `latest`, and `sha-<commit>`.
 
 ---
 

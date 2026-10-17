@@ -94,13 +94,13 @@ When `--dry-run` is invoked:
 Before modifying any files or committing, `release.sh` verifies 9 mandatory preflight assertions:
 
 1. **Branch Strictness:** Must be on branch `master`. Any detached HEAD or other branch terminates immediately with an error. No auto-checkout.
-2. **Clean Working Tree:** `git diff --quiet` and `git diff --cached --quiet` must pass; untracked files are blocked.
+2. **Working Tree Handling:** Uncommitted workspace changes (unstaged, staged, untracked) are detected, reported, validated through `./tests/check.sh`, and staged (`git add -A`) into the release commit (`chore(release): vX.Y.Z`).
 3. **Remote Existence:** Remote `origin` must exist and be accessible.
-4. **Synchronization:** Remote state is fetched (`git fetch origin master --tags --quiet`), and `LOCAL_SHA` must equal `REMOTE_SHA`.
+4. **Synchronization:** Remote state is fetched (`git fetch origin master --tags --quiet`), and local `master` must not be behind `origin/master`.
 5. **Version Consistency:** `version.json` must be valid JSON with valid semver matching `v + version`.
 6. **Tag Collisions:** Proposed release tag must not exist locally (`git rev-parse`) or on remote `origin` (`git ls-remote`).
 7. **Dependencies:** Verifies python and check script presence.
-8. **Mandatory Quality Gate:** Executes `./tests/check.sh`. Any failure terminates the release.
+8. **Mandatory Quality Gate:** Executes `./tests/check.sh` over all working files. Any failure terminates the release.
 9. **Atomic Push:** Pushes both branch commit and annotated tag atomically (`git push --atomic origin master vX.Y.Z`). If unsupported, safely provides clear recovery commands.
 
 ---
