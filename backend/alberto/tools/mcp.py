@@ -513,6 +513,38 @@ def describe_mcp_error(e: BaseException) -> str:
     return "; ".join(unique[:3]) or str(e) or type(e).__name__
 
 
+def _wrap_with_timeout(tool, timeout_seconds: float | None = None):
+    """Enforce execution timeout on remote MCP tool invocation to prevent hung worker loops."""
+    from langchain_core.tools import StructuredTool
+
+    from alberto.config import settings
+
+    t_sec = float(timeout_seconds if timeout_seconds is not None else getattr(settings, "mcp_tool_timeout_seconds", 30))
+    underlying = tool
+
+    async def _call(**kwargs):
+        try:
+            async with asyncio.timeout(t_sec):
+                return await underlying.ainvoke(kwargs)
+        except TimeoutError:
+            log.warning("MCP tool %r timed out after %.1fs", getattr(underlying, "name", "mcp_tool"), t_sec)
+            return f"Error: MCP tool {getattr(underlying, 'name', 'mcp_tool')!r} timed out after {t_sec} seconds"
+
+    def _sync(**kwargs):
+        try:
+            return underlying.invoke(kwargs)
+        except Exception as e:
+            return f"Error executing MCP tool: {e}"
+
+    return StructuredTool.from_function(
+        func=_sync,
+        coroutine=_call,
+        name=underlying.name,
+        description=underlying.description,
+        args_schema=underlying.args_schema,
+    )
+
+
 async def server_tools(client_row: McpClient, tenant_id: str, project_id: str,
                        context: dict | None = None) -> list:
     """Native LangChain tools a server exposes, minus the ones toggled off (disabled_tools).
@@ -520,7 +552,8 @@ async def server_tools(client_row: McpClient, tenant_id: str, project_id: str,
     dims so a per-user auth provider resolves THIS caller's credential."""
     _client, tools = await _client_and_tools(client_row, tenant_id, project_id, context)
     disabled = set(getattr(client_row, "disabled_tools", None) or [])
-    return [t for t in tools if t.name not in disabled]
+    active = [t for t in tools if t.name not in disabled]
+    return [_wrap_with_timeout(t) for t in active]
 
 
 def auth_context_from(ctx) -> dict:
@@ -577,6 +610,7 @@ async def load_mcp_tool(cfg: dict, ctx) -> Any:
         raise McpUnavailable(f"remote tool {name!r} not exposed by MCP server {row.name!r}")
     inject = cfg.get("inject_context") or []
     tool = _wrap_with_context_injection(match, inject) if inject else match
+    tool = _wrap_with_timeout(tool, cfg.get("timeout_seconds"))
     from alberto.tools.materialize import entitlement_denial
 
     if cfg.get("required_entitlements"):

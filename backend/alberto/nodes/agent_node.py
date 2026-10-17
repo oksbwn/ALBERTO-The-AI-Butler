@@ -119,6 +119,40 @@ _TASK_TOOL_PROMPT = (
 )
 
 
+def _ensure_safety_middleware(middleware: list[Any]) -> list[Any]:
+    """Ensure mandatory safety limits are applied on every ReAct/subagent execution."""
+    from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
+
+    from alberto.config import settings
+    from alberto.engine.middleware_compiler import RepeatedToolCallMiddleware
+
+    out = list(middleware)
+    has_model_limit = False
+    has_tool_limit = False
+    has_repeated_guard = False
+
+    for m in out:
+        if isinstance(m, ModelCallLimitMiddleware):
+            has_model_limit = True
+            if m.run_limit is None or m.run_limit > settings.max_model_calls_per_run:
+                m.run_limit = settings.max_model_calls_per_run
+        elif isinstance(m, ToolCallLimitMiddleware) and getattr(m, "tool_name", None) is None:
+            has_tool_limit = True
+            if m.run_limit is None or m.run_limit > settings.max_tool_calls_per_run:
+                m.run_limit = settings.max_tool_calls_per_run
+        elif isinstance(m, RepeatedToolCallMiddleware):
+            has_repeated_guard = True
+
+    if not has_model_limit:
+        out.append(ModelCallLimitMiddleware(run_limit=settings.max_model_calls_per_run, exit_behavior="error"))
+    if not has_tool_limit:
+        out.append(ToolCallLimitMiddleware(run_limit=settings.max_tool_calls_per_run, exit_behavior="error"))
+    if not has_repeated_guard:
+        out.append(RepeatedToolCallMiddleware(max_repeats=settings.max_repeated_no_progress_calls))
+
+    return out
+
+
 def build_subagents(subagents_cfg: list[dict], ctx: CompileContext, default_model: Any = None) -> list[dict]:
     """Convert subagent configs to the SubAgent dict shape SubAgentMiddleware expects.
 
@@ -141,8 +175,8 @@ def build_subagents(subagents_cfg: list[dict], ctx: CompileContext, default_mode
             "tools": _dedup_tools_by_name(ctx.tools_for(ctx.resolve_tool_ids(sa.get("tools"), sa.get("toolsets")))),
             "model": resolve_model(sa["model"], ctx) if sa.get("model") else (default_model or resolve_model(None, ctx)),
         }
-        if sa.get("middleware"):
-            spec["middleware"] = build_middleware(sa["middleware"], ctx)
+        sub_mw = build_middleware(sa["middleware"], ctx) if sa.get("middleware") else []
+        spec["middleware"] = _ensure_safety_middleware(sub_mw)
         out.append(spec)
     return out
 
@@ -317,6 +351,7 @@ def _resolve_config(config: dict, ctx: CompileContext) -> dict:
 def agent_factory(config: dict, ctx: CompileContext):
     config = _resolve_config(config, ctx)
     common = _common_kwargs(config, ctx)
+    common["middleware"] = _ensure_safety_middleware(common.get("middleware") or [])
 
     from langchain.agents import create_agent
 

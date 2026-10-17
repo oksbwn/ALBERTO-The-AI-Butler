@@ -84,13 +84,21 @@ def _ensure_new_columns(conn) -> None:
         "tool_sets": {"exposed": "BOOLEAN NOT NULL DEFAULT 1"},
         "projects": {"embed_key": "VARCHAR(64)"},
         "spans": {"input": "JSON", "output": "JSON"},
-        "runs": {"source": "VARCHAR(40) NOT NULL DEFAULT 'playground'"},
+        "runs": {
+            "source": "VARCHAR(40) NOT NULL DEFAULT 'playground'",
+            "iterations_count": "INTEGER NOT NULL DEFAULT 0",
+            "tool_calls_count": "INTEGER NOT NULL DEFAULT 0",
+            "termination_reason": "VARCHAR(64)",
+        },
         "traces": {
             "source": "VARCHAR(40) NOT NULL DEFAULT 'playground'",
             "actor": "VARCHAR(300) NOT NULL DEFAULT 'System'",
             "end_user_id": "VARCHAR(200)",
             "user_message": "TEXT",
             "ai_response": "TEXT",
+            "iterations_count": "INTEGER NOT NULL DEFAULT 0",
+            "tool_calls_count": "INTEGER NOT NULL DEFAULT 0",
+            "termination_reason": "VARCHAR(64)",
         },
     }
     inspector = inspect(conn)

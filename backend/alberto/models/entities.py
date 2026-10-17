@@ -274,6 +274,9 @@ class Run(PkTimestamp, Base):
     ended_at: Mapped[datetime | None] = mapped_column(nullable=True)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    iterations_count: Mapped[int] = mapped_column(Integer, default=0)
+    tool_calls_count: Mapped[int] = mapped_column(Integer, default=0)
+    termination_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class Trace(PkTimestamp, Base):
@@ -290,6 +293,9 @@ class Trace(PkTimestamp, Base):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    iterations_count: Mapped[int] = mapped_column(Integer, default=0)
+    tool_calls_count: Mapped[int] = mapped_column(Integer, default=0)
+    termination_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # --- Conversation view (Traces): one Trace = one turn; group by thread_id for a session. ---
     # Origin of the turn (copied from Run.source; assistant turns = "assistant").
     # Indexed: the Traces filter facets run a DISTINCT over this column.
