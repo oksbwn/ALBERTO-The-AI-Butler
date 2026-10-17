@@ -4,12 +4,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "../icons";
 import { Drawer, Field, Modal, Segmented, StatusPill } from "../primitives";
-import { api, ActivityEntry, KbSource, QaPair, SearchHit } from "@/lib/api";
+import { api, ActivityEntry, GraphStats, KbSource, MemoryStatus, QaPair, SearchHit } from "@/lib/api";
 import { ChunkMap } from "./chunk-map";
 
 const VTABS = [
   { value: "files", label: "Files", icon: "knowledge" },
   { value: "qa", label: "Q&A pairs", icon: "n_qa" },
+  { value: "graph", label: "Knowledge Graph", icon: "n_router" },
   { value: "search", label: "Search debugger", icon: "search" },
   { value: "map", label: "Chunk map", icon: "layers" },
 ] as const;
@@ -62,6 +63,7 @@ export function KnowledgeScreen({ project }: { project: any }) {
           <div style={{ maxWidth: 1400 }}>
             {tab === "files" && <Files project={project} />}
             {tab === "qa" && <QA project={project} />}
+            {tab === "graph" && <KnowledgeGraphView project={project} />}
             {tab === "search" && <SearchDebugger project={project} />}
             {tab === "map" && <ChunkMap project={project} />}
           </div>
@@ -710,5 +712,171 @@ function SearchDebugger({ project }: { project: any }) {
         {searched && hits.length === 0 && <div className="fg-2" style={{ padding: 22, textAlign: "center" }}>No matches. Add sources first.</div>}
       </div>
     </>
+  );
+}
+
+/* ============ KNOWLEDGE GRAPH & UNIFIED MEMORY ============ */
+function KnowledgeGraphView({ project }: { project: any }) {
+  const [stats, setStats] = useState<GraphStats | null>(null);
+  const [memStatus, setMemStatus] = useState<MemoryStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  const reload = useCallback(() => {
+    if (!project?.id) return;
+    setLoading(true);
+    setErr(null);
+    Promise.all([
+      api.graphStats(project.id).catch((e) => { console.warn(e); return null; }),
+      api.memoryStatus(project.id).catch((e) => { console.warn(e); return null; }),
+    ])
+      .then(([g, m]) => {
+        setStats(g);
+        setMemStatus(m);
+      })
+      .catch((e: any) => setErr(e?.message || "Failed to load Knowledge Graph status."))
+      .finally(() => setLoading(false));
+  }, [project?.id]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  return (
+    <div className="col gap4">
+      {/* 1. Knowledge Graph Header Card */}
+      <div className="card" style={{ padding: 20 }}>
+        <div className="row spread" style={{ alignItems: "flex-start", marginBottom: 14 }}>
+          <div>
+            <div className="row gap2" style={{ alignItems: "center" }}>
+              <span className="t-h1">Knowledge Graph</span>
+              <span
+                className="badge"
+                style={{
+                  background: stats?.is_available ? "rgba(34, 197, 94, 0.15)" : "rgba(239, 68, 68, 0.15)",
+                  color: stats?.is_available ? "var(--ok, #22c55e)" : "var(--err, #ef4444)",
+                }}
+              >
+                {stats?.is_available ? "Online (Embedded)" : "Unavailable"}
+              </span>
+            </div>
+            <div className="fg-1" style={{ marginTop: 4, maxWidth: 680 }}>
+              Native embedded property graph powered by <strong>LadybugDB</strong>. Single-process ownership managed by Alberto backend with process-level lock. All traversals and queries enforce strict multi-tenant and project scoping.
+            </div>
+          </div>
+          <button className="btn btn-secondary btn-sm" onClick={reload} disabled={loading}>
+            <Icon name={loading ? "refresh" : "check"} size={13} style={loading ? { animation: "spin 1s linear infinite" } : {}} />
+            {loading ? "Checking…" : "Refresh"}
+          </button>
+        </div>
+
+        {err && <div className="card" style={{ padding: 12, background: "rgba(239, 68, 68, 0.1)", color: "var(--err)" }}>{err}</div>}
+
+        <div className="row gap3" style={{ flexWrap: "wrap", marginTop: 12 }}>
+          <div className="card grow" style={{ padding: 14, minWidth: 180, background: "var(--bg-1)" }}>
+            <div className="t-caption fg-2">Scoped Entities</div>
+            <div className="t-display" style={{ marginTop: 4 }}>{stats?.entity_count ?? 0}</div>
+            <div className="fg-2 t-micro" style={{ marginTop: 4 }}>Nodes in this project scope</div>
+          </div>
+          <div className="card grow" style={{ padding: 14, minWidth: 180, background: "var(--bg-1)" }}>
+            <div className="t-caption fg-2">Scoped Relationships</div>
+            <div className="t-display" style={{ marginTop: 4 }}>{stats?.relationship_count ?? 0}</div>
+            <div className="fg-2 t-micro" style={{ marginTop: 4 }}>Typed edges connecting entities</div>
+          </div>
+          <div className="card grow" style={{ padding: 14, minWidth: 260, background: "var(--bg-1)" }}>
+            <div className="t-caption fg-2">Storage Engine &amp; Path</div>
+            <div className="mono-sm truncate" style={{ marginTop: 6 }}>{stats?.storage_path || "/data/db/ladybug/graph.db"}</div>
+            <div className="fg-2 t-micro" style={{ marginTop: 4 }}>Process lock: backend singleton owner</div>
+          </div>
+        </div>
+      </div>
+
+      {/* 2. Unified Memory Foundation Overview */}
+      <div className="card" style={{ padding: 20 }}>
+        <div className="t-h2" style={{ marginBottom: 6 }}>Unified Memory Architecture</div>
+        <div className="fg-1" style={{ marginBottom: 16 }}>
+          Alberto Milestone 2.0 coordinates four purpose-built storage engines under <code>/data</code> through a Unified Memory Manager.
+        </div>
+
+        <div className="col gap2">
+          {/* SQLite */}
+          <div className="card row spread" style={{ padding: 12, alignItems: "center", background: "var(--bg-1)" }}>
+            <div>
+              <div className="row gap2" style={{ alignItems: "center" }}>
+                <span className="mono" style={{ fontWeight: 600 }}>SQLite</span>
+                <span className="badge">Authoritative</span>
+              </div>
+              <div className="fg-2 t-caption" style={{ marginTop: 2 }}>
+                Structured long-term memory notes and Q&amp;A knowledge records.
+              </div>
+            </div>
+            <div className="row gap3">
+              <span className="chip chip-mono">{memStatus?.sqlite?.memory_count ?? 0} memories</span>
+              <span className="chip chip-mono">{memStatus?.sqlite?.qa_count ?? 0} Q&amp;A</span>
+            </div>
+          </div>
+
+          {/* ChromaDB */}
+          <div className="card row spread" style={{ padding: 12, alignItems: "center", background: "var(--bg-1)" }}>
+            <div>
+              <div className="row gap2" style={{ alignItems: "center" }}>
+                <span className="mono" style={{ fontWeight: 600 }}>ChromaDB</span>
+                <span className="badge">Authoritative</span>
+              </div>
+              <div className="fg-2 t-caption" style={{ marginTop: 2 }}>
+                Embedded vector index with FastEmbed &amp; BM25 Reciprocal Rank Fusion for document RAG.
+              </div>
+            </div>
+            <span className="badge" style={{ color: "var(--ok, #22c55e)" }}>Active</span>
+          </div>
+
+          {/* LadybugDB */}
+          <div className="card row spread" style={{ padding: 12, alignItems: "center", background: "var(--bg-1)" }}>
+            <div>
+              <div className="row gap2" style={{ alignItems: "center" }}>
+                <span className="mono" style={{ fontWeight: 600 }}>LadybugDB</span>
+                <span className="badge" style={{ background: "rgba(6, 182, 212, 0.15)", color: "var(--cyan, #06b6d4)" }}>Knowledge Graph</span>
+              </div>
+              <div className="fg-2 t-caption" style={{ marginTop: 2 }}>
+                Native embedded graph storing typed entity nodes and relationships with Cypher path traversal.
+              </div>
+            </div>
+            <span className="chip chip-mono">{stats?.entity_count ?? 0} nodes · {stats?.relationship_count ?? 0} edges</span>
+          </div>
+
+          {/* Markdown */}
+          <div className="card row spread" style={{ padding: 12, alignItems: "center", background: "var(--bg-1)", opacity: 0.85 }}>
+            <div>
+              <div className="row gap2" style={{ alignItems: "center" }}>
+                <span className="mono" style={{ fontWeight: 600 }}>Markdown Memory</span>
+                <span className="badge" style={{ opacity: 0.7 }}>Planned M2.1</span>
+              </div>
+              <div className="fg-2 t-caption" style={{ marginTop: 2 }}>
+                Human-readable durable summaries under <code>/data/memory</code> (active writer deferred to Milestone 2.1).
+              </div>
+            </div>
+            <span className="badge" style={{ opacity: 0.6 }}>Inactive Writer</span>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. Automatic Learning Configuration (Locked in M2.0) */}
+      <div className="card" style={{ padding: 20 }}>
+        <div className="row spread" style={{ alignItems: "center" }}>
+          <div>
+            <div className="row gap2" style={{ alignItems: "center" }}>
+              <span className="t-h2">Autonomous Memory Learning</span>
+              <span className="badge" style={{ background: "rgba(107, 114, 128, 0.2)", color: "var(--fg-2)" }}>Planned Milestone 2.1</span>
+            </div>
+            <div className="fg-2 t-caption" style={{ marginTop: 4, maxWidth: 640 }}>
+              Automatic conversation fact extraction, autonomous graph curation, and background memory consolidation are deferred to Milestone 2.1. <code>memory_learning_enabled</code> remains strictly disabled by default.
+            </div>
+          </div>
+          <div className="row gap2" style={{ alignItems: "center" }}>
+            <span className="badge" style={{ background: "rgba(239, 68, 68, 0.1)", color: "var(--err)", padding: "4px 8px" }}>Disabled (Locked)</span>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

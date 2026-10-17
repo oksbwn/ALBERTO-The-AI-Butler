@@ -48,6 +48,8 @@ dependencies = [
   "python-jose[cryptography]>=3.3,<4",
   # bcrypt directly (passlib 1.7.x is unmaintained and crashes probing bcrypt>=4.1).
   "bcrypt>=4,<6",
+  # --- Embedded Knowledge Graph (LadybugDB) ---
+  "ladybug==0.21.2",
 ]
 
 [project.optional-dependencies]

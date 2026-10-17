@@ -108,9 +108,9 @@ export function AgentConfig({ config, onChange, tools = [], toolSets = [], agent
         <Segmented options={[{ value: "agent", label: "Agent" }, { value: "deep_agent", label: "Deep Agent" }]} value={flavor} onChange={(v) => set({ flavor: v })} />
       </Section>
 
-      <Section label="Model">
+      <Section label="Model" hint={config.model ? "Custom model override active." : "Inheriting global default model from settings/project."}>
         <select className="select" value={config.model || ""} onChange={(e) => set({ model: e.target.value })}>
-          <option value="">Select a model…</option>
+          <option value="">(Inherit Global Default Model)</option>
           {MODELS.map((m) => <option key={m.id} value={m.id}>{m.name} · {m.provider}</option>)}
           {config.model && !MODELS.some((m) => m.id === config.model) && <option value={config.model}>{config.model}</option>}
         </select>

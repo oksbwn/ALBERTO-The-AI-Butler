@@ -113,8 +113,12 @@ async def bootstrap(session) -> str:
             await session.commit()
         has_proj = (await session.execute(select(Project).where(Project.tenant_id == existing.id))).scalars().first()
         if not has_proj:
-            session.add(Project(tenant_id=existing.id, name="Alberto", slug="alberto", description="Alberto AI Home Butler", status="active"))
+            has_proj = Project(tenant_id=existing.id, name="Alberto", slug="alberto", description="Alberto AI Home Butler", status="active")
+            session.add(has_proj)
             await session.commit()
+            await session.refresh(has_proj)
+        from alberto.services.agents import AgentService
+        await AgentService.ensure_system_agents(session, existing.id, has_proj.id)
         return existing.id
     tenant = Tenant(name="Alberto", plan="free")
     session.add(tenant)
@@ -123,10 +127,14 @@ async def bootstrap(session) -> str:
         tenant_id=tenant.id, email=settings.bootstrap_admin_email, role="owner",
         password_hash=hash_password(settings.bootstrap_admin_password) if settings.bootstrap_admin_password else None,
     ))
-    session.add(Project(
+    proj = Project(
         tenant_id=tenant.id, name="Alberto", slug="alberto", description="Alberto AI Home Butler", status="active"
-    ))
+    )
+    session.add(proj)
     await session.commit()
+    await session.refresh(proj)
+    from alberto.services.agents import AgentService
+    await AgentService.ensure_system_agents(session, tenant.id, proj.id)
     return tenant.id
 
 

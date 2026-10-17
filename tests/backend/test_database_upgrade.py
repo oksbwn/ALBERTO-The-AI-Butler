@@ -156,3 +156,140 @@ async def test_job_queue_upgrade_from_pre_m1_6(tmp_path):
     await queue._ensure_table()
     await queue.close()
     conn.close()
+
+
+def test_alembic_fresh_database_upgrade_to_head(tmp_path):
+    """Test fresh database upgrade directly to latest Alembic head (0018)."""
+    from alembic import command
+    from alembic.config import Config
+    from alberto.config import settings
+
+    db_file = tmp_path / "fresh_head.db"
+    orig_url = settings.database_url
+    try:
+        settings.database_url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
+        cfg = Config("backend/alembic.ini")
+        cfg.set_main_option("script_location", "backend/migrations")
+        command.upgrade(cfg, "head")
+
+        conn = sqlite3.connect(str(db_file))
+        # SQLite schema inspection: verify uq_agents_tenant_project_system_key exists and is unique
+        indexes = conn.execute("PRAGMA index_list('agents')").fetchall()
+        idx_dict = {row[1]: bool(row[2]) for row in indexes}
+        assert "uq_agents_tenant_project_system_key" in idx_dict
+        assert idx_dict["uq_agents_tenant_project_system_key"] is True  # unique
+
+        sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_agents_tenant_project_system_key'"
+        ).fetchone()
+        assert sql_row is not None
+        assert "CREATE UNIQUE INDEX" in sql_row[0]
+        assert "WHERE is_system = 1 AND system_key IS NOT NULL" in sql_row[0]
+        conn.close()
+    finally:
+        settings.database_url = orig_url
+
+
+def test_alembic_upgrade_from_original_0017_to_0018(tmp_path):
+    """Test upgrade on an existing database already stamped at revision 0017.
+    
+    Verifies:
+    1. uq_agents_tenant_project_system_key is physically created.
+    2. Existing user agents are preserved.
+    3. Existing system agent model overrides are preserved.
+    4. Existing duplicate system agents are safely resolved.
+    5. Re-running upgrade on already-correct database succeeds without duplicate-index errors.
+    6. Downgrade 0018 cleanly drops the index.
+    """
+    from alembic import command
+    from alembic.config import Config
+    from alberto.config import settings
+
+    db_file = tmp_path / "existing_0017.db"
+    conn = sqlite3.connect(str(db_file))
+
+    # 1. Simulate existing database stamped at 0017 without the unique constraint
+    conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+    conn.execute("INSERT INTO alembic_version VALUES ('0017_m2_0_system_agents')")
+    conn.execute("""
+        CREATE TABLE agents (
+            id VARCHAR(36) NOT NULL PRIMARY KEY,
+            tenant_id VARCHAR(36) NOT NULL,
+            project_id VARCHAR(36) NOT NULL,
+            name VARCHAR(120) NOT NULL,
+            config JSON DEFAULT '{}',
+            created_by VARCHAR(36),
+            created_by_email VARCHAR(320),
+            is_system BOOLEAN NOT NULL DEFAULT 0,
+            system_key VARCHAR(64),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX ix_agents_system_key ON agents (system_key)")
+    conn.execute("CREATE INDEX ix_agents_tenant_id ON agents (tenant_id)")
+    conn.execute("CREATE INDEX ix_agents_project_id ON agents (project_id)")
+
+    # Insert user agents and duplicate system agents
+    conn.execute("""
+        INSERT INTO agents (id, tenant_id, project_id, name, config, is_system, system_key)
+        VALUES ('user-1', 'tenant-alpha', 'proj-1', 'My Assistant', '{"tools":[]}', 0, NULL),
+               ('user-2', 'tenant-alpha', 'proj-1', 'Code Helper', '{"tools":[]}', 0, NULL),
+               ('sys-ir-1', 'tenant-alpha', 'proj-1', 'Intent Router', '{}', 1, 'intent_router'),
+               ('sys-ir-2', 'tenant-alpha', 'proj-1', 'Intent Router Custom', '{"model":"openai:gpt-4o-override"}', 1, 'intent_router'),
+               ('sys-curator', 'tenant-alpha', 'proj-1', 'Memory Curator', '{}', 1, 'memory_curator'),
+               ('sys-graph', 'tenant-alpha', 'proj-1', 'Graph Manager', '{}', 1, 'graph_manager')
+    """)
+    conn.commit()
+
+    # Verify index is NOT present prior to 0018
+    pre_indexes = {row[1] for row in conn.execute("PRAGMA index_list('agents')").fetchall()}
+    assert "uq_agents_tenant_project_system_key" not in pre_indexes
+    conn.close()
+
+    orig_url = settings.database_url
+    try:
+        settings.database_url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
+        cfg = Config("backend/alembic.ini")
+        cfg.set_main_option("script_location", "backend/migrations")
+
+        # 2. Upgrade to 0018
+        command.upgrade(cfg, "head")
+
+        conn = sqlite3.connect(str(db_file))
+        # Prove required unique index is physically present in SQLite schema
+        post_indexes = conn.execute("PRAGMA index_list('agents')").fetchall()
+        idx_dict = {row[1]: bool(row[2]) for row in post_indexes}
+        assert "uq_agents_tenant_project_system_key" in idx_dict
+        assert idx_dict["uq_agents_tenant_project_system_key"] is True
+
+        sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_agents_tenant_project_system_key'"
+        ).fetchone()
+        assert "CREATE UNIQUE INDEX" in sql_row[0]
+        assert "WHERE is_system = 1 AND system_key IS NOT NULL" in sql_row[0]
+
+        # Verify existing user-agent preservation: neither user agent was deleted
+        user_rows = conn.execute("SELECT id, name FROM agents WHERE is_system = 0").fetchall()
+        assert len(user_rows) == 2
+        assert {r[0] for r in user_rows} == {"user-1", "user-2"}
+
+        # Verify duplicate system agent safely resolved and model override preserved
+        sys_rows = conn.execute("SELECT id, system_key, config FROM agents WHERE is_system = 1").fetchall()
+        assert len(sys_rows) == 3
+        ir = [r for r in sys_rows if r[1] == "intent_router"][0]
+        assert ir[0] == "sys-ir-2"
+        assert "openai:gpt-4o-override" in ir[2]
+
+        # 3. Idempotent re-run on already-correct database: must not raise duplicate index error
+        command.upgrade(cfg, "head")
+
+        # 4. Rollback: downgrade 0018 back to 0017
+        command.downgrade(cfg, "0017_m2_0_system_agents")
+        downgrade_indexes = {row[1] for row in conn.execute("PRAGMA index_list('agents')").fetchall()}
+        assert "uq_agents_tenant_project_system_key" not in downgrade_indexes
+
+        conn.close()
+    finally:
+        settings.database_url = orig_url
+

@@ -78,7 +78,12 @@ def _ensure_new_columns(conn) -> None:
     wanted = {
         "kb_sources": {"folder": "VARCHAR(200) NOT NULL DEFAULT ''"},
         "triggers": {"metadata": "JSON DEFAULT '{}'"},
-        "agents": {"created_by": "VARCHAR(36)", "created_by_email": "VARCHAR(320)"},
+        "agents": {
+            "created_by": "VARCHAR(36)",
+            "created_by_email": "VARCHAR(320)",
+            "is_system": "BOOLEAN NOT NULL DEFAULT 0",
+            "system_key": "VARCHAR(64)",
+        },
         "mcp_clients": {"disabled_tools": "JSON DEFAULT '[]'"},
         "api_keys": {"user_id": "VARCHAR(36)", "project_id": "VARCHAR(36)"},
         "tool_sets": {"exposed": "BOOLEAN NOT NULL DEFAULT 1"},
@@ -109,6 +114,20 @@ def _ensure_new_columns(conn) -> None:
         for col, ddl in columns.items():
             if col not in existing:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+
+    if "agents" in inspector.get_table_names():
+        idx_names = {idx["name"] for idx in inspector.get_indexes("agents")}
+        if "uq_agents_tenant_project_system_key" not in idx_names:
+            try:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_tenant_project_system_key "
+                        "ON agents (tenant_id, project_id, system_key) "
+                        "WHERE is_system = 1 AND system_key IS NOT NULL"
+                    )
+                )
+            except Exception:
+                pass
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

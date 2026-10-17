@@ -230,6 +230,8 @@ export interface Agent {
   config: Record<string, any>;
   created_by?: string | null;
   created_by_email?: string | null;
+  is_system?: boolean;
+  system_key?: string | null;
 }
 
 export interface KbSource { id: string; project_id: string; kind: string; name: string; folder?: string; uri?: string | null; status: string; chunks: number; embedding_model?: string | null; chunking_strategy?: string | null; chunk_size?: number | null; chunk_overlap?: number | null; }
@@ -247,6 +249,21 @@ export interface Turn { trace_id: string; run_id: string; source: string; user_m
 export interface ConversationDetail { conversation: Conversation; turns: Turn[]; }
 export interface Facets { actors: string[]; sources: string[]; }
 export interface Secret { id: string; name: string; kind: string; version: number; }
+
+export interface GraphStats {
+  entity_count: number;
+  relationship_count: number;
+  storage_path: string;
+  is_available: boolean;
+}
+
+export interface MemoryStatus {
+  memory_learning_enabled: boolean;
+  sqlite: { memory_count: number; qa_count: number };
+  ladybug_graph: { available: boolean; entity_count: number; relationship_count: number; path?: string; error?: string };
+  chroma: { available: boolean; path: string };
+  markdown: { status: string; active_writer: boolean; deferred_milestone: string; path: string; directory_exists: boolean };
+}
 
 export interface StatRollup { runs: number; tokens: number; cost_usd: number; avg_latency_ms: number; errors?: number; error_rate?: number; }
 export interface ReportRow extends StatRollup { label: string; kind: "workflow" | "assistant" | "other"; }
@@ -633,6 +650,8 @@ export const api = {
   updateQa: (pid: string, qid: string, body: { question?: string; answer?: string; kind?: string; tags?: string[] }) =>
     json<QaPair>(`/v1/projects/${pid}/qa-pairs/${qid}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteQa: (pid: string, qid: string) => fetch(`${BASE}/v1/projects/${pid}/qa-pairs/${qid}`, { method: "DELETE", headers: authHeader() }),
+  graphStats: (pid: string) => json<GraphStats>(`/v1/projects/${pid}/graph/stats`),
+  memoryStatus: (pid: string) => json<MemoryStatus>(`/v1/projects/${pid}/memory/status`),
   // traces + conversations (Traces view)
   listTraces: (pid: string) => json<Trace[]>(`/v1/projects/${pid}/traces`),
   getTrace: (pid: string, trid: string) => json<{ trace: Trace; spans: Span[] }>(`/v1/projects/${pid}/traces/${trid}`),

@@ -17,11 +17,13 @@ from sqlalchemy import (
     Boolean,
     Float,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -151,6 +153,17 @@ class Component(PkTimestamp, Base):
 
 class Agent(PkTimestamp, Base):
     __tablename__ = "agents"
+    __table_args__ = (
+        Index(
+            "uq_agents_tenant_project_system_key",
+            "tenant_id",
+            "project_id",
+            "system_key",
+            unique=True,
+            sqlite_where=text("is_system = 1 AND system_key IS NOT NULL"),
+            postgresql_where=text("is_system = true AND system_key IS NOT NULL"),
+        ),
+    )
     tenant_id: Mapped[str] = mapped_column(String(36), index=True)
     project_id: Mapped[str] = mapped_column(String(36), index=True)
     name: Mapped[str] = mapped_column(String(120))
@@ -158,6 +171,8 @@ class Agent(PkTimestamp, Base):
     # Creator attribution (denormalized email snapshot for display without a join).
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_by_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    system_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
 class AuthProvider(PkTimestamp, Base):

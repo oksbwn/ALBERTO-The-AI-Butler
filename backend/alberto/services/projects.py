@@ -44,11 +44,12 @@ class ProjectService:
         (tenant+project scoped) instead of pulling six full lists client-side."""
         out: dict[str, int] = {}
         for key, model in _COUNT_MODELS.items():
-            n = await session.scalar(
-                select(func.count()).select_from(model).where(
-                    model.tenant_id == tenant_id, model.project_id == project_id
-                )
+            stmt = select(func.count()).select_from(model).where(
+                model.tenant_id == tenant_id, model.project_id == project_id
             )
+            if model is Agent:
+                stmt = stmt.where(Agent.is_system.is_(False))
+            n = await session.scalar(stmt)
             out[key] = int(n or 0)
         open_handoffs = await session.scalar(
             select(func.count()).select_from(HandoffRequest).where(
@@ -91,6 +92,8 @@ class ProjectService:
         # (agents can reference them before the tools screen is ever opened).
         from alberto.services.tools import ToolService
         await ToolService.ensure_builtins(session, tenant_id, project.id)
+        from alberto.services.agents import AgentService
+        await AgentService.ensure_system_agents(session, tenant_id, project.id)
         return project
 
     @staticmethod

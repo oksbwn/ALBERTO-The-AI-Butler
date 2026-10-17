@@ -169,6 +169,8 @@ class AgentOut(ORMModel):
     config: dict = {}
     created_by: str | None = None
     created_by_email: str | None = None
+    is_system: bool = False
+    system_key: str | None = None
 
 
 class AgentCreate(BaseModel):
@@ -501,3 +503,104 @@ class NodeTypeOut(BaseModel):
     allows_cycle: bool
     input_ports: list[PortOut]
     output_ports: list[PortOut]
+
+
+# --- knowledge graph (LadybugDB) ---
+class GraphEntityCreate(BaseModel):
+    id: str | None = None
+    kind: str
+    name: str
+    canonical_name: str | None = None
+    description: str = ""
+    source: str = "manual"
+    confidence: float = 1.0
+
+
+class GraphEntityOut(BaseModel):
+    id: str
+    tenant_id: str
+    project_id: str
+    kind: str
+    name: str
+    canonical_name: str = ""
+    description: str = ""
+    source: str = "manual"
+    confidence: float = 1.0
+    created_at: int = 0
+    updated_at: int = 0
+
+
+class GraphRelationshipCreate(BaseModel):
+    id: str | None = None
+    source_id: str
+    target_id: str
+    kind: str
+    source: str = "manual"
+    confidence: float = 1.0
+    provenance: str = ""
+
+
+class GraphRelationshipOut(BaseModel):
+    id: str
+    source_id: str
+    target_id: str
+    kind: str
+    tenant_id: str
+    project_id: str
+    source: str = "manual"
+    confidence: float = 1.0
+    provenance: str = ""
+    created_at: int = 0
+    updated_at: int = 0
+
+
+class GraphPathOut(BaseModel):
+    nodes: list[GraphEntityOut]
+    relationships: list[GraphRelationshipOut]
+    length: int
+
+
+class GraphStatsOut(BaseModel):
+    entity_count: int
+    relationship_count: int
+    storage_path: str
+    is_available: bool
+
+
+# --- unified memory ---
+class MemoryRecallIn(BaseModel):
+    query: str
+    sources: list[str] | None = None
+    scope: str = "default"
+    top_k: int = 5
+
+
+class MemoryRecordOut(BaseModel):
+    source: str
+    record_id: str
+    content: str
+    score: float | None = None
+    metadata: dict[str, Any] | None = None
+    provenance: str = ""
+
+
+class MemoryRecallOut(BaseModel):
+    query: str
+    results: list[MemoryRecordOut]
+
+
+class MemoryRememberIn(BaseModel):
+    text: str
+    target: str = "memory"
+    scope: str = "default"
+    kind: str = "note"
+    entity_kind: str = "concept"
+    entity_name: str | None = None
+
+
+class MemoryStatusOut(BaseModel):
+    memory_learning_enabled: bool
+    sqlite: dict[str, Any]
+    ladybug_graph: dict[str, Any]
+    chroma: dict[str, Any]
+    markdown: dict[str, Any]

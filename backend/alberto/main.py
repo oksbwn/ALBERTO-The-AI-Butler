@@ -32,11 +32,13 @@ from alberto.routers import (
     connectors,
     conversations,
     evals,
+    graph,
     handoff,
     health,
     hooks,
     knowledge,
     mcp_clients,
+    memory,
     models,
     nodes,
     oauth,
@@ -165,7 +167,6 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=_preload_heavy_modules, name="forge-preload", daemon=True).start()
     app.state.exit_stack = AsyncExitStack()
     app.state.checkpointer = await _make_checkpointer(app.state.exit_stack)
-    app.state.store = None
     from alberto.queue import set_checkpointer
 
     set_checkpointer(app.state.checkpointer)
@@ -174,6 +175,8 @@ async def lifespan(app: FastAPI):
         if settings.seed_demo:
             await seed_demo_data(session, tenant_id)
         app.state.tenant_id = tenant_id
+    from alberto.knowledge.graph import get_graph_adapter
+    app.state.graph_db = get_graph_adapter()
     # Immediate startup sweep for stranded runs and abandoned tasks from previous process (Milestone 1.6)
     with contextlib.suppress(Exception):
         from alberto.services.runs import RunService
@@ -222,6 +225,10 @@ async def lifespan(app: FastAPI):
         from alberto.queue import set_checkpointer
 
         set_checkpointer(None)
+    with contextlib.suppress(Exception):
+        from alberto.knowledge.graph import reset_graph_adapter
+
+        reset_graph_adapter()
     await aclose_shared_client()
     await app.state.exit_stack.aclose()
 
@@ -263,6 +270,7 @@ def create_app() -> FastAPI:
         knowledge.router, knowledge.qa_router, traces.router, conversations.router, assistant.router, stats.router,
         triggers_router.router, channels.router, channels.public, handoff.router, evals.router,
         mcp_clients.router, versions.router,
+        graph.router, memory.router,
         connectors.router,
     ):
         app.include_router(r)
