@@ -8,7 +8,7 @@
 # ------------------------------------------------------------------------------
 # Stage 1: Build Next.js Frontend
 # ------------------------------------------------------------------------------
-FROM node:22-alpine AS frontend-builder
+FROM node:22-bookworm-slim AS frontend-builder
 WORKDIR /repo
 RUN corepack enable
 
@@ -93,7 +93,7 @@ RUN useradd --create-home --uid 10001 alberto \
     && chown -R alberto:alberto /app /data
 
 VOLUME ["/data"]
-EXPOSE 3000 8000
+EXPOSE 3000
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:8000/readyz || exit 1

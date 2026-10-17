@@ -36,10 +36,8 @@ services:
       # Persistent local storage for SQLite databases, ChromaDB vectors, and encryption keys
       - alberto-data:/data
     ports:
-      # Web UI console (Next.js proxies /api/alberto to backend)
+      # Web UI console & reverse proxy (internal FastAPI reached via /api/alberto/*)
       - "3000:3000"
-      # Direct backend API access
-      - "8000:8000"
 
 volumes:
   alberto-data:

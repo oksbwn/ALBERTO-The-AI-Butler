@@ -22,7 +22,13 @@ DATA_DIR="${ALBERTO_DATA_DIR:-/data}"
 if [[ "$(id -u)" -eq 0 ]]; then
   echo "Initializing persistent storage ownership at: ${DATA_DIR}..."
   mkdir -p "${DATA_DIR}/db" "${DATA_DIR}/chroma" "${DATA_DIR}/memory" "${DATA_DIR}/logs" "${DATA_DIR}/config"
-  chown -R alberto:alberto "${DATA_DIR}" /app
+  DATA_OWNER="$(stat -c '%u' "${DATA_DIR}" 2>/dev/null || stat -f '%u' "${DATA_DIR}" 2>/dev/null || echo "0")"
+  if [[ "$DATA_OWNER" != "10001" ]]; then
+    echo "Setting ownership of ${DATA_DIR} to alberto:alberto..."
+    chown -R alberto:alberto "${DATA_DIR}"
+  else
+    chown alberto:alberto "${DATA_DIR}" "${DATA_DIR}/db" "${DATA_DIR}/chroma" "${DATA_DIR}/memory" "${DATA_DIR}/logs" "${DATA_DIR}/config"
+  fi
   chmod 775 "${DATA_DIR}"
   export ALBERTO_DATA_DIR="${DATA_DIR}"
   exec gosu alberto "$0" "$@"
@@ -37,6 +43,7 @@ echo "Running database migrations (Alembic)..."
 alembic upgrade head
 
 # 3. Environment defaults
+BACKEND_HOST="${ALBERTO_HOST:-127.0.0.1}"
 BACKEND_PORT="${PORT:-${ALBERTO_PORT:-8000}}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 
@@ -83,9 +90,9 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM
 
-# 5. Start FastAPI Backend
-echo "Starting FastAPI backend on port ${BACKEND_PORT}..."
-uvicorn alberto.main:app --host 0.0.0.0 --port "${BACKEND_PORT}" &
+# 5. Start FastAPI Backend (Internal)
+echo "Starting internal FastAPI backend on ${BACKEND_HOST}:${BACKEND_PORT}..."
+uvicorn alberto.main:app --host "${BACKEND_HOST}" --port "${BACKEND_PORT}" &
 BACKEND_PID=$!
 
 # Wait for backend readiness before starting frontend

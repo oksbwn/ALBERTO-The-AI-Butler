@@ -128,34 +128,44 @@ jobs:
         run: |
           echo "Starting container smoke test..."
           TEST_DATA="$(mktemp -d)"
-          chmod 777 "$TEST_DATA"
+          chmod 775 "$TEST_DATA"
 
-          # Start unified container with mounted data volume
+          # Start unified container with mounted data volume (strictly exposing port 3000)
           docker run -d \
             --name alberto-smoke \
             -p 3000:3000 \
-            -p 8000:8000 \
             -v "$TEST_DATA:/data" \
             -e ALBERTO_ENVIRONMENT=test \
             -e ALBERTO_DATA_DIR=/data \
             -e ALBERTO_JWT_SECRET=test-secret-key-for-container-smoke-testing-32chars \
             alberto:test
 
-          echo "Polling health endpoint (http://127.0.0.1:8000/readyz)..."
+          echo "Verifying backend port 8000 is NOT exposed publicly..."
+          if curl -s --connect-timeout 2 http://127.0.0.1:8000/readyz >/dev/null 2>&1; then
+            echo "❌ Error: Backend port 8000 is unexpectedly accessible from host!" >&2
+            docker logs alberto-smoke >&2
+            docker rm -f alberto-smoke >/dev/null 2>&1 || true
+            sudo rm -rf "$TEST_DATA"
+            exit 1
+          fi
+          echo "✓ Backend port 8000 is strictly internal"
+
+          echo "Polling readiness via Next.js reverse proxy (http://127.0.0.1:3000/api/alberto/readyz)..."
           READY=0
           for i in $(seq 1 45); do
-            if curl -fsS http://127.0.0.1:8000/readyz >/dev/null 2>&1; then
+            if curl -fsS http://127.0.0.1:3000/api/alberto/readyz >/dev/null 2>&1; then
               READY=1
-              echo "✓ Backend healthcheck passed after ${i}s"
+              echo "✓ Backend healthcheck passed via proxy after ${i}s"
               break
             fi
             sleep 1
           done
 
           if [[ "$READY" -ne 1 ]]; then
-            echo "❌ Error: Backend failed to become ready within 45s. Container logs:" >&2
+            echo "❌ Error: Backend failed to become ready through proxy within 45s. Container logs:" >&2
             docker logs alberto-smoke >&2
             docker rm -f alberto-smoke >/dev/null 2>&1 || true
+            sudo rm -rf "$TEST_DATA"
             exit 1
           fi
 
@@ -175,29 +185,66 @@ jobs:
             echo "❌ Error: Frontend failed to respond within 30s (last HTTP: $FRONTEND_HTTP). Container logs:" >&2
             docker logs alberto-smoke >&2
             docker rm -f alberto-smoke >/dev/null 2>&1 || true
+            sudo rm -rf "$TEST_DATA"
             exit 1
           fi
 
-          echo "Testing version endpoint..."
-          VERSION_HTTP="$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/readyz)"
+          echo "Testing version endpoint via proxy..."
+          VERSION_HTTP="$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/api/alberto/readyz)"
           if [[ "$VERSION_HTTP" != "200" ]]; then
-            echo "❌ Error: Health probe failed: $VERSION_HTTP" >&2
+            echo "❌ Error: Health probe via proxy failed: $VERSION_HTTP" >&2
+            docker rm -f alberto-smoke >/dev/null 2>&1 || true
+            sudo rm -rf "$TEST_DATA"
             exit 1
           fi
-          echo "✓ Health probe returned 200"
+          echo "✓ Health probe via proxy returned 200"
 
           echo "Testing persistent storage mount..."
-          if [[ ! -d "$TEST_DATA/db" ]]; then
-            echo "❌ Error: Persistent /data/db directory was not initialized" >&2
+          if [[ ! -d "$TEST_DATA/db" || ! -f "$TEST_DATA/db/alberto.db" ]]; then
+            echo "❌ Error: Persistent /data/db/alberto.db was not initialized" >&2
+            docker rm -f alberto-smoke >/dev/null 2>&1 || true
+            sudo rm -rf "$TEST_DATA"
             exit 1
           fi
           echo "✓ Persistent storage /data initialized successfully"
 
           echo "Testing graceful container shutdown..."
-          docker stop --time 15 alberto-smoke
+          docker stop --timeout 15 alberto-smoke
           docker rm alberto-smoke
-          rm -rf "$TEST_DATA"
-          echo "✓ Container smoke tests passed completely."
+          echo "✓ Container shut down gracefully"
+
+          echo "Testing persistence across container recreation..."
+          docker run -d \
+            --name alberto-smoke-persist \
+            -p 3000:3000 \
+            -v "$TEST_DATA:/data" \
+            -e ALBERTO_ENVIRONMENT=test \
+            -e ALBERTO_DATA_DIR=/data \
+            -e ALBERTO_JWT_SECRET=test-secret-key-for-container-smoke-testing-32chars \
+            alberto:test
+
+          PERSIST_OK=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/api/alberto/readyz >/dev/null 2>&1; then
+              PERSIST_OK=1
+              echo "✓ Recreated container became ready after ${i}s with existing data"
+              break
+            fi
+            sleep 1
+          done
+
+          if [[ "$PERSIST_OK" -ne 1 ]]; then
+            echo "❌ Error: Recreated container failed to become ready. Container logs:" >&2
+            docker logs alberto-smoke-persist >&2
+            docker rm -f alberto-smoke-persist >/dev/null 2>&1 || true
+            sudo rm -rf "$TEST_DATA"
+            exit 1
+          fi
+
+          docker stop --timeout 15 alberto-smoke-persist
+          docker rm alberto-smoke-persist
+          sudo rm -rf "$TEST_DATA"
+          echo "✓ Container smoke and persistence tests passed completely."
 
       # ------------------------------------------------------------------------
       # GHCR Single-Image Publication

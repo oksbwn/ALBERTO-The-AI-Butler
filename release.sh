@@ -113,20 +113,19 @@ git fetch origin master --tags --quiet || {
   exit 1
 }
 
-# Verify local master is not behind origin/master
+# Verify local master is synchronized with origin/master
 LOCAL_SHA="$(git rev-parse HEAD)"
 BEHIND="$(git rev-list --count HEAD..origin/master)"
+AHEAD="$(git rev-list --count origin/master..HEAD)"
 if [[ "$BEHIND" -gt 0 ]]; then
   echo "❌ Error: Local master is behind origin/master by $BEHIND commit(s). Pull or rebase before releasing." >&2
   exit 1
 fi
-
-AHEAD="$(git rev-list --count origin/master..HEAD)"
 if [[ "$AHEAD" -gt 0 ]]; then
-  echo "    ℹ Local master is $AHEAD commit(s) ahead of origin/master (will be pushed together)."
-else
-  echo "    ✓ Local master is synchronized with origin/master ($LOCAL_SHA)"
+  echo "❌ Error: Local master is ahead of origin/master by $AHEAD commit(s). Push or reconcile commits before releasing." >&2
+  exit 1
 fi
+echo "    ✓ Local master is synchronized with origin/master ($LOCAL_SHA)"
 
 # Validate version.json
 VERSION_FILE="$REPO_ROOT/version.json"

@@ -60,8 +60,8 @@ Alberto strictly follows [Semantic Versioning 2.0.0](https://semver.org/):
 
 Before modifying any file, `./release.sh` verifies:
 1. **Branch Restriction:** Must be executed on the `master` branch. Detached HEAD and other branches are rejected immediately.
-2. **Working Tree Status:** Uncommitted files (modified, untracked, or staged) are permitted. If present, they are reported and will be validated and included in the release commit.
-3. **Remote Synchronization:** Remote `origin` must exist, and local `master` must not be behind `origin/master`.
+2. **Working Tree Status:** Uncommitted files (modified, untracked, or staged) are permitted. If present, they are reported, validated through `./tests/check.sh`, and staged into the release commit.
+3. **Remote Synchronization:** Remote `origin` must exist, and local `master` must strictly match `origin/master` (neither behind nor ahead).
 4. **Tag Availability:** The proposed release tag must not exist locally or on `origin`.
 5. **Quality Verification:** Executes `./tests/check.sh` completely over the working tree before touching `version.json`.
 
@@ -133,8 +133,8 @@ Alberto separates continuous integration and release delivery into two dedicated
 Alberto is packaged as **ONE** unified container image containing both FastAPI backend and Next.js frontend.
 
 ### Exposed Ports
-- `3000`: Web UI console (Next.js server-side proxies `/api/alberto/*` to backend).
-- `8000`: Direct FastAPI backend API and documentation (`/docs`, `/readyz`).
+- `3000`: Web UI console and reverse proxy. All client API calls route through Next.js proxy `/api/alberto/*` to the internal backend.
+- FastAPI remains strictly internal to the container (`127.0.0.1:8000`) and is not exposed to the host.
 
 ### Persistent Storage (`/data`)
 All persistent state must be mapped to `/data`:
