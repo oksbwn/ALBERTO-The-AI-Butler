@@ -1,0 +1,572 @@
+"use client";
+/* Traces: conversations (chat sessions) grouped by end user, their user<->AI turns, and a
+   drill-in to the per-turn span waterfall (tool + LLM request/response). */
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Icon } from "../icons";
+import { Avatar, StatusPill } from "../primitives";
+import { api, Conversation, ConversationDetail, Facets, openSSE, Span, Turn } from "@/lib/api";
+import { buildNodeLabels, NODE_META, type NodeLabel } from "@/lib/data";
+
+// Conversations are paged in on scroll (newest-activity first) so the Traces view never
+// pulls a project's entire history in one shot.
+const PAGE = 20;
+
+// Friendly labels for the raw run source.
+const SOURCE_LABEL: Record<string, string> = {
+  playground: "Playground", api: "API", embed: "Embed", assistant: "Alberto Assistant",
+  channel_email: "Email", webhook: "Webhook", schedule: "Schedule", app_event: "App event",
+};
+const srcLabel = (s: string) => SOURCE_LABEL[s] || s || "—";
+const fmtWhen = (iso?: string | null) => (iso ? iso.slice(0, 16).replace("T", " ") : "");
+
+// Trigger a client-side file download of `data` as pretty JSON (used by the Traces export).
+function downloadJSON(filename: string, data: unknown) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function TracesScreen({ project }: { project: any }) {
+  const [convos, setConvos] = useState<Conversation[]>([]);
+  const [facets, setFacets] = useState<Facets>({ actors: [], sources: [] });
+  const [actor, setActor] = useState("");
+  const [source, setSource] = useState("");
+  const [status, setStatus] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  const [sel, setSel] = useState<string | null>(null);
+  const [detail, setDetail] = useState<ConversationDetail | null>(null);
+  const [nextOffset, setNextOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Distinct actors for the filter dropdown. A separate call because the paged list below
+  // only holds one 20-row window - the full actor set can't be derived from it.
+  useEffect(() => { if (project?.id) api.conversationFacets(project.id).then(setFacets).catch(() => {}); }, [project?.id]);
+
+  // Debounce the search box so we don't fire a request per keystroke.
+  useEffect(() => { const t = setTimeout(() => setSearch(searchInput.trim()), 350); return () => clearTimeout(t); }, [searchInput]);
+
+  // First page - and a reload whenever the project or a filter changes.
+  useEffect(() => {
+    if (!project?.id) { setConvos([]); setHasMore(false); setNextOffset(0); return; }
+    let live = true;
+    api.listConversations(project.id, { actor: actor || undefined, source: source || undefined, status: status || undefined, search: search || undefined, limit: PAGE, offset: 0 })
+      .then((c) => {
+        if (!live) return;
+        setConvos(c);
+        setNextOffset(c.length);
+        setHasMore(c.length === PAGE);
+        setSel((cur) => (cur && c.some((x) => x.thread_id === cur) ? cur : c[0]?.thread_id ?? null));
+        if (listRef.current) listRef.current.scrollTop = 0;
+      })
+      .catch(() => { if (live) { setConvos([]); setHasMore(false); setNextOffset(0); } });
+    return () => { live = false; };
+  }, [project?.id, actor, source, status, search]);
+
+  const loadMore = useCallback(async () => {
+    if (!project?.id || loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const next = await api.listConversations(project.id, { actor: actor || undefined, source: source || undefined, status: status || undefined, search: search || undefined, limit: PAGE, offset: nextOffset });
+      // De-dupe by thread_id in case the scan window shifted between pages.
+      setConvos((prev) => {
+        const seen = new Set(prev.map((x) => x.thread_id));
+        return [...prev, ...next.filter((x) => !seen.has(x.thread_id))];
+      });
+      setNextOffset((o) => o + next.length);
+      setHasMore(next.length === PAGE);
+    } catch { /* keep what we have */ } finally { setLoadingMore(false); }
+  }, [project?.id, actor, source, status, search, nextOffset, hasMore, loadingMore]);
+
+  const onListScroll = () => {
+    const el = listRef.current;
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 120) loadMore();
+  };
+
+  useEffect(() => { if (project?.id && sel) api.getConversation(project.id, sel).then(setDetail).catch(() => setDetail(null)); else setDetail(null); }, [project?.id, sel]);
+
+  const purge = async () => {
+    const days = window.prompt("Delete conversations older than how many days? (admin only)", "30");
+    if (days == null) return;
+    const n = parseInt(days, 10);
+    if (!Number.isFinite(n) || n < 0) return;
+    try {
+      const { removed } = await api.purgeConversations(project.id, n);
+      window.alert(`Removed ${removed} conversation turn(s) older than ${n} days.`);
+      // Reset back to the first page after a purge.
+      const first = await api.listConversations(project.id, { actor: actor || undefined, source: source || undefined, status: status || undefined, search: search || undefined, limit: PAGE, offset: 0 });
+      setConvos(first);
+      setNextOffset(first.length);
+      setHasMore(first.length === PAGE);
+    } catch { window.alert("Purge failed — this action requires an admin role."); }
+  };
+
+  // Export the loaded conversation summaries as JSON (respects the active filters/search).
+  const exportConvos = () => {
+    if (!convos.length) return;
+    downloadJSON(`conversations-${project?.slug || project?.id || "export"}.json`, convos);
+  };
+
+  return (
+    // alignItems:stretch - .row centers children, which gives the list its content height.
+    <div className="row" style={{ flex: 1, minHeight: 0, height: "100%", overflow: "hidden", alignItems: "stretch" }}>
+      {/* conversations list + filters */}
+      <div className="col" style={{ width: 340, flex: "none", background: "var(--bg-1)", borderRight: "1px solid var(--line)", minHeight: 0, height: "100%" }}>
+        <div className="row spread" style={{ padding: "16px 16px 8px", flex: "none" }}>
+          <div className="t-h2">Conversations</div>
+          <div className="row gap2">
+            <button className="t-caption fg-2" onClick={exportConvos} disabled={convos.length === 0} title="Download the loaded conversations as JSON" style={{ background: "none", border: "none", cursor: convos.length ? "pointer" : "default", opacity: convos.length ? 1 : 0.5 }}>Export</button>
+            <button className="t-caption fg-2" onClick={purge} title="Delete old conversations" style={{ background: "none", border: "none", cursor: "pointer" }}>Clean up…</button>
+          </div>
+        </div>
+        <div className="col gap2" style={{ padding: "0 16px 10px", flex: "none" }}>
+          <input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search messages…" className="input" style={{ width: "100%", fontSize: 13 }} />
+          <div className="row gap1">
+            <select value={actor} onChange={(e) => setActor(e.target.value)} className="input" style={{ flex: 1, minWidth: 0, fontSize: 13 }}>
+              <option value="">All users</option>
+              {facets.actors.map((a) => <option key={a} value={a}>{a}</option>)}
+            </select>
+            <select value={source} onChange={(e) => setSource(e.target.value)} className="input" style={{ flex: 1, minWidth: 0, fontSize: 13 }}>
+              <option value="">All sources</option>
+              {facets.sources.map((s) => <option key={s} value={s}>{srcLabel(s)}</option>)}
+            </select>
+          </div>
+          <div className="row gap1">
+            {[["", "All"], ["success", "Success"], ["error", "Error"]].map(([v, label]) => (
+              <button key={v} onClick={() => setStatus(v)} className="t-caption"
+                style={{ flex: 1, padding: "5px 0", borderRadius: 6, cursor: "pointer", border: "1px solid var(--line)", background: status === v ? "var(--bg-3)" : "transparent", color: status === v ? "var(--fg-0)" : "var(--fg-2)" }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div ref={listRef} onScroll={onListScroll} className="scroll-y" style={{ minHeight: 0, flex: 1 }}>
+          {convos.length === 0 && <div className="fg-2 t-caption" style={{ padding: "8px 16px" }}>No conversations yet. Run a workflow in the Playground or from your app.</div>}
+          {convos.map((c) => (
+            <button key={c.thread_id} onClick={() => setSel(c.thread_id)} className="row gap2" style={{ width: "100%", textAlign: "left", padding: "11px 16px", border: "none", borderBottom: "1px solid var(--line)", background: sel === c.thread_id ? "var(--bg-3)" : "transparent", cursor: "pointer" }}>
+              <div className="grow" style={{ minWidth: 0 }}>
+                <div className="row gap2" style={{ minWidth: 0 }}>
+                  <StatusPill status={c.status} />
+                  <span className="t-body-sm truncate" style={{ fontWeight: 600 }}>{c.actor}</span>
+                </div>
+                <div className="truncate fg-2 t-caption" style={{ marginTop: 3 }}>{c.preview || "(no message)"}</div>
+                <div className="fg-2 t-caption mono" style={{ marginTop: 3 }}>{srcLabel(c.source)} · {c.turns} turn{c.turns === 1 ? "" : "s"} · {fmtWhen(c.last_activity)}</div>
+              </div>
+              <Icon name="chevright" size={15} style={{ color: "var(--fg-2)" }} />
+            </button>
+          ))}
+          {loadingMore && <div className="fg-2 t-caption" style={{ padding: "10px 16px", textAlign: "center" }}>Loading more…</div>}
+          {hasMore && !loadingMore && (
+            <button onClick={loadMore} className="t-caption fg-2" style={{ width: "100%", padding: "10px 16px", background: "none", border: "none", borderTop: "1px solid var(--line)", cursor: "pointer" }}>Load more</button>
+          )}
+        </div>
+      </div>
+      {/* transcript */}
+      <div className="scroll-y grow" style={{ minWidth: 0, minHeight: 0, height: "100%", padding: 24, overflowX: "hidden", background: "var(--bg-0)" }}>
+        {detail ? <ConversationView key={detail.conversation.thread_id} project={project} detail={detail} />
+          : <div className="fg-2" style={{ padding: 40, textAlign: "center" }}>Select a conversation to see its messages.</div>}
+      </div>
+    </div>
+  );
+}
+
+/* One user message can produce several Trace rows under the SAME run_id: a HITL pause writes an
+   `interrupted` trace, then the resume writes a `done` trace (both carry the same user_message,
+   since run.input is unchanged). Grouping by run_id folds those segments back into one turn, so a
+   single message reads as one turn that paused - not two. Separate submissions get fresh run_ids
+   and stay distinct. Traces arrive oldest-first (started_at asc), so the last segment is final. */
+type GroupedTurn = {
+  runId: string;
+  segments: Turn[];
+  userMessage: string | null;
+  aiResponse: string | null;
+  status: string;
+  error: string | null;
+  latencyMs: number;
+  tokens: number;
+  costUsd: number;
+  paused: boolean;
+};
+
+function groupTurns(turns: Turn[]): GroupedTurn[] {
+  const byRun = new Map<string, GroupedTurn>();
+  const order: string[] = [];
+  for (const t of turns) {
+    let g = byRun.get(t.run_id);
+    if (!g) {
+      g = { runId: t.run_id, segments: [], userMessage: null, aiResponse: null, status: t.status, error: null, latencyMs: 0, tokens: 0, costUsd: 0, paused: false };
+      byRun.set(t.run_id, g);
+      order.push(t.run_id);
+    }
+    g.segments.push(t);
+    g.latencyMs += t.latency_ms || 0;
+    g.tokens += t.total_tokens || 0;
+    g.costUsd += t.total_cost_usd || 0;
+    g.userMessage = g.userMessage ?? (t.user_message || null);
+    if (t.ai_response) g.aiResponse = t.ai_response; // last non-empty wins (the final segment)
+    g.status = t.status;                             // last segment = the run's final status
+    g.error = t.error ?? null;
+    if (t.status === "interrupted") g.paused = true;
+  }
+  return order.map((r) => byRun.get(r)!);
+}
+
+function ConversationView({ project, detail }: { project: any; detail: ConversationDetail }) {
+  const c = detail.conversation;
+  const [openTurn, setOpenTurn] = useState<string | null>(null);
+  const [traces, setTraces] = useState<Record<string, { spans: Span[] }>>({});
+  const [rerunning, setRerunning] = useState<string | null>(null);
+  // Resolve the workflow's node ids to their friendly (canvas) names so the span tree reads like
+  // the graph the operator built (e.g. "support_supervisor", not "supervisor"). Best-effort: if the
+  // workflow was deleted the map is empty and spans fall back to their raw id (still traceable).
+  const [nodeLabels, setNodeLabels] = useState<Record<string, NodeLabel>>({});
+  useEffect(() => {
+    if (!project?.id || !c.workflow_id) { setNodeLabels({}); return; }
+    let live = true;
+    api.getWorkflow(project.id, c.workflow_id)
+      .then((wf) => { if (live) setNodeLabels(buildNodeLabels(wf)); })
+      .catch(() => { if (live) setNodeLabels({}); });
+    return () => { live = false; };
+  }, [project?.id, c.workflow_id]);
+
+  // Keyed by run_id (a group), not trace_id: a paused run has an interrupt + a resume trace, and
+  // expanding the turn lazy-loads the spans for every segment so the waterfall shows the whole run.
+  const toggle = async (group: GroupedTurn) => {
+    if (openTurn === group.runId) { setOpenTurn(null); return; }
+    setOpenTurn(group.runId);
+    for (const seg of group.segments) {
+      if (traces[seg.trace_id]) continue;
+      try { const d = await api.getTrace(project.id, seg.trace_id); setTraces((t) => ({ ...t, [seg.trace_id]: { spans: d.spans } })); } catch { /* ignore */ }
+    }
+  };
+
+  const rerun = async (runId: string) => {
+    if (!c.workflow_id || rerunning) return;
+    setRerunning(runId);
+    try {
+      const run = await api.rerunRun(project.id, c.workflow_id, runId);
+      let outcome = "completed";
+      await openSSE(api.runStreamUrl(project.id, c.workflow_id, run.id), (frame) => {
+        if (frame.event === "error") outcome = "failed";
+        else if (frame.event === "interrupt") outcome = "paused for input";
+      });
+      window.alert(`Re-run ${outcome}. Open its new conversation from the list.`);
+    } catch (error) {
+      window.alert(error instanceof Error ? `Re-run failed: ${error.message}` : "Re-run failed.");
+    } finally {
+      setRerunning(null);
+    }
+  };
+
+  return (
+    <div className="fade-up col" style={{ maxWidth: 860, margin: "0 auto", gap: 4 }}>
+      {/* high-level rollup */}
+      <div className="card" style={{ padding: "14px 18px", marginBottom: 12, borderLeft: "3px solid var(--accent)" }}>
+        <div className="row spread">
+          <div>
+            <div className="t-h2" style={{ marginBottom: 2 }}>{c.actor}</div>
+            <div className="fg-2 t-caption mono">{srcLabel(c.source)} · {c.turns} turn{c.turns === 1 ? "" : "s"} · started {fmtWhen(c.started_at)}</div>
+          </div>
+          <div className="row gap3">
+            <Metric label="Turns" value={String(c.turns)} />
+            <Metric label="Tokens" value={String(c.total_tokens)} />
+          </div>
+        </div>
+      </div>
+
+      {/* transcript */}
+      {groupTurns(detail.turns).map((group) => (
+        <div key={group.runId} style={{ marginBottom: 18 }}>
+          {group.userMessage && (
+            <div className="row" style={{ flexDirection: "row-reverse", gap: 10, marginBottom: 12, alignItems: "flex-start" }}>
+              <Avatar name={c.actor} size={28} />
+              <div style={{ maxWidth: "74%", background: "var(--accent)", color: "var(--fg-on-accent)", padding: "9px 13px", borderRadius: "14px 14px 4px 14px", whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 13.5, lineHeight: "20px" }}>{group.userMessage}</div>
+            </div>
+          )}
+          <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
+            <div style={{ width: 28, height: 28, flex: "none", borderRadius: 8, background: "var(--accent)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}><Icon name="sparkles" size={15} /></div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <AITurn
+                group={group}
+                open={openTurn === group.runId}
+                segmentSpans={group.segments.map((s) => traces[s.trace_id]?.spans)}
+                nodeLabels={nodeLabels}
+                onToggle={() => toggle(group)}
+                onRerun={() => rerun(group.runId)}
+                rerunning={rerunning === group.runId}
+                canRerun={!!c.workflow_id}
+              />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AITurn({ group, open, segmentSpans, nodeLabels, onToggle, onRerun, rerunning, canRerun }: {
+  group: GroupedTurn;
+  open: boolean;
+  segmentSpans: (Span[] | undefined)[];
+  nodeLabels: Record<string, NodeLabel>;
+  onToggle: () => void;
+  onRerun: () => void;
+  rerunning: boolean;
+  canRerun: boolean;
+}) {
+  const errored = group.status === "error" || !!group.error;
+  const awaiting = group.status === "interrupted"; // still paused, not yet resumed
+  const multi = group.segments.length > 1;
+  const placeholder = errored ? "(no response — this turn errored)"
+    : awaiting ? "(paused — awaiting approval)"
+    : "(no text response)";
+  return (
+    <div className="row" style={{ justifyContent: "flex-start" }}>
+      <div style={{ maxWidth: "88%", width: "100%" }}>
+        <button onClick={onToggle} className="col" style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: "12px 12px 12px 3px", padding: "11px 14px" }}>
+          <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+            {group.aiResponse || <span className="fg-2">{placeholder}</span>}
+          </div>
+          <div className="row gap2" style={{ marginTop: 8, alignItems: "center" }}>
+            {errored && <span className="pill pill-err" style={{ height: 16 }}>error</span>}
+            {!errored && group.paused && <span className="pill pill-warn" style={{ height: 16 }}>{awaiting ? "awaiting approval" : "paused · resumed"}</span>}
+            <span className="t-caption fg-2 mono">{group.latencyMs}ms · {group.tokens} tok</span>
+            <span className="grow" />
+            <span className="row gap1 t-caption" style={{ color: "var(--accent)" }}>
+              <Icon name="chevright" size={12} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .12s" }} />
+              {open ? "Hide trace" : "View trace"}
+            </span>
+          </div>
+        </button>
+        <div className="row" style={{ justifyContent: "flex-end", padding: "5px 4px 0" }}>
+          <button
+            className="t-caption"
+            onClick={onRerun}
+            disabled={!canRerun || rerunning}
+            title={canRerun ? "Run this turn again with the same input" : "The original workflow is unavailable"}
+            style={{ color: "var(--accent)", background: "none", border: "none", cursor: canRerun && !rerunning ? "pointer" : "default", opacity: canRerun ? 1 : 0.5 }}
+          >
+            {rerunning ? "Running again…" : "Run again"}
+          </button>
+        </div>
+        {group.error && <div className="mono-sm" style={{ color: "var(--err)", padding: "6px 4px", wordBreak: "break-word" }}>{group.error}</div>}
+        {open && (
+          <div className="col gap2" style={{ marginTop: 8 }}>
+            {group.segments.map((seg, i) => {
+              const spans = segmentSpans[i];
+              return (
+                <div key={seg.trace_id}>
+                  {/* Label each segment only when a pause split the run into more than one. */}
+                  {multi && (
+                    <div className="t-caption fg-2" style={{ margin: "2px 2px 6px", fontWeight: 600 }}>
+                      {seg.status === "interrupted" ? "Paused for approval" : i > 0 ? "Resumed" : "Started"} · {seg.latency_ms}ms
+                    </div>
+                  )}
+                  {spans ? <SpanWaterfall spans={spans} nodeLabels={nodeLabels} /> : <div className="fg-2 t-caption" style={{ padding: "10px 4px" }}>Loading trace…</div>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function hasDetail(s: Span): boolean {
+  return s.input != null || s.output != null || !!s.error;
+}
+
+// A colored dot per span kind so the tree scans quickly. Node-level (chain) spans borrow their
+// node type's canvas color; the rest are keyed by kind. Mirrors the canvas IOType palette.
+function spanColor(s: Span, labels: Record<string, NodeLabel>): string {
+  const t = labels[s.name]?.type;
+  if (t && NODE_META[t]?.color) return NODE_META[t].color;
+  const byKind: Record<string, string> = {
+    llm: "var(--accent)", subagent: "var(--accent)", agent: "var(--accent)",
+    tool: "var(--io-json)", retriever: "var(--io-vector)", embedding: "var(--io-vector)",
+  };
+  return byKind[s.kind] || "var(--fg-2)";
+}
+
+// A span's two-line label: the friendly (canvas) NAME on top, and a mono sub-line carrying the
+// raw node id (when it differs from the name, so a big trace stays traceable) + kind + model.
+function spanLabel(s: Span, labels: Record<string, NodeLabel>): { primary: string; sub: string } {
+  const hit = labels[s.name];
+  const primary = hit?.label || s.name;
+  const idPart = hit && hit.label !== s.name ? s.name : null;      // show the id only if it adds info
+  const modelPart = s.model && !s.name.includes(s.model) ? s.model : null;
+  const sub = [idPart, s.kind, modelPart].filter(Boolean).join(" · ");
+  return { primary, sub };
+}
+
+// The per-turn span tree (graph nodes -> their model/tool/parser/subagent spans), rendered like an
+// IDE / DevTools element tree: fold arrows, indent guide-lines, and a click-to-open I/O panel per
+// span. Nesting comes straight from `parent_span_id`; the node id is resolved to its canvas name.
+function SpanWaterfall({ spans, nodeLabels }: { spans: Span[]; nodeLabels: Record<string, NodeLabel> }) {
+  const [openDetail, setOpenDetail] = useState<Record<string, boolean>>({});
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const maxLatency = useMemo(() => Math.max(1, ...spans.map((s) => s.latency_ms)), [spans]);
+
+  // Build the parent -> children index and the root list (a span whose parent isn't in this set is
+  // a root). Insertion order is preserved, so children stay in the order they were recorded.
+  const { roots, byParent } = useMemo(() => {
+    const ids = new Set(spans.map((s) => s.id));
+    const byParent: Record<string, Span[]> = {};
+    const roots: Span[] = [];
+    for (const s of spans) {
+      if (s.parent_span_id && ids.has(s.parent_span_id)) (byParent[s.parent_span_id] ||= []).push(s);
+      else roots.push(s);
+    }
+    return { roots, byParent };
+  }, [spans]);
+
+  const allWithKids = useMemo(() => Object.keys(byParent), [byParent]);
+  const anyCollapsed = allWithKids.some((id) => collapsed[id]);
+  const toggleAll = () =>
+    setCollapsed(anyCollapsed ? {} : Object.fromEntries(allWithKids.map((id) => [id, true])));
+
+  const renderNode = (s: Span, depth: number) => {
+    const kids = byParent[s.id] || [];
+    const hasKids = kids.length > 0;
+    const isCollapsed = !!collapsed[s.id];
+    const expandable = hasDetail(s);
+    const isOpen = !!openDetail[s.id];
+    const { primary, sub } = spanLabel(s, nodeLabels);
+    const dot = spanColor(s, nodeLabels);
+    return (
+      <div key={s.id}>
+        <div
+          className="row gap2"
+          onClick={expandable ? () => setOpenDetail((o) => ({ ...o, [s.id]: !o[s.id] })) : undefined}
+          style={{ padding: "7px 12px", borderBottom: "1px solid var(--line)", cursor: expandable ? "pointer" : "default", background: isOpen ? "var(--bg-3)" : "transparent" }}
+        >
+          {/* fold control (or a leaf dot) */}
+          {hasKids ? (
+            <button
+              onClick={(e) => { e.stopPropagation(); setCollapsed((c) => ({ ...c, [s.id]: !c[s.id] })); }}
+              title={isCollapsed ? "Expand" : "Collapse"}
+              style={{ background: "none", border: "none", padding: 0, margin: 0, cursor: "pointer", flex: "none", display: "flex", alignItems: "center", color: "var(--fg-2)" }}
+            >
+              <Icon name="chevright" size={13} style={{ transform: isCollapsed ? "none" : "rotate(90deg)", transition: "transform .12s" }} />
+            </button>
+          ) : (
+            <span style={{ width: 13, flex: "none", display: "flex", justifyContent: "center" }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: dot, flex: "none" }} />
+            </span>
+          )}
+          {/* label (indents with depth; shrinks naturally) */}
+          <div className="grow" style={{ minWidth: 0 }}>
+            <div className="row gap2" style={{ minWidth: 0 }}>
+              {hasKids && <span style={{ width: 7, height: 7, borderRadius: "50%", background: dot, flex: "none" }} />}
+              <span className="t-body-sm truncate" style={{ fontWeight: nodeLabels[s.name] ? 600 : 400 }}>{primary}</span>
+              {expandable && <Icon name="chevright" size={11} style={{ color: "var(--fg-2)", flex: "none", transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .12s" }} />}
+            </div>
+            {sub && <div className="t-caption fg-2 mono truncate" style={{ marginLeft: hasKids ? 15 : 0 }}>{sub}</div>}
+          </div>
+          {/* right-aligned metrics: a slim latency bar + tokens + cost (aligned regardless of depth) */}
+          <div className="row gap2" style={{ flex: "none", alignItems: "center", justifyContent: "flex-end" }}>
+            <div style={{ width: 60, height: 6, borderRadius: 3, background: "var(--bg-3)", overflow: "hidden", flex: "none" }} title={`${s.latency_ms}ms`}>
+              <div style={{ height: "100%", borderRadius: 3, background: s.error ? "var(--err)" : dot, width: `${Math.max(4, (s.latency_ms / maxLatency) * 100)}%`, opacity: 0.85 }} />
+            </div>
+            <span className="mono-sm fg-2" style={{ width: 58, textAlign: "right" }}>{s.latency_ms}ms</span>
+            <span className="mono-sm" style={{ width: 62, textAlign: "right" }}>{(s.input_tokens + s.output_tokens) > 0 ? `${s.input_tokens + s.output_tokens} tok` : ""}</span>
+            {s.error && <span className="pill pill-err" style={{ height: 16 }}>error</span>}
+          </div>
+        </div>
+        {isOpen && <SpanDetail span={s} />}
+        {/* children: a nested block with a left guide-line, like a code/HTML tree */}
+        {hasKids && !isCollapsed && (
+          <div style={{ marginLeft: 20, borderLeft: "1px solid var(--line)" }}>
+            {kids.map((k) => renderNode(k, depth + 1))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="card" style={{ overflow: "hidden" }}>
+      {spans.length === 0 ? (
+        <div className="fg-2" style={{ padding: 22, textAlign: "center" }}>No spans recorded.</div>
+      ) : (
+        <>
+          <div className="row spread" style={{ padding: "6px 12px", borderBottom: "1px solid var(--line)", background: "var(--bg-1)" }}>
+            <span className="t-caption fg-2 mono">{spans.length} span{spans.length === 1 ? "" : "s"}</span>
+            {allWithKids.length > 0 && (
+              <button onClick={toggleAll} className="t-caption" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--accent)" }}>
+                {anyCollapsed ? "Expand all" : "Collapse all"}
+              </button>
+            )}
+          </div>
+          <div style={{ maxHeight: 460, overflowY: "auto" }}>
+            {roots.map((r) => renderNode(r, 0))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return <div className="col" style={{ alignItems: "flex-end" }}><span className="t-display" style={{ fontSize: 18 }}>{value}</span><span className="t-micro">{label}</span></div>;
+}
+
+// Is this a framed REST request/response envelope (vs a generic tool's raw args/return)?
+const isRestReq = (v: any) => v && typeof v === "object" && "method" in v && "url" in v;
+const isRestRes = (v: any) => v && typeof v === "object" && ("status" in v || "final_url" in v);
+const nonEmpty = (v: any) => v != null && !(typeof v === "object" && Object.keys(v).length === 0) && v !== "";
+
+function Code({ value }: { value: any }) {
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return <pre className="mono-sm" style={{ margin: "2px 0 0", padding: "8px 10px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 6, whiteSpace: "pre-wrap", wordBreak: "break-word", overflowX: "auto", maxHeight: 260, overflowY: "auto" }}>{text}</pre>;
+}
+
+function Row({ label, value }: { label: string; value: any }) {
+  if (!nonEmpty(value)) return null;
+  return <div style={{ marginTop: 10 }}><div className="t-caption fg-2" style={{ marginBottom: 2, textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div><Code value={value} /></div>;
+}
+
+function SpanDetail({ span }: { span: Span }) {
+  const inp = span.input, out = span.output;
+  return (
+    <div style={{ padding: "12px 16px 16px 30px", borderBottom: "1px solid var(--line)", background: "var(--bg-3)" }}>
+      {isRestReq(inp) ? (
+        <>
+          <div className="t-caption fg-2" style={{ textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 4 }}>Request</div>
+          <div className="mono-sm" style={{ wordBreak: "break-all" }}><span className="pill" style={{ marginRight: 6 }}>{inp.method}</span>{inp.url}</div>
+          <Row label="Agent args" value={inp.args} />
+          <Row label="Query" value={inp.query} />
+          <Row label="Headers" value={inp.headers} />
+          <Row label="Cookies" value={inp.cookies} />
+          <Row label={`Body${inp.body_encoding ? ` · ${inp.body_encoding}` : ""}`} value={inp.body} />
+        </>
+      ) : (
+        <Row label="Agent input" value={inp} />
+      )}
+
+      {isRestRes(out) ? (
+        <div style={{ marginTop: 14 }}>
+          <div className="row gap2" style={{ marginBottom: 4 }}>
+            <span className="t-caption fg-2" style={{ textTransform: "uppercase", letterSpacing: 0.4 }}>Response</span>
+            {out.status != null && <span className={out.status >= 400 ? "pill pill-err" : "pill"} style={{ height: 18 }}>{out.status}</span>}
+            {out.latency_ms != null && <span className="mono-sm fg-2">{out.latency_ms}ms</span>}
+          </div>
+          {out.final_url && out.final_url !== inp?.url && <div className="mono-sm fg-2" style={{ wordBreak: "break-all", marginBottom: 4 }}>→ {out.final_url}</div>}
+          <Row label="Body" value={out.response} />
+          {out.error && <Row label="Error" value={out.error} />}
+        </div>
+      ) : (
+        <Row label="Output" value={out} />
+      )}
+
+      {span.error && <div style={{ marginTop: 12 }}><div className="t-caption" style={{ color: "var(--err)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 2 }}>Error</div><Code value={span.error} /></div>}
+    </div>
+  );
+}
