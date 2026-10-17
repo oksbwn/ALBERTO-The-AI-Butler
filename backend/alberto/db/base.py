@@ -10,7 +10,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
 
-from sqlalchemy import String
+from sqlalchemy import String, event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import NullPool
@@ -34,19 +34,27 @@ class PkTimestamp:
     updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-# SQLite needs check_same_thread off for the async driver's connection sharing.
-_is_sqlite = settings.database_url.startswith("sqlite")
-_connect_args = {"check_same_thread": False} if _is_sqlite else {}
-# SQLite (dev/test, via aiosqlite): pooling connections across asyncio event loops - e.g. the
-# per-test loops pytest-asyncio spins up - leaves a connection to be torn down in a loop other
-# than the one that opened it, causing intermittent "Task was destroyed but it is pending" /
-# "object NoneType can't be used in 'await'" teardown errors. NullPool opens a fresh connection
-# per checkout (cheap for a local sqlite file) and closes it immediately, so nothing lingers
-# across loops. Postgres (prod) keeps the default pooled behaviour - no perf change there.
-_engine_kwargs = {"poolclass": NullPool} if _is_sqlite else {}
+# SQLite configuration (check_same_thread disabled for async driver, 30s timeout).
+_connect_args = {"check_same_thread": False, "timeout": 30.0}
+# NullPool opens a fresh connection per checkout and closes it immediately, avoiding
+# asyncio event loop teardown issues across tests.
 engine = create_async_engine(
-    settings.database_url, echo=False, future=True, connect_args=_connect_args, **_engine_kwargs
+    settings.database_url,
+    echo=False,
+    future=True,
+    connect_args=_connect_args,
+    poolclass=NullPool,
 )
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.close()
+
+
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
