@@ -8,12 +8,14 @@ transaction. Results are capped at `max_rows`.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
 from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from alberto.config import settings
 from alberto.secrets.store import SecretStore
 from alberto.util.ssrf import EgressPolicy, validate_host_port
 
@@ -116,32 +118,39 @@ async def execute_sql(
     policy = egress if isinstance(egress, EgressPolicy) else EgressPolicy.from_settings(egress if isinstance(egress, dict) else None)
     await _assert_dsn_allowed(url, policy)
 
+    timeout = float(cfg.get("timeout_seconds") or getattr(settings, "sql_tool_timeout_seconds", 30))
     engine = await _engine_for(url)
     sm = async_sessionmaker(engine, expire_on_commit=False)
     data: list[dict] = []
     truncated = False
-    async with sm() as session:
-        trans = await session.begin()
-        try:
-            # Belt-and-suspenders read-only at the DB layer (not just the regex): Postgres
-            # honours a read-only transaction even for volatile/SECURITY DEFINER functions.
-            if read_only and engine.dialect.name == "postgresql":
-                await session.execute(text("SET TRANSACTION READ ONLY"))
-            # Stream rows and STOP after max_rows instead of materializing the whole result set
-            # then slicing: a query matching millions of rows would otherwise buffer every row
-            # into memory before we throw the tail away. We peek one past max_rows to set
-            # `truncated` accurately (there really were more rows), without keeping that row.
-            result = await session.stream(text(query), kwargs or {})
-            try:
-                async for row in result.mappings():
-                    if len(data) >= max_rows:
-                        truncated = True
-                        break
-                    data.append({k: _cap_cell(v) for k, v in dict(row).items()})
-            finally:
-                await result.close()
-        finally:
-            await trans.rollback()  # read-only: never persist
+    try:
+        async with asyncio.timeout(timeout):
+            async with sm() as session:
+                trans = await session.begin()
+                try:
+                    # Belt-and-suspenders read-only at the DB layer (not just the regex): Postgres
+                    # honours a read-only transaction even for volatile/SECURITY DEFINER functions.
+                    if read_only and engine.dialect.name == "postgresql":
+                        await session.execute(text("SET TRANSACTION READ ONLY"))
+                    if engine.dialect.name == "postgresql":
+                        await session.execute(text(f"SET LOCAL statement_timeout = {int(timeout * 1000)}"))
+                    # Stream rows and STOP after max_rows instead of materializing the whole result set
+                    # then slicing: a query matching millions of rows would otherwise buffer every row
+                    # into memory before we throw the tail away. We peek one past max_rows to set
+                    # `truncated` accurately (there really were more rows), without keeping that row.
+                    result = await session.stream(text(query), kwargs or {})
+                    try:
+                        async for row in result.mappings():
+                            if len(data) >= max_rows:
+                                truncated = True
+                                break
+                            data.append({k: _cap_cell(v) for k, v in dict(row).items()})
+                    finally:
+                        await result.close()
+                finally:
+                    await trans.rollback()  # read-only: never persist
+    except TimeoutError as e:
+        raise SqlToolError(f"SQL query timed out after {timeout} seconds") from e
     return {"rows": data, "row_count": len(data), "truncated": truncated}
 
 

@@ -209,6 +209,8 @@ class Settings(BaseSettings):
     # Dedicated SQLite file for background worker job queue
     queue_db_path: str = Field(default_factory=_default_queue_db)
     queue_poll_interval: float = 1.0
+    worker_lease_timeout_seconds: int = 300
+    worker_retry_backoff_base_seconds: float = 2.0
 
     # --- Vectors (embedded persistent Chroma) ---
     chroma_path: str = Field(default_factory=_default_chroma_path)
@@ -333,6 +335,10 @@ class Settings(BaseSettings):
     # Default per-request timeout (seconds) for REST/HTTP tools when the tool config doesn't
     # set its own `timeout_seconds`.
     tool_request_timeout_seconds: int = 30
+    # SQL query timeout (seconds) for database tools when not overridden.
+    sql_tool_timeout_seconds: int = 30
+    # MCP remote invocation timeout (seconds) for external MCP tools.
+    mcp_tool_timeout_seconds: int = 30
     # Max redirect hops a REST tool follows when follow_redirects is on. Each hop is
     # re-validated against the SSRF egress guard, so this bounds a redirect loop / chain.
     tool_max_redirects: int = 5
@@ -364,8 +370,14 @@ class Settings(BaseSettings):
     # How long a HITL-interrupted run may wait for a human before the reaper expires it (fails
     # the run + closes the handoff with the on_error fallback). 0 = never expire (prior behavior).
     hitl_approval_timeout_seconds: int = 0
-    # Hard per-run wall-clock ceiling (cooperative, checked between stream frames). 0 = unlimited.
-    run_wall_clock_timeout_seconds: int = 0
+    # Hard per-run wall-clock ceiling. 0 = unlimited. Default 300s (5m).
+    run_wall_clock_timeout_seconds: int = 300
+    # Execution safety limits for ReAct agent loops
+    max_model_calls_per_run: int = 25
+    max_tool_calls_per_run: int = 50
+    max_repeated_no_progress_calls: int = 3
+    # SSE event buffer max size (ring buffer to prevent OOM)
+    sse_event_buffer_size: int = 1000
     # Outbound channel delivery (email SMTP) retry policy.
     channel_send_max_attempts: int = 3
     channel_send_backoff_base_seconds: float = 0.5

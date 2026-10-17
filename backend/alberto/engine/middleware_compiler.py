@@ -526,6 +526,79 @@ def _semantic_cache(c: dict, ctx: CompileContext) -> AgentMiddleware:
     )
 
 
+class RepeatedToolCallLimitError(Exception):
+    """Raised when an agent makes repeated unsuccessful tool calls with no progress."""
+
+    def __init__(self, tool_name: str, count: int, args_summary: str = "") -> None:
+        super().__init__(
+            f"Agent halted: repeated unsuccessful tool call '{tool_name}' with no progress ({count} consecutive/identical calls)."
+        )
+        self.tool_name = tool_name
+        self.count = count
+        self.args_summary = args_summary
+
+
+def _canonical_args(args: Any) -> str:
+    import json
+    if isinstance(args, dict):
+        try:
+            return json.dumps(args, sort_keys=True, default=str)
+        except Exception:
+            return str(sorted(args.items()))
+    return str(args)
+
+
+class RepeatedToolCallMiddleware(AgentMiddleware):
+    """Tracks consecutive/repeated identical tool invocations and halts if no progress is made."""
+
+    def __init__(self, max_repeats: int = 3) -> None:
+        super().__init__()
+        self.max_repeats = max_repeats
+        self._no_progress_counts: dict[tuple[str, str], int] = {}
+        self._last_responses: dict[tuple[str, str], str] = {}
+
+    def _check_before_call(self, tool_name: str, norm_args: str) -> None:
+        key = (tool_name, norm_args)
+        if self._no_progress_counts.get(key, 0) >= self.max_repeats:
+            raise RepeatedToolCallLimitError(tool_name, self._no_progress_counts[key], norm_args)
+
+    def _record_result(self, tool_name: str, norm_args: str, result: Any) -> None:
+        key = (tool_name, norm_args)
+        content = getattr(result, "content", "")
+        status = getattr(result, "status", None)
+        content_str = str(content).strip()
+        is_err = status == "error" or "error:" in content_str.lower() or not content_str
+        last = self._last_responses.get(key)
+
+        if is_err or (last is not None and last == content_str):
+            self._no_progress_counts[key] = self._no_progress_counts.get(key, 0) + 1
+            self._last_responses[key] = content_str
+            if self._no_progress_counts[key] >= self.max_repeats:
+                raise RepeatedToolCallLimitError(tool_name, self._no_progress_counts[key], norm_args)
+        else:
+            self._no_progress_counts[key] = 0
+            self._last_responses[key] = content_str
+
+    def wrap_tool_call(self, request, handler):
+        tool_call = getattr(request, "tool_call", None) or {}
+        name = tool_call.get("name") or "unknown"
+        norm_args = _canonical_args(tool_call.get("args"))
+        self._check_before_call(name, norm_args)
+        result = handler(request)
+        self._record_result(name, norm_args, result)
+        return result
+
+    async def awrap_tool_call(self, request, handler):
+        tool_call = getattr(request, "tool_call", None) or {}
+        name = tool_call.get("name") or "unknown"
+        norm_args = _canonical_args(tool_call.get("args"))
+        self._check_before_call(name, norm_args)
+        result = await handler(request)
+        self._record_result(name, norm_args, result)
+        return result
+
+
+
 MW_BUILDERS: dict[str, Builder] = {
     "summarization": _summarization,
     "human_in_the_loop": lambda c, ctx: HumanInTheLoopMiddleware(interrupt_on=c["interrupt_on"]),
@@ -553,6 +626,9 @@ MW_BUILDERS: dict[str, Builder] = {
     "guardrail_regex": _guardrail_regex,
     "tenant_budget": _tenant_budget,
     "semantic_cache": _semantic_cache,
+    "repeated_tool_call": lambda c, ctx: RepeatedToolCallMiddleware(
+        max_repeats=int(c.get("max_repeats", 3))
+    ),
 }
 
 

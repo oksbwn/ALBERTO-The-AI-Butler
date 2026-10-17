@@ -10,18 +10,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
+import os
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from typing import Any
 
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from sqlalchemy import or_, select
 
 from alberto.config import settings
 from alberto.db.base import SessionLocal
 from alberto.db.scoping import set_current_tenant
 from alberto.engine.compiler import compile_workflow
+from alberto.engine.middleware_compiler import RepeatedToolCallLimitError
 from alberto.models import Run, Thread, Trace, Workflow
 from alberto.services.runtime import build_compile_context
 from alberto.tracing.tracer import ForgeTracer
@@ -146,20 +150,38 @@ class _RunBroker:
     """Ordered, replayable, multi-subscriber event buffer for one run episode. Frames get a
     monotonic seq (the SSE event id); subscribers replay from a Last-Event-ID then follow live."""
 
-    def __init__(self) -> None:
+    def __init__(self, maxlen: int | None = None) -> None:
         self.seq = 0
-        self.events: list[tuple[int, dict]] = []
+        limit = maxlen or getattr(settings, "sse_event_buffer_size", 1000) or 1000
+        self.events: deque[tuple[int, dict]] = deque(maxlen=limit)
         self.done = asyncio.Event()
         self._subs: set[asyncio.Queue] = set()
+        self.sub_queue_size = limit
         self._lock = asyncio.Lock()
+
+    def has_evicted(self, last_event_id: int) -> bool:
+        """Returns True if last_event_id was published in this broker but has since been evicted."""
+        if last_event_id <= 0:
+            return False
+        if not self.events:
+            return False
+        oldest_seq = self.events[0][0]
+        return last_event_id < oldest_seq and last_event_id <= self.seq
 
     async def publish(self, frame: dict) -> None:
         async with self._lock:
             self.seq += 1
             item = (self.seq, frame)
             self.events.append(item)
-            for q in self._subs:
-                q.put_nowait(item)
+            dead_subs = []
+            for q in list(self._subs):
+                try:
+                    q.put_nowait(item)
+                except asyncio.QueueFull:
+                    log.warning("slow SSE subscriber queue full (%d items); dropping subscriber", self.sub_queue_size)
+                    dead_subs.append(q)
+            for q in dead_subs:
+                self._subs.discard(q)
 
     async def finish(self) -> None:
         async with self._lock:
@@ -167,13 +189,16 @@ class _RunBroker:
                 return
             self.done.set()
             for q in self._subs:
-                q.put_nowait((None, None))  # unblock live subscribers
+                try:
+                    q.put_nowait((None, None))  # unblock live subscribers
+                except asyncio.QueueFull:
+                    pass
 
     async def subscribe(self, last_event_id: int = 0) -> AsyncIterator[tuple[int, dict]]:
         """Replay buffered frames with seq > last_event_id, then follow live frames until finish.
         The queue is registered BEFORE the buffer snapshot so a frame published in the gap is
         queued (never lost); `last_yielded` dedups the buffer/queue overlap."""
-        q: asyncio.Queue = asyncio.Queue()
+        q: asyncio.Queue = asyncio.Queue(maxsize=self.sub_queue_size)
         async with self._lock:
             self._subs.add(q)
             buffered = list(self.events)
@@ -526,6 +551,25 @@ class RunService:
             ),
         )
         if broker is not None:
+            if broker.has_evicted(last_event_id):
+                if broker.done.is_set():
+                    async for frame in self._reattach_from_db(run_id, tenant_id, project_id, public):
+                        yield frame
+                    return
+                # Active run with evicted history: emit explicit gap event before continuing
+                oldest_id = broker.events[0][0] if broker.events else 1
+                yield {
+                    "event": "gap",
+                    "data": {
+                        "message": "Event history partially evicted from in-memory buffer",
+                        "requested_last_event_id": last_event_id,
+                        "oldest_retained_id": oldest_id,
+                        "resync": True,
+                    },
+                }
+                async for seq, frame in broker.subscribe(oldest_id - 1):
+                    yield {"id": str(seq), "event": frame["event"], "data": frame["data"]}
+                return
             async for seq, frame in broker.subscribe(last_event_id):
                 yield {"id": str(seq), "event": frame["event"], "data": frame["data"]}
             return
@@ -677,69 +721,99 @@ class RunService:
                     # which marks the run canceled.
                     cancel_ev = run_control.begin(run.id, tenant_id)
                     wall_clock = RUN_WALL_CLOCK_TIMEOUT_SECONDS
-                    started_monotonic = time.monotonic()
                     canceled = timed_out = False
                     if resume:
                         resume_value = await _expand_hitl_decisions(graph, config, resume_value)
                     driver = Command(resume=resume_value) if resume else run.input
-                    async for ns, mode, chunk in graph.astream(
-                        driver, config,
-                        stream_mode=["tasks", "updates", "messages", "custom"],
-                        subgraphs=True,
-                        durability=settings.run_durability,
-                    ):
-                        if cancel_ev.is_set():
-                            canceled = True
-                            break
-                        if wall_clock and (time.monotonic() - started_monotonic) > wall_clock:
-                            timed_out = True
-                            break
-                        # Flush any tool/sub-agent activity captured since the last frame (a live
-                        # timeline of where the run routed). Operator-only, like node_start (H5).
-                        while activity:
-                            act = activity.popleft()
-                            if not public:
-                                await broker.publish({"event": "activity", "data": act})
-                        if mode == "tasks" and isinstance(chunk, dict):
-                            # node_start / node_error expose internal workflow node names (and error
-                            # detail) - operator-only, never to an anonymous embed end user (H5).
-                            if public:
-                                continue
-                            name = chunk.get("name")
-                            if name in node_ids and "triggers" in chunk:
-                                await broker.publish({"event": "node_start", "data": {"node": name}})
-                            elif name in node_ids and chunk.get("error") is not None:
-                                await broker.publish({"event": "node_error", "data": {"node": name, "message": _client_error(public, run.id, str(chunk.get("error")))}})
-                            continue
-                        # "updates" frames carry internal node names + intermediate node state
-                        # (retrieved knowledge, tool results); never send them to the public embed
-                        # surface (H5). For operators, still skip subgraph-internal updates.
-                        if mode == "updates" and (public or ns):
-                            continue
-                        # In messages mode, only stream the agent's own answer tokens - never
-                        # tool-result / human-message content, nor a classifier/structured node's
-                        # internal tokens (both would otherwise leak into the chat bubble).
-                        if mode == "messages":
-                            # A deep_agent's sub-agent streams its OWN answer from a namespace whose
-                            # path contains a "tools:<id>" segment (the `task` spawner) - see the
-                            # deepagents streaming docs. Streaming both it AND the supervisor's
-                            # synthesis duplicated the reply in the chat. Suppress sub-agent tokens
-                            # (they stay visible in the activity timeline + Traces); this is precise
-                            # (unlike a depth check it won't hide a real agent inside a subworkflow).
-                            if any(str(seg).startswith("tools:") for seg in (ns or ())):
-                                continue
-                            msg = chunk[0] if isinstance(chunk, (list, tuple)) and chunk else chunk
-                            if getattr(msg, "type", "") not in ("ai", "AIMessageChunk"):
-                                continue
-                            meta = chunk[1] if isinstance(chunk, (list, tuple)) and len(chunk) == 2 else {}
-                            if (meta or {}).get("langgraph_node") in suppressed_message_nodes:
-                                continue
-                        data = serialize_stream(mode, chunk)
-                        # The internal node name rides along on message frames; strip it on the
-                        # public embed surface so node topology isn't exposed to end users (H5).
-                        if public and mode == "messages" and isinstance(data, dict):
-                            data.pop("node", None)
-                        await broker.publish({"event": mode, "data": data})
+                    try:
+                        async with asyncio.timeout(wall_clock if wall_clock and wall_clock > 0 else None):
+                            async for ns, mode, chunk in graph.astream(
+                                driver, config,
+                                stream_mode=["tasks", "updates", "messages", "custom"],
+                                subgraphs=True,
+                                durability=settings.run_durability,
+                            ):
+                                if cancel_ev.is_set():
+                                    canceled = True
+                                    break
+                                # Flush any tool/sub-agent activity captured since the last frame (a live
+                                # timeline of where the run routed). Operator-only, like node_start (H5).
+                                while activity:
+                                    act = activity.popleft()
+                                    if not public:
+                                        await broker.publish({"event": "activity", "data": act})
+                                if mode == "tasks" and isinstance(chunk, dict):
+                                    # node_start / node_error expose internal workflow node names (and error
+                                    # detail) - operator-only, never to an anonymous embed end user (H5).
+                                    if public:
+                                        continue
+                                    name = chunk.get("name")
+                                    if name in node_ids and "triggers" in chunk:
+                                        await broker.publish({"event": "node_start", "data": {"node": name}})
+                                    elif name in node_ids and chunk.get("error") is not None:
+                                        await broker.publish({"event": "node_error", "data": {"node": name, "message": _client_error(public, run.id, str(chunk.get("error")))}})
+                                    continue
+                                # "updates" frames carry internal node names + intermediate node state
+                                # (retrieved knowledge, tool results); never send them to the public embed
+                                # surface (H5). For operators, still skip subgraph-internal updates.
+                                if mode == "updates" and (public or ns):
+                                    continue
+                                # In messages mode, only stream the agent's own answer tokens - never
+                                # tool-result / human-message content, nor a classifier/structured node's
+                                # internal tokens (both would otherwise leak into the chat bubble).
+                                if mode == "messages":
+                                    # A deep_agent's sub-agent streams its OWN answer from a namespace whose
+                                    # path contains a "tools:<id>" segment (the `task` spawner) - see the
+                                    # deepagents streaming docs. Streaming both it AND the supervisor's
+                                    # synthesis duplicated the reply in the chat. Suppress sub-agent tokens
+                                    # (they stay visible in the activity timeline + Traces); this is precise
+                                    # (unlike a depth check it won't hide a real agent inside a subworkflow).
+                                    if any(str(seg).startswith("tools:") for seg in (ns or ())):
+                                        continue
+                                    msg = chunk[0] if isinstance(chunk, (list, tuple)) and chunk else chunk
+                                    if getattr(msg, "type", "") not in ("ai", "AIMessageChunk"):
+                                        continue
+                                    meta = chunk[1] if isinstance(chunk, (list, tuple)) and len(chunk) == 2 else {}
+                                    if (meta or {}).get("langgraph_node") in suppressed_message_nodes:
+                                        continue
+                                data = serialize_stream(mode, chunk)
+                                # The internal node name rides along on message frames; strip it on the
+                                # public embed surface so node topology isn't exposed to end users (H5).
+                                if public and mode == "messages" and isinstance(data, dict):
+                                    data.pop("node", None)
+                                await broker.publish({"event": mode, "data": data})
+                    except TimeoutError:
+                        timed_out = True
+                    except RepeatedToolCallLimitError as e:
+                        detail = str(e)
+                        try:
+                            snapshot = await graph.aget_state(config)
+                        except Exception:
+                            snapshot = None
+                        await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="repeated_tool_call_limit")
+                        finalized = True
+                        await broker.publish({"event": "error", "data": {"message": _client_error(public, run.id, detail)}})
+                        return
+                    except ToolCallLimitExceededError as e:
+                        detail = str(e)
+                        try:
+                            snapshot = await graph.aget_state(config)
+                        except Exception:
+                            snapshot = None
+                        await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="tool_call_limit")
+                        finalized = True
+                        await broker.publish({"event": "error", "data": {"message": _client_error(public, run.id, detail)}})
+                        return
+                    except ModelCallLimitExceededError as e:
+                        detail = str(e)
+                        try:
+                            snapshot = await graph.aget_state(config)
+                        except Exception:
+                            snapshot = None
+                        await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="model_call_limit")
+                        finalized = True
+                        await broker.publish({"event": "error", "data": {"message": _client_error(public, run.id, detail)}})
+                        return
 
                     # Flush trailing tool/sub-agent activity (final "end" frames) before closing.
                     while activity:
@@ -747,12 +821,14 @@ class RunService:
                         if not public:
                             await broker.publish({"event": "activity", "data": act})
 
-                    snapshot = await graph.aget_state(config)
-                    # Cooperative stop hit between frames: finalize with the right terminal state
-                    # and emit a closing frame, then stop (the tenant slot frees as we exit).
+                    try:
+                        snapshot = await graph.aget_state(config)
+                    except Exception:
+                        snapshot = None
+                    # Cooperative stop hit between frames or wall-clock timeout:
                     if canceled or timed_out:
                         if canceled:
-                            await self._finalize(session, run, tracer, snapshot, status="canceled")
+                            await self._finalize(session, run, tracer, snapshot, status="canceled", termination_reason="canceled")
                             finalized = True
                             await broker.publish({"event": "done", "data": {
                                 "status": "canceled",
@@ -761,7 +837,7 @@ class RunService:
                             }})
                         else:
                             detail = f"run exceeded the wall-clock timeout ({wall_clock}s)"
-                            await self._finalize_error(session, run, tracer, detail, snapshot=snapshot)
+                            await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="wall_clock_timeout")
                             finalized = True
                             await broker.publish({"event": "error", "data": {"message": _client_error(public, run.id, detail)}})
                         return
@@ -771,10 +847,13 @@ class RunService:
                     await self._finalize(
                         session, run, tracer, snapshot,
                         status="interrupted" if interrupted else "done",
+                        termination_reason="interrupted" if interrupted else "completed",
                     )
                     finalized = True
 
-                    if interrupted:
+                    if run.status == "canceled":
+                        await broker.publish({"event": "done", "data": {"status": "canceled", "answer": "", "canceled": True}})
+                    elif interrupted:
                         payload = [
                             jsonable(getattr(t, "interrupts", None))
                             for t in getattr(snapshot, "tasks", [])
@@ -875,35 +954,65 @@ class RunService:
                     # Cooperative cancel + wall-clock timeout on the non-SSE path too (audit H).
                     cancel_ev = run_control.begin(run.id, tenant_id)
                     wall_clock = RUN_WALL_CLOCK_TIMEOUT_SECONDS
-                    started_monotonic = time.monotonic()
                     canceled = timed_out = False
-                    async for _ns, _mode, _chunk in graph.astream(
-                        run.input, config, stream_mode=["custom"], subgraphs=True, durability=settings.run_durability,
-                    ):
-                        if cancel_ev.is_set():
-                            canceled = True
-                            break
-                        if wall_clock and (time.monotonic() - started_monotonic) > wall_clock:
-                            timed_out = True
-                            break
-                        if _mode == "custom" and isinstance(_chunk, dict) and _chunk.get("channel") == "component":
-                            components.append(_chunk.get("payload"))
-                    snapshot = await graph.aget_state(config)
+                    try:
+                        async with asyncio.timeout(wall_clock if wall_clock and wall_clock > 0 else None):
+                            async for _ns, _mode, _chunk in graph.astream(
+                                run.input, config, stream_mode=["custom"], subgraphs=True, durability=settings.run_durability,
+                            ):
+                                if cancel_ev.is_set():
+                                    canceled = True
+                                    break
+                                if _mode == "custom" and isinstance(_chunk, dict) and _chunk.get("channel") == "component":
+                                    components.append(_chunk.get("payload"))
+                    except TimeoutError:
+                        timed_out = True
+                    except RepeatedToolCallLimitError as e:
+                        detail = str(e)
+                        try:
+                            snapshot = await graph.aget_state(config)
+                        except Exception:
+                            snapshot = None
+                        await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="repeated_tool_call_limit")
+                        return {"run_id": run.id, "status": "error", "error": detail, "answer": "", "termination_reason": "repeated_tool_call_limit"}
+                    except ToolCallLimitExceededError as e:
+                        detail = str(e)
+                        try:
+                            snapshot = await graph.aget_state(config)
+                        except Exception:
+                            snapshot = None
+                        await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="tool_call_limit")
+                        return {"run_id": run.id, "status": "error", "error": detail, "answer": "", "termination_reason": "tool_call_limit"}
+                    except ModelCallLimitExceededError as e:
+                        detail = str(e)
+                        try:
+                            snapshot = await graph.aget_state(config)
+                        except Exception:
+                            snapshot = None
+                        await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="model_call_limit")
+                        return {"run_id": run.id, "status": "error", "error": detail, "answer": "", "termination_reason": "model_call_limit"}
+
+                    try:
+                        snapshot = await graph.aget_state(config)
+                    except Exception:
+                        snapshot = None
                     if canceled or timed_out:
                         detail = "run canceled by operator" if canceled else f"run exceeded the wall-clock timeout ({wall_clock}s)"
                         if canceled:
-                            await self._finalize(session, run, tracer, snapshot, status="canceled")
+                            await self._finalize(session, run, tracer, snapshot, status="canceled", termination_reason="canceled")
                         else:
-                            await self._finalize_error(session, run, tracer, detail, snapshot=snapshot)
+                            await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="wall_clock_timeout")
                         return {"run_id": run.id, "status": run.status, "interrupted": False,
                                 "answer": "", "components": components,
-                                "canceled": canceled, "error": None if canceled else detail}
+                                "canceled": canceled, "error": None if canceled else detail,
+                                "termination_reason": run.termination_reason}
                     interrupted = bool(getattr(snapshot, "next", ())) and any(
                         getattr(t, "interrupts", None) for t in getattr(snapshot, "tasks", [])
                     )
                     await self._finalize(
                         session, run, tracer, snapshot,
                         status="interrupted" if interrupted else "done",
+                        termination_reason="interrupted" if interrupted else "completed",
                     )
                 interrupts = [
                     jsonable(getattr(t, "interrupts", None))
@@ -979,7 +1088,42 @@ class RunService:
                     )
                     graph = compile_workflow(wf.executable, ctx)
                     value = await _expand_hitl_decisions(graph, config, value)
-                    out = await graph.ainvoke(Command(resume=value), config)
+                    wall_clock = RUN_WALL_CLOCK_TIMEOUT_SECONDS
+                    try:
+                        async with asyncio.timeout(wall_clock if wall_clock and wall_clock > 0 else None):
+                            out = await graph.ainvoke(Command(resume=value), config)
+                    except TimeoutError:
+                        try:
+                            snapshot = await graph.aget_state(config)
+                        except Exception:
+                            snapshot = None
+                        detail = f"run exceeded the wall-clock timeout ({wall_clock}s)"
+                        await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="wall_clock_timeout")
+                        return {"error": detail, "status": "error", "termination_reason": "wall_clock_timeout"}
+                    except RepeatedToolCallLimitError as e:
+                        detail = str(e)
+                        try:
+                            snapshot = await graph.aget_state(config)
+                        except Exception:
+                            snapshot = None
+                        await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="repeated_tool_call_limit")
+                        return {"error": detail, "status": "error", "termination_reason": "repeated_tool_call_limit"}
+                    except ToolCallLimitExceededError as e:
+                        detail = str(e)
+                        try:
+                            snapshot = await graph.aget_state(config)
+                        except Exception:
+                            snapshot = None
+                        await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="tool_call_limit")
+                        return {"error": detail, "status": "error", "termination_reason": "tool_call_limit"}
+                    except ModelCallLimitExceededError as e:
+                        detail = str(e)
+                        try:
+                            snapshot = await graph.aget_state(config)
+                        except Exception:
+                            snapshot = None
+                        await self._finalize_error(session, run, tracer, detail, snapshot=snapshot, termination_reason="model_call_limit")
+                        return {"error": detail, "status": "error", "termination_reason": "model_call_limit"}
                     snapshot = await graph.aget_state(config)
                     interrupted = bool(getattr(snapshot, "next", ())) and any(
                         getattr(t, "interrupts", None) for t in getattr(snapshot, "tasks", [])
@@ -987,6 +1131,7 @@ class RunService:
                     await self._finalize(
                         session, run, tracer, snapshot,
                         status="interrupted" if interrupted else "done",
+                        termination_reason="interrupted" if interrupted else "completed",
                     )
                 # Interrupt payloads for a RE-interrupt (chained HITL), so the handoff reply path
                 # can open a fresh handoff for the next step + surface the next ack (audit B).
@@ -1013,37 +1158,63 @@ class RunService:
                 return {"error": _client_error(public, run.id, str(e))}
 
     async def cancel_run(self, *, run_id: str, tenant_id: str, project_id: str | None = None) -> dict:
-        """Cooperatively cancel a run (audit H): mark it canceled, signal any live loop in this
-        process to stop (+ hard task-cancel backstop), free the tenant-concurrency slot (it frees
+        """Cooperatively cancel a run: mark it canceled via atomic DB CAS, signal any live loop
+        in this process to stop (+ hard task-cancel backstop), free the tenant-concurrency slot (it frees
         as the signaled loop exits), and close any open handoff. A terminal run is a no-op."""
+        from sqlalchemy import func, update
+
         set_current_tenant(tenant_id)
+        signaled = run_control.request_cancel(run_id, hard=True)
+        now = datetime.utcnow()
         async with SessionLocal() as session:
-            where = [Run.tenant_id == tenant_id, Run.id == run_id]
+            where = [
+                Run.tenant_id == tenant_id,
+                Run.id == run_id,
+                Run.status.in_(("queued", "running", "interrupted")),
+            ]
             if project_id is not None:
                 where.append(Run.project_id == project_id)
-            run = (await session.execute(select(Run).where(*where))).scalar_one_or_none()
-            if run is None:
-                return {"ok": False, "error": "run not found", "status": None}
-            if run.status in ("done", "error", "canceled"):
-                return {"ok": False, "status": run.status, "detail": f"run already {run.status}"}
-            prev = run.status
-            # Signal a live loop first so its own finalize converges on 'canceled'. For a queued /
-            # interrupted run (no live loop) the DB write below is the authoritative stop.
-            signaled = run_control.request_cancel(run_id, hard=True)
-            run.status = "canceled"
-            run.error = run.error or "run canceled by operator"
-            run.ended_at = datetime.utcnow()
+
+            stmt = (
+                update(Run)
+                .where(*where)
+                .values(
+                    status="canceled",
+                    termination_reason="canceled",
+                    error=func.coalesce(Run.error, "run canceled by operator"),
+                    ended_at=now,
+                )
+            )
+            res = await session.execute(stmt)
             await session.commit()
-            # Close any open handoff for this run (an interrupted run may have one waiting).
-            try:
-                from alberto.services.handoff import HandoffService
+            rowcount = int(getattr(res, "rowcount", 0) or 0)
+            if rowcount > 0:
+                # Close any open handoff for this run (an interrupted run may have one waiting).
+                try:
+                    from alberto.services.handoff import HandoffService
 
-                await HandoffService.close_for_run(session, run_id, tenant_id, reason="run canceled")
-            except Exception:  # noqa: BLE001 - handoff close is best-effort
-                log.debug("cancel_run: handoff close failed for %s", run_id, exc_info=True)
-            return {"ok": True, "status": "canceled", "previous_status": prev, "signaled": signaled}
+                    await HandoffService.close_for_run(session, run_id, tenant_id, reason="run canceled")
+                except Exception:  # noqa: BLE001 - handoff close is best-effort
+                    log.debug("cancel_run: handoff close failed for %s", run_id, exc_info=True)
+                return {"ok": True, "status": "canceled", "signaled": signaled}
 
-    async def _write_trace(self, session, run: Run, tracer: ForgeTracer, *, status: str, values: dict | None = None):
+            # If 0 rows updated, check current status in DB
+            check_where = [Run.tenant_id == tenant_id, Run.id == run_id]
+            if project_id is not None:
+                check_where.append(Run.project_id == project_id)
+            current_status = (
+                await session.execute(select(Run.status).where(*check_where))
+            ).scalar_one_or_none()
+            if current_status is None:
+                return {"ok": False, "error": "run not found", "status": None}
+            if current_status == "canceled":
+                return {"ok": False, "status": "canceled", "detail": "run already canceled", "signaled": signaled}
+            return {"ok": False, "status": current_status, "detail": f"run already {current_status}"}
+
+    async def _write_trace(
+        self, session, run: Run, tracer: ForgeTracer, *, status: str, values: dict | None = None,
+        iterations_count: int = 0, tool_calls_count: int = 0, termination_reason: str | None = None,
+    ):
         """Persist a Trace + its Span rows from the tracer. Shared by the success,
         interrupt, AND error paths so a failed run is observable too (audit F5).
         `values` is the final LangGraph state (for the AI-response transcript).
@@ -1072,6 +1243,9 @@ class RunService:
             latency_ms=latency_ms,
             total_tokens=tokens,
             total_cost_usd=cost,
+            iterations_count=iterations_count,
+            tool_calls_count=tool_calls_count,
+            termination_reason=termination_reason or ("completed" if status == "done" else status),
             source=source,
             actor=_actor_label(source, eu),
             end_user_id=(eu or {}).get("id"),
@@ -1106,50 +1280,137 @@ class RunService:
             )
         return tokens, cost, spans
 
-    async def _finalize(self, session, run: Run, tracer: ForgeTracer, snapshot, *, status: str) -> None:
+    async def _finalize(self, session, run: Run, tracer: ForgeTracer, snapshot, *, status: str, termination_reason: str | None = None) -> None:
+        from sqlalchemy import update
+
         values = getattr(snapshot, "values", {}) or {}
-        tokens, cost, spans = await self._write_trace(session, run, tracer, status=status, values=values)
+        spans = tracer.ordered()
+        iterations_count = sum(1 for s in spans if s.kind in ("llm", "agent"))
+        tool_calls_count = sum(1 for s in spans if s.kind == "tool")
+        tokens, cost, spans = await self._write_trace(
+            session, run, tracer, status=status, values=values,
+            iterations_count=iterations_count, tool_calls_count=tool_calls_count,
+            termination_reason=termination_reason or ("completed" if status == "done" else status),
+        )
         try:
-            run.output = jsonable(values)
+            serialized_output = jsonable(values)
         except Exception:  # noqa: BLE001 - never let a non-serializable state strand the run
             log.exception("failed to serialize output for run %s", run.id)
-            run.output = {}
-        run.status = status
-        run.total_tokens = tokens
-        run.total_cost_usd = cost
-        run.ended_at = datetime.utcnow()
+            serialized_output = {}
+
+        now = datetime.utcnow()
+        term_reason = termination_reason or ("completed" if status == "done" else status)
+        stmt = (
+            update(Run)
+            .where(
+                Run.id == run.id,
+                Run.tenant_id == run.tenant_id,
+                Run.status.in_(("running", "queued")),
+            )
+            .values(
+                status=status,
+                output=serialized_output,
+                iterations_count=iterations_count,
+                tool_calls_count=tool_calls_count,
+                termination_reason=term_reason,
+                total_tokens=tokens,
+                total_cost_usd=cost,
+                ended_at=now,
+            )
+        )
+        res = await session.execute(stmt)
         await session.commit()
+        rowcount = int(getattr(res, "rowcount", 0) or 0)
+        if rowcount == 0:
+            await session.refresh(run)
+            log.info("finalize: run %s already in terminal status %s; ignored transition to %s", run.id, run.status, status)
+            trace_stmt = (
+                update(Trace)
+                .where(Trace.run_id == run.id, Trace.tenant_id == run.tenant_id)
+                .values(status=run.status, termination_reason=run.termination_reason or run.status)
+            )
+            await session.execute(trace_stmt)
+            await session.commit()
+        else:
+            run.status = status
+            run.output = serialized_output
+            run.iterations_count = iterations_count
+            run.tool_calls_count = tool_calls_count
+            run.termination_reason = term_reason
+            run.total_tokens = tokens
+            run.total_cost_usd = cost
+            run.ended_at = now
 
         # Export to OpenTelemetry (no-op unless configured).
         from alberto.tracing import otel
 
         otel.export(spans, trace_name="run")
 
-    async def _finalize_error(self, session, run: Run, tracer: ForgeTracer, error: str, snapshot=None) -> None:
+    async def _finalize_error(self, session, run: Run, tracer: ForgeTracer, error: str, snapshot=None, termination_reason: str | None = None) -> None:
         """Error path: persist the partial trace/spans (so failures are observable, F5),
-        mark the run errored, and never raise (a finalize failure must not mask the
-        original error or strand the run)."""
-        run.error = error
+        mark the run errored via atomic CAS, and never raise."""
+        from sqlalchemy import update
+
+        values = getattr(snapshot, "values", {}) or {}
+        spans = tracer.ordered()
+        iterations_count = sum(1 for s in spans if s.kind in ("llm", "agent"))
+        tool_calls_count = sum(1 for s in spans if s.kind == "tool")
+        term_reason = termination_reason or "error"
         try:
-            values = getattr(snapshot, "values", {}) or {}
-            tokens, cost, spans = await self._write_trace(session, run, tracer, status="error", values=values)
-            run.total_tokens = tokens
-            run.total_cost_usd = cost
-            values = getattr(snapshot, "values", {}) or {}
-            if values:
-                try:
-                    run.output = jsonable(values)
-                except Exception:  # noqa: BLE001
-                    pass
+            tokens, cost, spans = await self._write_trace(
+                session, run, tracer, status="error", values=values,
+                iterations_count=iterations_count, tool_calls_count=tool_calls_count,
+                termination_reason=term_reason,
+            )
         except Exception:  # noqa: BLE001
             log.exception("failed to persist error trace for run %s", run.id)
-            spans = []
-        run.status = "error"
-        run.ended_at = datetime.utcnow()
+            tokens, cost, spans = 0, 0.0, []
+
+        now = datetime.utcnow()
+        stmt = (
+            update(Run)
+            .where(
+                Run.id == run.id,
+                Run.tenant_id == run.tenant_id,
+                Run.status.in_(("running", "queued")),
+            )
+            .values(
+                status="error",
+                error=error,
+                iterations_count=iterations_count,
+                tool_calls_count=tool_calls_count,
+                termination_reason=term_reason,
+                total_tokens=tokens,
+                total_cost_usd=cost,
+                ended_at=now,
+            )
+        )
         try:
+            res = await session.execute(stmt)
             await session.commit()
+            rowcount = int(getattr(res, "rowcount", 0) or 0)
+            if rowcount == 0:
+                await session.refresh(run)
+                log.info("finalize_error: run %s already in terminal status %s; ignored error transition", run.id, run.status)
+                trace_stmt = (
+                    update(Trace)
+                    .where(Trace.run_id == run.id, Trace.tenant_id == run.tenant_id)
+                    .values(status=run.status, termination_reason=run.termination_reason or run.status)
+                )
+                await session.execute(trace_stmt)
+                await session.commit()
+            else:
+                run.status = "error"
+                run.error = error
+                run.iterations_count = iterations_count
+                run.tool_calls_count = tool_calls_count
+                run.termination_reason = term_reason
+                run.total_tokens = tokens
+                run.total_cost_usd = cost
+                run.ended_at = now
         except Exception:  # noqa: BLE001
             log.exception("failed to commit error state for run %s", run.id)
+
         try:
             from alberto.tracing import otel
 
@@ -1162,18 +1423,26 @@ class RunService:
         """Mark a run that never reached a terminal state (client disconnect / cancellation)
         so it can't stick at status='running' forever (audit F1). Uses a FRESH session and
         is shielded from the cancellation that triggered it so the write actually lands."""
+        from sqlalchemy import func, update
 
         async def _do() -> None:
             async with SessionLocal() as s:
-                run = (
-                    await s.execute(select(Run).where(Run.tenant_id == tenant_id, Run.id == run_id))
-                ).scalar_one_or_none()
-                if run is not None and run.status in ("queued", "running"):
-                    run.status = status
-                    if error:
-                        run.error = error
-                    run.ended_at = datetime.utcnow()
-                    await s.commit()
+                stmt = (
+                    update(Run)
+                    .where(
+                        Run.tenant_id == tenant_id,
+                        Run.id == run_id,
+                        Run.status.in_(("queued", "running")),
+                    )
+                    .values(
+                        status=status,
+                        termination_reason=status,
+                        error=func.coalesce(Run.error, error) if error else Run.error,
+                        ended_at=datetime.utcnow(),
+                    )
+                )
+                await s.execute(stmt)
+                await s.commit()
 
         try:
             await asyncio.shield(_do())
@@ -1201,19 +1470,48 @@ class RunService:
         hitl_cut = now - timedelta(seconds=hitl_timeout_s) if hitl_on else None
         reaped = 0
         expired_hitl: list[tuple[str, str, str]] = []  # (run_id, tenant_id, workflow_id)
+
+        # Inspect SQLite worker queue to protect active running leases and legitimately queued jobs
+        active_queue_runs: set[str] = set()
+        queued_in_sqlite: set[str] = set()
+        if os.path.exists(settings.queue_db_path):
+            try:
+                import aiosqlite
+                lease_timeout = float(settings.worker_lease_timeout_seconds)
+                active_cutoff = (now - timedelta(seconds=lease_timeout)).strftime("%Y-%m-%d %H:%M:%S")
+                async with aiosqlite.connect(settings.queue_db_path) as qdb:
+                    async with qdb.execute(
+                        "SELECT run_id FROM job_queue WHERE status = 'running' AND locked_at >= ?",
+                        (active_cutoff,),
+                    ) as cur:
+                        active_queue_runs = {r[0] for r in await cur.fetchall()}
+                    async with qdb.execute(
+                        "SELECT run_id FROM job_queue WHERE status = 'queued'"
+                    ) as cur:
+                        queued_in_sqlite = {r[0] for r in await cur.fetchall()}
+            except Exception:
+                log.debug("could not inspect sqlite queue during reap_stale_runs", exc_info=True)
+
         async with SessionLocal() as s:
             statuses = ["queued", "running"] + (["interrupted"] if hitl_on else [])
             rows = (
                 await s.execute(select(Run).where(Run.status.in_(statuses)))
             ).scalars().all()
             for run in rows:
-                if run.status == "queued" and (run.created_at or now) < q_cut:
+                if run.status == "queued" and run.id not in queued_in_sqlite and (run.created_at or now) < q_cut:
                     run.status = "error"
+                    run.termination_reason = "expired_queued"
                     run.error = "run expired before execution (never started)"
                     run.ended_at = now
                     reaped += 1
-                elif run.status == "running" and (run.started_at or run.created_at or now) < r_cut:
+                elif (
+                    run.status == "running"
+                    and run.id not in active_queue_runs
+                    and not run_control.is_running(run.id)
+                    and (run.started_at or run.created_at or now) < r_cut
+                ):
                     run.status = "error"
+                    run.termination_reason = "stale_running_reaped"
                     run.error = "run exceeded maximum duration and was reaped"
                     run.ended_at = now
                     reaped += 1

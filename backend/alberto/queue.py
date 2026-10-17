@@ -177,12 +177,28 @@ class SqliteJobQueue(BaseQueue):
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         locked_at TIMESTAMP,
-                        locked_by TEXT
+                        locked_by TEXT,
+                        available_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
+                async with db.execute("PRAGMA table_info(job_queue);") as cursor:
+                    cols = [row[1] for row in await cursor.fetchall()]
+                if "available_at" not in cols:
+                    await db.execute("ALTER TABLE job_queue ADD COLUMN available_at TIMESTAMP;")
+                    await db.execute("UPDATE job_queue SET available_at = CURRENT_TIMESTAMP WHERE available_at IS NULL;")
+                if "lease_token" not in cols:
+                    await db.execute("ALTER TABLE job_queue ADD COLUMN lease_token TEXT;")
                 await db.execute("""
                     CREATE INDEX IF NOT EXISTS idx_job_queue_status_created
                     ON job_queue(status, created_at);
+                """)
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_job_queue_status_avail
+                    ON job_queue(status, available_at);
+                """)
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_job_queue_lease
+                    ON job_queue(id, lease_token);
                 """)
                 await db.commit()
             self._init_done = True
@@ -194,8 +210,8 @@ class SqliteJobQueue(BaseQueue):
                 await db.execute("PRAGMA busy_timeout=5000;")
                 await db.execute(
                     """
-                    INSERT INTO job_queue (run_id, tenant_id, project_id, status)
-                    VALUES (?, ?, ?, 'queued');
+                    INSERT INTO job_queue (run_id, tenant_id, project_id, status, available_at)
+                    VALUES (?, ?, ?, 'queued', CURRENT_TIMESTAMP);
                     """,
                     (run_id, tenant_id, project_id),
                 )
