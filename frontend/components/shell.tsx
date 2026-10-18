@@ -283,6 +283,7 @@ export function ProjectSidebar({
   const [flyoutPos, setFlyoutPos] = useState<{ top: number } | null>(null);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     automate: true,
+    knowledge_group: true,
     integrations: true,
     observability: true,
   });

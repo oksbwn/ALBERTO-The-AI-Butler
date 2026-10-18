@@ -859,6 +859,11 @@ export const api = {
     return json<GraphPath[]>(`/v1/projects/${pid}/graph/entities/${encodeURIComponent(entityId)}/neighbors${qs ? `?${qs}` : ""}`);
   },
   memoryStatus: (pid: string) => json<MemoryStatus>(`/v1/projects/${pid}/memory/status`),
+  recallMemory: (pid: string, body: { query: string; sources?: string[]; scope?: string; top_k?: number }) =>
+    json<{ query: string; results: { source: string; record_id: string; content: string; score?: number; metadata?: any; provenance?: string }[] }>(
+      `/v1/projects/${pid}/memory/recall`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   listMemoryRecords: (pid: string, opts?: { status?: string; kind?: string }) => {
     const q = new URLSearchParams();
     if (opts?.status) q.set("status", opts.status);
