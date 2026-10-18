@@ -86,7 +86,10 @@ async def _reaper_loop(app: FastAPI) -> None:
     from alberto.services.runs import RunService
 
     log = logging.getLogger("forge.reaper")
-    run_service = RunService(checkpointer=app.state.checkpointer, store=app.state.store)
+    run_service = RunService(
+        checkpointer=getattr(app.state, "checkpointer", None),
+        store=getattr(app.state, "store", None),
+    )
     while True:
         try:
             await asyncio.sleep(300)
@@ -125,7 +128,10 @@ async def _scheduler_loop(app: FastAPI) -> None:
     from alberto.services.runs import RunService
 
     log = logging.getLogger("forge.scheduler")
-    run_service = RunService(checkpointer=app.state.checkpointer, store=app.state.store)
+    run_service = RunService(
+        checkpointer=getattr(app.state, "checkpointer", None),
+        store=getattr(app.state, "store", None),
+    )
     while True:
         try:
             await asyncio.sleep(60)
@@ -180,13 +186,17 @@ async def lifespan(app: FastAPI):
         if settings.seed_demo:
             await seed_demo_data(session, tenant_id)
         app.state.tenant_id = tenant_id
+    app.state.store = None
     from alberto.knowledge.graph import get_graph_adapter
     app.state.graph_db = get_graph_adapter()
     # Immediate startup sweep for stranded runs and abandoned tasks from previous process (Milestone 1.6)
     with contextlib.suppress(Exception):
         from alberto.services.runs import RunService
 
-        startup_run_service = RunService(checkpointer=app.state.checkpointer, store=app.state.store)
+        startup_run_service = RunService(
+            checkpointer=getattr(app.state, "checkpointer", None),
+            store=getattr(app.state, "store", None),
+        )
         reaped = await startup_run_service.reap_stale_runs(
             queued_max_age_s=settings.run_wall_clock_timeout_seconds * 3,
             running_max_age_s=settings.run_wall_clock_timeout_seconds,
