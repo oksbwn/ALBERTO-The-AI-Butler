@@ -220,7 +220,10 @@ class MemoryCuratorService:
             rm = ctx.registered_models[chosen]
             display_name = rm.display_name or rm.model_name or display_name
             if getattr(rm, "supports_tools", None) is not None:
-                setattr(model, "supports_tools", rm.supports_tools)  # noqa: B010
+                try:
+                    object.__setattr__(model, "supports_tools", rm.supports_tools)
+                except Exception:
+                    pass
         return model, display_name
 
     get_configured_model = get_curator_model

@@ -1111,6 +1111,10 @@ class AssistantService:
                     }
                 except Exception as me:
                     log.warning("Assistant memory recall error: %s", me)
+                    try:
+                        await s.rollback()
+                    except Exception:
+                        pass
 
             if recalled_block:
                 fast_sys_prompt = f"{fast_sys_prompt}\n\n{recalled_block}"
@@ -1120,12 +1124,19 @@ class AssistantService:
             if thread_id:
                 from alberto.services.conversations import ConversationService
 
-                prior_traces = await ConversationService.turns(s, tenant_id, project_id, thread_id)
-                for pt in prior_traces:
-                    if pt.user_message:
-                        history_turns.append({"role": "user", "content": pt.user_message})
-                    if pt.ai_response:
-                        history_turns.append({"role": "assistant", "content": pt.ai_response})
+                try:
+                    prior_traces = await ConversationService.turns(s, tenant_id, project_id, thread_id)
+                    for pt in prior_traces:
+                        if pt.user_message:
+                            history_turns.append({"role": "user", "content": pt.user_message})
+                        if pt.ai_response:
+                            history_turns.append({"role": "assistant", "content": pt.ai_response})
+                except Exception as he:
+                    log.warning("Assistant history retrieval error: %s", he)
+                    try:
+                        await s.rollback()
+                    except Exception:
+                        pass
 
             if not history_turns and len(messages) > 1:
                 # Explicit stateless messages sent by client

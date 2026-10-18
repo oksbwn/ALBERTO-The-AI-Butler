@@ -322,3 +322,54 @@ async def test_assistant_memory_recall_integration(sample_project: Project):
         assert "[RECALLED MEMORY & KNOWLEDGE CONTEXT]" in sys_msg
         assert "User prefers temperature set to 21C" in sys_msg
 
+
+@pytest.mark.asyncio
+async def test_assistant_fast_stream_resilient_to_recall_exception_and_restores_history(sample_project: Project):
+    """Fast streaming must roll back on memory recall errors and fetch history without PendingRollbackError."""
+    thread_id = f"test-thread-resilience-{id(object())}"
+
+    # Seed previous turn in DB
+    tracer1 = AlbertoTracer()
+    span1 = SpanRecord(id="span-prev", parent_id=None, name="llm", kind="llm", start=time.monotonic(), end=time.monotonic() + 0.1)
+    tracer1.spans["span-prev"] = span1
+    tracer1._order.append("span-prev")
+    await AssistantService._persist_trace(
+        tenant_id=sample_project.tenant_id,
+        project_id=sample_project.id,
+        thread_id=thread_id,
+        tracer=tracer1,
+        user_message="Previous user message",
+        ai_response="Previous AI response",
+        status="done",
+    )
+
+    captured_messages = []
+
+    class DummyModel:
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, messages, config=None):
+            captured_messages.extend(messages)
+            from langchain_core.messages import AIMessageChunk
+            yield AIMessageChunk(content="Recovered successfully.")
+
+    with (
+        patch("alberto.services.assistant.resolve_model", return_value=DummyModel()),
+        patch.object(UnifiedMemoryManager, "recall", new=AsyncMock(side_effect=RuntimeError("Simulated memory recall crash"))),
+    ):
+        chunks = []
+        async for chunk in AssistantService._fast_stream(
+            tenant_id=sample_project.tenant_id,
+            project_id=sample_project.id,
+            messages=[{"role": "user", "content": "Hello after crash"}],
+            thread_id=thread_id,
+        ):
+            chunks.append(chunk)
+
+        # Must have completed streaming without raising PendingRollbackError
+        assert any(c.get("event") == "messages" for c in chunks)
+        # History must still be present
+        user_texts = [m.content for m in captured_messages if getattr(m, "role", None) == "user" or m.__class__.__name__ == "HumanMessage"]
+        assert "Previous user message" in user_texts
+        assert "Hello after crash" in user_texts
