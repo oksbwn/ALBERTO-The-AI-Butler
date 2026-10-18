@@ -257,6 +257,7 @@ def cosine(a: list[float], b: list[float]) -> float:
 def check_embedding_model_status(model_id: str) -> dict:
     """Check if model weights exist in data/models/fastembed for the selected model."""
     from pathlib import Path
+
     from alberto.config import settings
 
     is_local = not (model_id and (model_id.startswith("openai:") or model_id.startswith("hosted:")))
@@ -308,6 +309,7 @@ async def download_embedding_model_weights(model_id: str) -> dict:
     """Download ONNX weights for ONLY the selected model into data/models/fastembed."""
     import asyncio
     from pathlib import Path
+
     from alberto.config import settings
 
     status = check_embedding_model_status(model_id)

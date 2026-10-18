@@ -257,6 +257,49 @@ export interface GraphStats {
   is_available: boolean;
 }
 
+export interface GraphEntity {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  kind: string;
+  name: string;
+  canonical_name: string;
+  description: string;
+  source: string;
+  confidence: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GraphRelationship {
+  id: string;
+  source_id: string;
+  target_id: string;
+  kind: string;
+  tenant_id: string;
+  project_id: string;
+  source: string;
+  confidence: number;
+  provenance: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GraphPath {
+  nodes: GraphEntity[];
+  relationships: GraphRelationship[];
+  length: number;
+}
+
+export interface GraphSubgraph {
+  nodes: GraphEntity[];
+  relationships: GraphRelationship[];
+  truncated: boolean;
+  focus_id?: string | null;
+  total_nodes: number;
+  total_relationships: number;
+}
+
 export interface MemoryStatus {
   memory_learning_enabled: boolean;
   sqlite: { memory_count: number; qa_count: number };
@@ -711,6 +754,34 @@ export const api = {
     json<QaPair>(`/v1/projects/${pid}/qa-pairs/${qid}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteQa: (pid: string, qid: string) => fetch(`${BASE}/v1/projects/${pid}/qa-pairs/${qid}`, { method: "DELETE", headers: authHeader() }),
   graphStats: (pid: string) => json<GraphStats>(`/v1/projects/${pid}/graph/stats`),
+  graphSubgraph: (pid: string, opts?: { focus_id?: string; search?: string; kind?: string; rel_kind?: string; limit?: number; hop_depth?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.focus_id) q.set("focus_id", opts.focus_id);
+    if (opts?.search) q.set("search", opts.search);
+    if (opts?.kind) q.set("kind", opts.kind);
+    if (opts?.rel_kind) q.set("rel_kind", opts.rel_kind);
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    if (opts?.hop_depth) q.set("hop_depth", String(opts.hop_depth));
+    const qs = q.toString();
+    return json<GraphSubgraph>(`/v1/projects/${pid}/graph/subgraph${qs ? `?${qs}` : ""}`);
+  },
+  graphEntities: (pid: string, opts?: { kind?: string; name?: string; search?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.kind) q.set("kind", opts.kind);
+    if (opts?.name) q.set("name", opts.name);
+    if (opts?.search) q.set("search", opts.search);
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return json<GraphEntity[]>(`/v1/projects/${pid}/graph/entities${qs ? `?${qs}` : ""}`);
+  },
+  graphEntityNeighbors: (pid: string, entityId: string, opts?: { direction?: "in" | "out" | "both"; max_depth?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.direction) q.set("direction", opts.direction);
+    if (opts?.max_depth) q.set("max_depth", String(opts.max_depth));
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return json<GraphPath[]>(`/v1/projects/${pid}/graph/entities/${encodeURIComponent(entityId)}/neighbors${qs ? `?${qs}` : ""}`);
+  },
   memoryStatus: (pid: string) => json<MemoryStatus>(`/v1/projects/${pid}/memory/status`),
   listMemoryRecords: (pid: string, opts?: { status?: string; kind?: string }) => {
     const q = new URLSearchParams();

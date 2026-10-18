@@ -20,6 +20,7 @@ from alberto.schemas.dto import (
     GraphRelationshipCreate,
     GraphRelationshipOut,
     GraphStatsOut,
+    GraphSubgraphOut,
 )
 from alberto.services.audit import AuditService
 
@@ -38,18 +39,48 @@ async def get_graph_stats(
     return stats.to_dict()
 
 
+@router.get("/subgraph", response_model=GraphSubgraphOut)
+async def get_subgraph(
+    project_id: str,
+    focus_id: str | None = None,
+    search: str | None = None,
+    kind: str | None = None,
+    rel_kind: str | None = None,
+    limit: int = Query(default=60, ge=1, le=100),
+    hop_depth: int = Query(default=1, ge=1, le=2),
+    tenant_id: str = Depends(current_tenant_id),
+    _: CurrentUser = Depends(require_role("viewer")),
+):
+    """Retrieve a bounded, scoped subgraph for interactive visualization."""
+    adapter = get_graph_adapter()
+    subgraph = await adapter.get_subgraph(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        focus_id=focus_id,
+        search=search,
+        kind=kind,
+        rel_kind=rel_kind,
+        limit=limit,
+        hop_depth=hop_depth,
+    )
+    return subgraph
+
+
 @router.get("/entities", response_model=list[GraphEntityOut])
 async def list_entities(
     project_id: str,
     kind: str | None = None,
     name: str | None = None,
+    search: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     tenant_id: str = Depends(current_tenant_id),
     _: CurrentUser = Depends(require_role("viewer")),
 ):
     """Find entities matching filters within the authorized tenant/project scope."""
     adapter = get_graph_adapter()
-    entities = await adapter.find_entities(tenant_id, project_id, kind=kind, name=name, limit=limit)
+    entities = await adapter.find_entities(
+        tenant_id, project_id, kind=kind, name=name, search=search, limit=limit
+    )
     return [e.to_dict() for e in entities]
 
 

@@ -9,6 +9,7 @@ import {
   LearningEventItem, MarkdownMemoryFile, MemoryLearningSettings, MemoryRecordDetail,
 } from "@/lib/api";
 import { ChunkMap } from "./chunk-map";
+import { KnowledgeGraphExplorer } from "../canvas/KnowledgeGraphExplorer";
 
 const VTABS = [
   { value: "files", label: "Files", icon: "knowledge" },
@@ -910,7 +911,10 @@ function KnowledgeGraphView({ project }: { project: any }) {
         </div>
       </div>
 
-      {/* 2. Unified Memory Foundation Overview */}
+      {/* 2. Interactive Knowledge Graph Explorer (LadybugDB Property Graph) */}
+      <KnowledgeGraphExplorer project={project} />
+
+      {/* 3. Unified Memory Foundation Overview */}
       <div className="card" style={{ padding: 20 }}>
         <div className="t-h2" style={{ marginBottom: 6 }}>Unified Memory Architecture</div>
         <div className="fg-1" style={{ marginBottom: 16 }}>

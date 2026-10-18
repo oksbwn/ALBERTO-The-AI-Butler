@@ -389,6 +389,7 @@ class LadybugGraphAdapter:
         project_id: str,
         kind: str | None = None,
         name: str | None = None,
+        search: str | None = None,
         limit: int = 50,
     ) -> list[GraphEntity]:
         assert self._conn is not None
@@ -401,6 +402,11 @@ class LadybugGraphAdapter:
         if name:
             where.append("e.name = $name")
             params["name"] = name
+        if search:
+            where.append(
+                "(lower(e.name) CONTAINS $search OR lower(e.canonical_name) CONTAINS $search OR lower(e.description) CONTAINS $search)"
+            )
+            params["search"] = search.strip().lower()
 
         query = f"""
             MATCH (e:Entity)
@@ -735,6 +741,138 @@ class LadybugGraphAdapter:
             is_available=True,
         )
 
+    def _get_subgraph_sync(
+        self,
+        tenant_id: str,
+        project_id: str,
+        focus_id: str | None = None,
+        search: str | None = None,
+        kind: str | None = None,
+        rel_kind: str | None = None,
+        limit: int = 60,
+        hop_depth: int = 1,
+    ) -> dict[str, Any]:
+        assert self._conn is not None
+        safe_limit = min(max(1, limit), 100)
+        safe_depth = min(max(1, hop_depth), 2)
+        self._validate_scope_identifier(tenant_id, "tenant_id")
+        self._validate_scope_identifier(project_id, "project_id")
+
+        nodes_map: dict[str, GraphEntity] = {}
+        rels_map: dict[str, GraphRelationship] = {}
+        truncated = False
+        resolved_focus_id = None
+
+        if focus_id:
+            focus_node = self._get_entity_sync(tenant_id, project_id, focus_id)
+            if focus_node:
+                nodes_map[focus_node.id] = focus_node
+                resolved_focus_id = focus_node.id
+                paths = self._get_neighbors_sync(
+                    tenant_id, project_id, focus_id, direction="both", max_depth=safe_depth, limit=safe_limit
+                )
+                if len(paths) >= safe_limit:
+                    truncated = True
+                for path in paths:
+                    for n in path.nodes:
+                        if len(nodes_map) < safe_limit:
+                            nodes_map[n.id] = n
+                        else:
+                            truncated = True
+                    for r in path.relationships:
+                        if not rel_kind or r.kind == rel_kind:
+                            rels_map[r.id] = r
+        elif search:
+            matched = self._find_entities_sync(
+                tenant_id, project_id, kind=kind, search=search, limit=min(safe_limit, 20)
+            )
+            if len(matched) >= 20:
+                truncated = True
+            for m in matched:
+                nodes_map[m.id] = m
+            if matched:
+                resolved_focus_id = matched[0].id
+                for m in matched[:10]:
+                    paths = self._get_neighbors_sync(
+                        tenant_id, project_id, m.id, direction="both", max_depth=1, limit=20
+                    )
+                    for path in paths:
+                        for n in path.nodes:
+                            if len(nodes_map) < safe_limit:
+                                nodes_map[n.id] = n
+                            else:
+                                truncated = True
+                        for r in path.relationships:
+                            if not rel_kind or r.kind == rel_kind:
+                                rels_map[r.id] = r
+        else:
+            entities = self._find_entities_sync(
+                tenant_id, project_id, kind=kind, limit=safe_limit
+            )
+            for e in entities:
+                nodes_map[e.id] = e
+
+            params: dict[str, Any] = {
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "limit": safe_limit,
+            }
+            where_rel = [
+                "r.tenant_id = $tenant_id", "r.project_id = $project_id",
+                "a.tenant_id = $tenant_id", "a.project_id = $project_id",
+                "b.tenant_id = $tenant_id", "b.project_id = $project_id",
+            ]
+            if rel_kind:
+                where_rel.append("r.kind = $rel_kind")
+                params["rel_kind"] = rel_kind
+
+            query = f"""
+                MATCH (a:Entity)-[r:RelatesTo]->(b:Entity)
+                WHERE {" AND ".join(where_rel)}
+                RETURN r.id, r.kind, r.tenant_id, r.project_id, r.source, r.confidence,
+                       r.provenance, r.created_at, r.updated_at, a.id, b.id
+                LIMIT $limit
+            """
+            res: Any = self._execute(query, params)
+            while res.has_next():
+                row: Any = res.get_next()
+                r_id = row[0]
+                s_id = row[9]
+                t_id = row[10]
+                if s_id in nodes_map and t_id in nodes_map:
+                    rels_map[r_id] = GraphRelationship(
+                        id=r_id,
+                        kind=row[1],
+                        tenant_id=row[2],
+                        project_id=row[3],
+                        source=row[4],
+                        confidence=float(row[5]),
+                        provenance=row[6],
+                        created_at=int(row[7]),
+                        updated_at=int(row[8]),
+                        source_id=s_id,
+                        target_id=t_id,
+                    )
+
+            stats = self._get_stats_sync(tenant_id, project_id)
+            if stats.entity_count > len(nodes_map) or stats.relationship_count > len(rels_map):
+                truncated = True
+
+        stats = self._get_stats_sync(tenant_id, project_id)
+        valid_rels = [
+            r for r in rels_map.values()
+            if r.source_id in nodes_map and r.target_id in nodes_map
+        ]
+
+        return {
+            "nodes": [n.to_dict() for n in nodes_map.values()],
+            "relationships": [r.to_dict() for r in valid_rels],
+            "truncated": truncated,
+            "focus_id": resolved_focus_id,
+            "total_nodes": stats.entity_count,
+            "total_relationships": stats.relationship_count,
+        }
+
     # --- Async facade methods (dispatched to thread) ---
 
     async def create_or_update_entity(self, entity: GraphEntity) -> GraphEntity:
@@ -749,10 +887,34 @@ class LadybugGraphAdapter:
         project_id: str,
         kind: str | None = None,
         name: str | None = None,
+        search: str | None = None,
         limit: int = 50,
     ) -> list[GraphEntity]:
         return await asyncio.to_thread(
-            self._find_entities_sync, tenant_id, project_id, kind, name, limit
+            self._find_entities_sync, tenant_id, project_id, kind, name, search, limit
+        )
+
+    async def get_subgraph(
+        self,
+        tenant_id: str,
+        project_id: str,
+        focus_id: str | None = None,
+        search: str | None = None,
+        kind: str | None = None,
+        rel_kind: str | None = None,
+        limit: int = 60,
+        hop_depth: int = 1,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._get_subgraph_sync,
+            tenant_id,
+            project_id,
+            focus_id,
+            search,
+            kind,
+            rel_kind,
+            limit,
+            hop_depth,
         )
 
     async def delete_entity(self, tenant_id: str, project_id: str, entity_id: str) -> bool:

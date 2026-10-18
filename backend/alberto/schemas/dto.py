@@ -568,6 +568,15 @@ class GraphStatsOut(BaseModel):
     is_available: bool
 
 
+class GraphSubgraphOut(BaseModel):
+    nodes: list[GraphEntityOut]
+    relationships: list[GraphRelationshipOut]
+    truncated: bool = False
+    focus_id: str | None = None
+    total_nodes: int = 0
+    total_relationships: int = 0
+
+
 # --- unified memory ---
 class MemoryRecallIn(BaseModel):
     query: str

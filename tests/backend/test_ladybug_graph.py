@@ -645,3 +645,115 @@ async def test_graph_persistence_across_process_restart(graph_tmp_dir: Path):
     ad2.close()
 
 
+@pytest.mark.asyncio
+async def test_graph_subgraph_and_search_inspection(adapter: LadybugGraphAdapter):
+    """Test interactive visualization subgraph queries, search, bounds, and OLMX inspection."""
+    tenant_id = "tenant-olmx"
+    project_id = "proj-olmx"
+    other_tenant = "tenant-other"
+
+    # 1. Empty graph
+    subgraph_empty = await adapter.get_subgraph(tenant_id, project_id)
+    assert subgraph_empty["nodes"] == []
+    assert subgraph_empty["relationships"] == []
+    assert subgraph_empty["truncated"] is False
+    assert subgraph_empty["total_nodes"] == 0
+
+    # 2. Add OLMX entity, Ollama entity, and connected devices/models
+    e_olmx = await adapter.create_or_update_entity(
+        GraphEntity(
+            id=make_entity_id(tenant_id, project_id, "ModelRunner", "OLMX"),
+            tenant_id=tenant_id,
+            project_id=project_id,
+            kind="ModelRunner",
+            name="OLMX",
+            canonical_name="olmx",
+            description="Local high-performance inference engine [aliases: olmx-core, fast-olmx]",
+            source="manual",
+            confidence=1.0,
+        )
+    )
+    e_ollama = await adapter.create_or_update_entity(
+        GraphEntity(
+            id=make_entity_id(tenant_id, project_id, "Application", "Ollama"),
+            tenant_id=tenant_id,
+            project_id=project_id,
+            kind="Application",
+            name="Ollama",
+            canonical_name="ollama",
+            description="Separate standard runner",
+            source="manual",
+            confidence=0.9,
+        )
+    )
+    e_mac = await adapter.create_or_update_entity(
+        GraphEntity(
+            id=make_entity_id(tenant_id, project_id, "Device", "MacStudio"),
+            tenant_id=tenant_id,
+            project_id=project_id,
+            kind="Device",
+            name="MacStudio",
+            canonical_name="macstudio",
+            description="M2 Ultra 192GB",
+            source="mcp_scan",
+            confidence=1.0,
+        )
+    )
+    r1 = await adapter.create_or_update_relationship(
+        GraphRelationship(
+            id=make_relationship_id(e_olmx.id, "RUNS_ON", e_mac.id),
+            source_id=e_olmx.id,
+            target_id=e_mac.id,
+            kind="RUNS_ON",
+            tenant_id=tenant_id,
+            project_id=project_id,
+            provenance="system_inspection",
+        )
+    )
+
+    # 3. Add other tenant entity to verify isolation
+    await adapter.create_or_update_entity(
+        GraphEntity(
+            id=make_entity_id(other_tenant, project_id, "ModelRunner", "OLMX"),
+            tenant_id=other_tenant,
+            project_id=project_id,
+            kind="ModelRunner",
+            name="OLMX",
+            canonical_name="olmx",
+        )
+    )
+
+    # 4. Search for "olmx"
+    search_res = await adapter.get_subgraph(tenant_id, project_id, search="olmx")
+    node_names = [n["name"] for n in search_res["nodes"]]
+    assert "OLMX" in node_names
+    assert "Ollama" not in node_names  # distinct entity
+    assert "MacStudio" in node_names  # 1-hop connected neighbor
+    assert len(search_res["relationships"]) == 1
+    assert search_res["relationships"][0]["kind"] == "RUNS_ON"
+    assert search_res["relationships"][0]["provenance"] == "system_inspection"
+    assert search_res["focus_id"] == e_olmx.id
+
+    # Search by alias inside description
+    alias_res = await adapter.get_subgraph(tenant_id, project_id, search="fast-olmx")
+    assert any(n["name"] == "OLMX" for n in alias_res["nodes"])
+
+    # 5. Focus entity
+    focus_res = await adapter.get_subgraph(tenant_id, project_id, focus_id=e_olmx.id, hop_depth=1)
+    assert len(focus_res["nodes"]) == 2
+    assert {n["id"] for n in focus_res["nodes"]} == {e_olmx.id, e_mac.id}
+    assert len(focus_res["relationships"]) == 1
+
+    # 6. Bounded node limit
+    bounded_res = await adapter.get_subgraph(tenant_id, project_id, limit=2)
+    assert len(bounded_res["nodes"]) <= 2
+    assert bounded_res["truncated"] is True
+    assert bounded_res["total_nodes"] == 3
+
+    # 7. Scope isolation: other tenant cannot see tenant_id entities
+    other_subgraph = await adapter.get_subgraph(other_tenant, project_id)
+    assert len(other_subgraph["nodes"]) == 1
+    assert other_subgraph["nodes"][0]["tenant_id"] == other_tenant
+    assert other_subgraph["relationships"] == []
+
+

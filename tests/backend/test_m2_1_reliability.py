@@ -258,20 +258,28 @@ async def test_restart_recovery_and_payload_reuse(setup_env, sample_proj: Projec
         # Extract was NOT called because saved extraction was reused!
         mock_extract.assert_not_called()
 
-    # Verify event completed and memory persisted
-    async with SessionLocal() as session:
-        ev = (
-            await session.execute(
-                select(MemoryLearningEvent).where(
-                    MemoryLearningEvent.tenant_id == sample_proj.tenant_id,
-                    MemoryLearningEvent.project_id == sample_proj.id,
-                    MemoryLearningEvent.source_event_id == source_event_id,
+    ev = None
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        async with SessionLocal() as session:
+            ev = (
+                await session.execute(
+                    select(MemoryLearningEvent).where(
+                        MemoryLearningEvent.tenant_id == sample_proj.tenant_id,
+                        MemoryLearningEvent.project_id == sample_proj.id,
+                        MemoryLearningEvent.source_event_id == source_event_id,
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        assert ev.status == "completed"
-        assert len(ev.applied_memory_ids) == 1
+            ).scalar_one_or_none()
+            if ev and ev.status == "completed":
+                break
 
+    # Verify event completed and memory persisted
+    assert ev is not None
+    assert ev.status == "completed"
+    assert len(ev.applied_memory_ids) == 1
+
+    async with SessionLocal() as session:
         mems = await MemoryService.list(session, sample_proj.tenant_id, sample_proj.id)
         assert any("Proxmox VE" in m.text for m in mems)
 

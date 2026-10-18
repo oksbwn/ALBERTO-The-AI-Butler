@@ -997,4 +997,4 @@ async def download_embedding_model(
     try:
         return await download_embedding_model_weights(body.model_id)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e

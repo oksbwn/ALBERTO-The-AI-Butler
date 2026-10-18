@@ -94,9 +94,9 @@ class RetrievalPolicy:
         if re.search(r"\b(i\s+like|i\s+prefer|my\s+favorite|my\s+home|my\s+setup|my\s+work)\b", q):
             return [SOURCE_MEMORY]
 
-        # Entity relationships and device locations
-        if re.search(r"\b(where\s+is|which\s+device|what\s+is\s+on|host|ip\s+address|port)\b", q):
-            return [SOURCE_GRAPH, SOURCE_MEMORY]
+        # Entity relationships, tech stack, and device locations
+        if re.search(r"\b(where\s+is|which\s+device|what\s+is\s+on|host|ip\s+address|port|framework|stack|inference)\b", q):
+            return [SOURCE_MEMORY, SOURCE_GRAPH]
 
         # 3. Check for general coding / factual question with NO personal context
         is_general_pattern = any(re.search(pat, q) for pat in GENERAL_QUERY_PATTERNS)

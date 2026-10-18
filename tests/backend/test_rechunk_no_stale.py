@@ -71,12 +71,19 @@ async def test_dedupe_removes_exact_duplicate_chunks(tmp_path):
     fixes the affected sources' counts."""
     from alberto.config import settings
 
+    distinct_text = (
+        "Section 1: Refunds go to the original card within five business days. "
+        "Section 2: Shipping takes two business days across all regions. "
+        "Section 3: Error XJ9000 is a gateway timeout; retry after 30 seconds. "
+        "Section 4: Our primary European operations office is located in Berlin. "
+        "Section 5: Inquiries regarding enterprise licensing can contact sales. "
+    )
     settings.chroma_path = str(tmp_path / "chroma_dedupe")
-    pid = await _make_project("dedupe", {"chunk_size": 200, "chunk_overlap": 0})
+    pid = await _make_project("dedupe", {"chunk_size": 100, "chunk_overlap": 0})
     async with SessionLocal() as s:
-        a = await KnowledgeService.create_source(s, "t_rc", pid, kind="text", name="dup.md", text=_TEXT)
+        a = await KnowledgeService.create_source(s, "t_rc", pid, kind="text", name="dup.md", text=distinct_text)
         a = await KnowledgeService.ingest(s, a)
-        b = await KnowledgeService.create_source(s, "t_rc", pid, kind="text", name="dup-copy.md", text=_TEXT)
+        b = await KnowledgeService.create_source(s, "t_rc", pid, kind="text", name="dup-copy.md", text=distinct_text)
         b = await KnowledgeService.ingest(s, b)
         embedder = await KnowledgeService.embedder_for_project(s, "t_rc", pid)
 

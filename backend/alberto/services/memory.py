@@ -160,6 +160,7 @@ class MemoryService:
         kind: str | None = None,
         status: str | None = None,
         confidence: float | None = None,
+        superseded_by: str | None = None,
     ) -> Memory | None:
         m = await MemoryService.get(session, tenant_id, project_id, memory_id)
         if not m:
@@ -173,6 +174,8 @@ class MemoryService:
             m.status = status
         if confidence is not None:
             m.confidence = confidence
+        if superseded_by is not None:
+            m.superseded_by = superseded_by
 
         await session.commit()
         await session.refresh(m)
