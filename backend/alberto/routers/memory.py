@@ -27,6 +27,7 @@ from alberto.schemas.memory_curator import (
     MemoryRecordUpdateIn,
 )
 from alberto.services.audit import AuditService
+from alberto.services.memory_curator import MemoryCurator
 from alberto.services.unified_memory import UnifiedMemoryManager
 
 router = APIRouter(prefix="/v1/projects/{project_id}/memory", tags=["memory"])
@@ -291,15 +292,17 @@ async def get_learning_settings(
     curator_model = (curator.config.get("model") if curator and curator.config else "") or ""
     graph_model = (graph_mgr.config.get("model") if graph_mgr and graph_mgr.config else "") or ""
 
+    _, eff_curator = await MemoryCurator.get_curator_model(session, tenant_id, project_id)
+
     operational_state = "active" if learning_enabled or tool_learning_enabled else "disabled"
 
     return MemoryLearningSettingsOut(
         memory_learning_enabled=learning_enabled,
         tool_execution_learning_enabled=tool_learning_enabled,
         memory_curator_model=curator_model,
-        memory_curator_effective_model=curator_model or settings.default_model,
+        memory_curator_effective_model=curator_model or eff_curator,
         graph_manager_model=graph_model,
-        graph_manager_effective_model=graph_model or settings.default_model,
+        graph_manager_effective_model=graph_model or eff_curator,
         operational_state=operational_state,
     )
 

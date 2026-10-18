@@ -813,6 +813,10 @@ export const api = {
     json<{ ok: boolean; latency_ms: number; tool_called?: string; tool_args?: any; error?: string }>(`/v1/models/registry/${id}/test-tools`, { method: "POST" }),
   setDefaultModel: (modelId: string, projectId?: string) =>
     json<{ ok: boolean; default_model_id: string }>("/v1/models/default", { method: "PUT", body: JSON.stringify({ model_id: modelId, project_id: projectId }) }),
+  getEmbeddingModelStatus: (modelId: string) =>
+    json<{ model_id: string; is_local: boolean; cached: boolean; package_installed: boolean; approx_size?: string; cache_dir?: string; error?: string }>(`/v1/models/embeddings/status?model_id=${encodeURIComponent(modelId)}`),
+  downloadEmbeddingModel: (modelId: string) =>
+    json<{ ok: boolean; model_id: string; cached: boolean; cache_dir?: string }>("/v1/models/embeddings/download", { method: "POST", body: JSON.stringify({ model_id: modelId }) }),
 
   listModelProviders: () => json<ModelProviderT[]>("/v1/models/providers"),
   createModelProvider: (body: { name: string; base_url: string; api_key?: string; enabled?: boolean }) =>

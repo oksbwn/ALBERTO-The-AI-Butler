@@ -135,7 +135,7 @@ class MemoryCuratorService:
     async def get_curator_model(
         cls, session: AsyncSession, tenant_id: str, project_id: str
     ) -> tuple[Any, str]:
-        """Resolves model for Memory Curator respecting agent override -> global default."""
+        """Resolves model for Memory Curator respecting agent override -> project default LLM -> global default."""
         agent = (
             await session.execute(
                 select(Agent).where(
@@ -148,16 +148,19 @@ class MemoryCuratorService:
 
         override = (agent.config.get("model") if agent and agent.config else None) or None
 
-        from alberto.engine.context import CompileContext
+        from alberto.services.runtime import build_compile_context
 
-        ctx = CompileContext(
-            tenant_id=tenant_id,
-            project_id=project_id,
-            default_model=settings.default_model,
-        )
-        model = resolve_model(override, ctx=ctx)
-        effective_name = override or settings.default_model
-        return model, effective_name
+        ctx = await build_compile_context(session, tenant_id=tenant_id, project_id=project_id)
+        chosen = override or ctx.default_model_id or ctx.default_model
+        model = resolve_model(chosen, ctx=ctx)
+
+        display_name = str(chosen) if chosen else "default"
+        if ctx.registered_models and chosen in ctx.registered_models:
+            rm = ctx.registered_models[chosen]
+            display_name = rm.display_name or rm.model_name or display_name
+        return model, display_name
+
+    get_configured_model = get_curator_model
 
     @classmethod
     async def extract(
@@ -238,3 +241,6 @@ Remember: Output strictly valid JSON conforming to the schema."""
                 requires_review=False,
                 extraction_error="Malformed JSON output from model",
             )
+
+
+MemoryCurator = MemoryCuratorService

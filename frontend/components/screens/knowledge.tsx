@@ -763,6 +763,14 @@ function KnowledgeGraphView({ project }: { project: any }) {
     reload();
   }, [reload]);
 
+  useEffect(() => {
+    const onLearningChange = (e: any) => {
+      if (e.detail) setLearningSettings(e.detail);
+    };
+    window.addEventListener("alberto:learning-changed", onLearningChange);
+    return () => window.removeEventListener("alberto:learning-changed", onLearningChange);
+  }, []);
+
   const toggleLearning = async () => {
     if (!project?.id || !learningSettings) return;
     setTogglingLearning(true);
@@ -771,6 +779,7 @@ function KnowledgeGraphView({ project }: { project: any }) {
         memory_learning_enabled: !learningSettings.memory_learning_enabled,
       });
       setLearningSettings(updated);
+      window.dispatchEvent(new CustomEvent("alberto:learning-changed", { detail: updated }));
       reload();
     } catch (e: any) {
       alert(`Failed to update learning settings: ${e?.message || e}`);
@@ -787,6 +796,7 @@ function KnowledgeGraphView({ project }: { project: any }) {
         tool_execution_learning_enabled: !learningSettings.tool_execution_learning_enabled,
       });
       setLearningSettings(updated);
+      window.dispatchEvent(new CustomEvent("alberto:learning-changed", { detail: updated }));
       reload();
     } catch (e: any) {
       alert(`Failed to update tool learning settings: ${e?.message || e}`);

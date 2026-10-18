@@ -77,6 +77,14 @@ def _default_ladybug_path() -> str:
     return (root / "db" / "ladybug").as_posix()
 
 
+def _default_fastembed_cache_dir() -> str:
+    env = os.getenv("ALBERTO_FASTEMBED_CACHE_DIR") or os.getenv("FORGE_FASTEMBED_CACHE_DIR")
+    if env:
+        return env
+    root = _get_logical_data_root()
+    return (root / "models" / "fastembed").as_posix()
+
+
 def _default_secret_key_file() -> str:
     root = _get_logical_data_root()
     for candidate in [root / "config" / "master.key", root / "master.key"]:
@@ -223,7 +231,7 @@ class Settings(BaseSettings):
     # Docker image (see apps/api/Dockerfile) so the default model ships with the image - no
     # first-run download / network dependency. None -> fastembed's own default (a temp dir),
     # fine for local dev.
-    fastembed_cache_dir: str | None = None
+    fastembed_cache_dir: str = Field(default_factory=_default_fastembed_cache_dir)
 
     # --- Knowledge Graph (embedded LadybugDB) ---
     ladybug_path: str = Field(default_factory=_default_ladybug_path)
@@ -536,10 +544,11 @@ class Settings(BaseSettings):
 
     def ensure_dirs(self) -> None:
         root = self.data_dir
-        for sub in (root, root / "db", root / "db" / "ladybug", root / "chroma", root / "memory", root / "logs", root / "config"):
+        for sub in (root, root / "db", root / "db" / "ladybug", root / "chroma", root / "memory", root / "logs", root / "config", root / "models", root / "models" / "fastembed"):
             sub.mkdir(parents=True, exist_ok=True)
         Path(self.chroma_path).mkdir(parents=True, exist_ok=True)
         Path(self.ladybug_path).mkdir(parents=True, exist_ok=True)
+        Path(self.fastembed_cache_dir).mkdir(parents=True, exist_ok=True)
 
     # Environments treated as local/insecure-OK. ANY other value (staging, prod, an
     # unknown string, or the empty string) is treated as security-enforced - so a

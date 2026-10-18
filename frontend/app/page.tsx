@@ -181,6 +181,7 @@ function App() {
         <Topbar
           crumbs={crumbs}
           right={topRight}
+          project={project}
           onCommand={() => setCmdOpen(true)}
         />
         <div key={(view.screen || "") + (project?.id || "") + refreshNonce} className="col grow" style={{ minHeight: 0 }}>
