@@ -179,6 +179,7 @@ class SourceSyncCoordinator:
         project_id: str,
         job_id: str,
         raw_items: list[dict[str, Any]] | None = None,
+        execution_outcome: McpExecutionOutcome | str = McpExecutionOutcome.SUCCESS,
     ) -> dict[str, Any]:
         """Execute a synchronization job with incremental watermark filtering and bounded batches.
 
@@ -205,6 +206,19 @@ class SourceSyncCoordinator:
         if not job.get("enabled", False):
             return {"ok": False, "error": "Sync job is disabled"}
 
+        # Authoritative Execution Outcome Check: do not learn on non-success outcomes
+        outcome_str = str(execution_outcome).upper()
+        if outcome_str != "SUCCESS" and execution_outcome != McpExecutionOutcome.SUCCESS:
+            logger.warning("Sync job %s execution outcome not successful (%s); skipping learning", job_id, execution_outcome)
+            job["last_status"] = "failed"
+            job["last_error"] = f"Tool execution outcome failed: {execution_outcome}"
+            sync_jobs[job_id] = job
+            cfg["mcp_sync_jobs"] = sync_jobs
+            proj.config = cfg
+            flag_modified(proj, "config")
+            await session.commit()
+            return {"ok": False, "error": f"Tool execution outcome failed: {execution_outcome}"}
+
         client_id = job["client_id"]
         client = (
             await session.execute(
@@ -226,10 +240,23 @@ class SourceSyncCoordinator:
         if target_tool in disabled_tools:
             return {"ok": False, "error": f"Target tool {target_tool!r} is disabled for McpClient {client.name!r}"}
 
+        # Check raw items for embedded errors
+        items_to_process = raw_items or []
+        for it in items_to_process:
+            if isinstance(it, dict) and (it.get("isError") or it.get("is_error") or "error" in it):
+                logger.warning("Sync job %s raw items contain tool error: %s", job_id, it.get("error"))
+                job["last_status"] = "failed"
+                job["last_error"] = str(it.get("error") or "Tool returned error payload")
+                sync_jobs[job_id] = job
+                cfg["mcp_sync_jobs"] = sync_jobs
+                proj.config = cfg
+                flag_modified(proj, "config")
+                await session.commit()
+                return {"ok": False, "error": "Tool execution returned error in output"}
+
         now = datetime.now(UTC)
         last_watermark = job.get("watermark")
 
-        items_to_process = raw_items or []
         new_or_updated: list[dict[str, Any]] = []
 
         # Filter against watermark: only process items newer than watermark or with changed hash
@@ -248,7 +275,7 @@ class SourceSyncCoordinator:
         # Enforce batch ceiling (max 100 items per sync run)
         bounded_items = new_or_updated[:100]
 
-        # Trigger learning on new/updated items if tool learning is enabled
+        # Trigger learning on new/updated items if tool learning is enabled and execution verified
         learned_event = None
         if bounded_items:
             tool_name = job.get("target_tool", "sync_tool")
@@ -262,7 +289,7 @@ class SourceSyncCoordinator:
                 tool_input={"job_id": job_id, "watermark": last_watermark},
                 tool_output=bounded_items,
                 execution_id=exec_id,
-                execution_outcome=McpExecutionOutcome.SUCCESS,
+                execution_outcome=execution_outcome,
             )
 
         # Update watermark

@@ -7,6 +7,8 @@ import { Drawer, Field, Modal, Segmented, StatusPill } from "../primitives";
 import {
   api, ActivityEntry, GraphStats, KbSource, MemoryStatus, QaPair, SearchHit,
   LearningEventItem, MarkdownMemoryFile, MemoryLearningSettings, MemoryRecordDetail,
+  CuratorAdvisorySuggestion, LearningEventApprovalIn, OntologyEntityType, OntologyRelationshipType,
+  NodeApprovalEdit, EdgeApprovalEdit,
 } from "@/lib/api";
 import { ChunkMap } from "./chunk-map";
 import { KnowledgeGraphExplorer } from "../canvas/KnowledgeGraphExplorer";
@@ -735,6 +737,14 @@ function KnowledgeGraphView({ project }: { project: any }) {
   const [editText, setEditText] = useState("");
   const [editKind, setEditKind] = useState("note");
   const [togglingLearning, setTogglingLearning] = useState(false);
+  const [ontologyEntityTypes, setOntologyEntityTypes] = useState<OntologyEntityType[]>([]);
+  const [ontologyRelTypes, setOntologyRelTypes] = useState<OntologyRelationshipType[]>([]);
+  const [eventEdits, setEventEdits] = useState<Record<string, {
+    nodes: Record<string, { kind: string; customKind: string; description: string }>;
+    edges: Record<number, { kind: string; customKind: string; direction: "normal" | "reverse"; source_ref: string; target_ref: string }>;
+  }>>({});
+  const [suggestions, setSuggestions] = useState<Record<string, CuratorAdvisorySuggestion[]>>({});
+  const [fetchingSuggestions, setFetchingSuggestions] = useState<Record<string, boolean>>({});
 
   const reload = useCallback(() => {
     if (!project?.id) return;
@@ -747,14 +757,18 @@ function KnowledgeGraphView({ project }: { project: any }) {
       api.listMemoryRecords(project.id, { status: "active" }).catch((e) => { console.warn(e); return []; }),
       api.listLearningEvents(project.id, "review_required").catch((e) => { console.warn(e); return []; }),
       api.listMarkdownMemoryFiles(project.id).catch((e) => { console.warn(e); return []; }),
+      api.listOntologyEntityTypes(project.id).catch((e) => { console.warn(e); return []; }),
+      api.listOntologyRelationshipTypes(project.id).catch((e) => { console.warn(e); return []; }),
     ])
-      .then(([g, m, s, r, evs, mdf]) => {
+      .then(([g, m, s, r, evs, mdf, ets, rts]) => {
         setStats(g);
         setMemStatus(m);
         setLearningSettings(s);
         setRecords(r || []);
         setReviewEvents(evs || []);
         setMdFiles(mdf || []);
+        setOntologyEntityTypes(ets || []);
+        setOntologyRelTypes(rts || []);
       })
       .catch((e: any) => setErr(e?.message || "Failed to load Knowledge Graph status."))
       .finally(() => setLoading(false));
@@ -808,11 +822,102 @@ function KnowledgeGraphView({ project }: { project: any }) {
 
   const handleApprove = async (eventId: string) => {
     if (!project?.id) return;
+    const evEdit = eventEdits[eventId];
+    const node_edits: NodeApprovalEdit[] = [];
+    if (evEdit?.nodes) {
+      for (const [tempId, n] of Object.entries(evEdit.nodes)) {
+        const finalKind = n.kind === "__custom__" ? n.customKind.trim().toLowerCase() : n.kind;
+        const isNew = n.kind === "__custom__";
+        node_edits.push({
+          temporary_id: tempId,
+          kind: finalKind || undefined,
+          description: n.description || undefined,
+          is_new_ontology_type: isNew,
+          ontology_type_description: isNew ? `User-defined entity type ${finalKind}` : undefined,
+        });
+      }
+    }
+    const edge_edits: EdgeApprovalEdit[] = [];
+    if (evEdit?.edges) {
+      for (const [, e] of Object.entries(evEdit.edges)) {
+        const finalKind = e.kind === "__custom__" ? e.customKind.trim().toUpperCase() : e.kind;
+        const isNew = e.kind === "__custom__";
+        edge_edits.push({
+          source_ref: e.source_ref,
+          target_ref: e.target_ref,
+          kind: finalKind || undefined,
+          direction: e.direction,
+          is_new_ontology_type: isNew,
+          ontology_type_description: isNew ? `User-defined relationship type ${finalKind}` : undefined,
+        });
+      }
+    }
+
+    const payload: LearningEventApprovalIn = {
+      node_edits: node_edits.length > 0 ? node_edits : undefined,
+      edge_edits: edge_edits.length > 0 ? edge_edits : undefined,
+    };
+
     try {
-      await api.approveLearningEvent(project.id, eventId);
+      await api.approveLearningEvent(project.id, eventId, payload);
       reload();
     } catch (e: any) {
       alert(`Approval error: ${e?.message || e}`);
+    }
+  };
+
+  const handleFetchSuggestions = async (eventId: string) => {
+    if (!project?.id) return;
+    setFetchingSuggestions((prev) => ({ ...prev, [eventId]: true }));
+    try {
+      const suggs = await api.getLearningEventSuggestions(project.id, eventId);
+      setSuggestions((prev) => ({ ...prev, [eventId]: suggs }));
+    } catch (e: any) {
+      alert(`Failed to get suggestions: ${e?.message || e}`);
+    } finally {
+      setFetchingSuggestions((prev) => ({ ...prev, [eventId]: false }));
+    }
+  };
+
+  const applySuggestion = (eventId: string, sugg: CuratorAdvisorySuggestion) => {
+    if (sugg.target_type === "entity") {
+      setEventEdits((prev) => {
+        const current = prev[eventId] || { nodes: {}, edges: {} };
+        const nodeCurrent = current.nodes[sugg.target_ref] || { kind: sugg.suggested_kind || "", customKind: "", description: "" };
+        return {
+          ...prev,
+          [eventId]: {
+            ...current,
+            nodes: {
+              ...current.nodes,
+              [sugg.target_ref]: {
+                ...nodeCurrent,
+                kind: sugg.suggested_kind || nodeCurrent.kind,
+              },
+            },
+          },
+        };
+      });
+    } else if (sugg.target_type === "relationship") {
+      setEventEdits((prev) => {
+        const current = prev[eventId] || { nodes: {}, edges: {} };
+        const idx = parseInt(sugg.target_ref, 10) || 0;
+        const edgeCurrent = current.edges[idx] || { kind: sugg.suggested_kind || "", customKind: "", direction: sugg.suggested_direction || "normal", source_ref: "", target_ref: "" };
+        return {
+          ...prev,
+          [eventId]: {
+            ...current,
+            edges: {
+              ...current.edges,
+              [idx]: {
+                ...edgeCurrent,
+                kind: sugg.suggested_kind || edgeCurrent.kind,
+                direction: sugg.suggested_direction || edgeCurrent.direction,
+              },
+            },
+          },
+        };
+      });
     }
   };
 
@@ -1069,44 +1174,351 @@ function KnowledgeGraphView({ project }: { project: any }) {
               </span>
             </div>
           </div>
-          <div className="col gap3">
+          <div className="col gap4">
             {reviewEvents.map((ev) => {
               const mems = ev.extraction_payload?.memories || [];
               const ents = ev.extraction_payload?.entities || [];
               const rels = ev.extraction_payload?.relationships || [];
+              const reasons: string[] = ev.extraction_payload?.review_reasons || (ev.error ? [ev.error] : []);
+              const evSuggs = suggestions[ev.id] || [];
+              const isFetchingSugg = fetchingSuggestions[ev.id] || false;
+              const currentEdits = eventEdits[ev.id] || { nodes: {}, edges: {} };
+
+              const availableEntityKinds = Array.from(new Set([
+                ...ontologyEntityTypes.map((t) => t.canonical_key),
+                "concept", "entity", "fact", "rule", "preference", "user", "agent",
+                "project", "document", "tool", "source", "hardware", "software",
+                "application", "device", "operating_system", "container_runtime", "inference_framework"
+              ]));
+
+              const availableRelKinds = Array.from(new Set([
+                ...ontologyRelTypes.map((t) => t.canonical_key),
+                "RELATES_TO", "IS_A", "PART_OF", "USES", "IMPLEMENTS", "PREFERS",
+                "LEARNED_FROM", "LOCATED_AT", "RUNS_ON", "RUNS", "DEPLOYED_VIA", "INTERACTS_WITH"
+              ]));
+
               return (
-                <div key={ev.id} className="card" style={{ padding: 14, background: "var(--bg-1)" }}>
-                  <div className="row spread" style={{ alignItems: "flex-start" }}>
+                <div key={ev.id} className="card" style={{ padding: 16, background: "var(--bg-1)", border: "1px solid var(--border)" }}>
+                  <div className="row spread" style={{ alignItems: "flex-start", marginBottom: 10 }}>
                     <div>
-                      <div className="t-body-sm fg-1">Source: Turn {ev.source_event_id.slice(0, 10)}…</div>
-                      <div className="t-micro fg-2" style={{ marginTop: 2 }}>Status: {ev.status}</div>
+                      <div className="t-body-sm fg-1" style={{ fontWeight: 600 }}>Source: Turn {ev.source_event_id.slice(0, 10)}…</div>
+                      <div className="t-micro fg-2">Status: <strong>{ev.status}</strong></div>
                     </div>
                     <div className="row gap2">
-                      <button className="btn btn-secondary btn-sm" onClick={() => handleApprove(ev.id)}>
-                        <Icon name="check" size={13} /> Approve
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleFetchSuggestions(ev.id)}
+                        disabled={isFetchingSugg}
+                        title="Ask Alberto's Memory Curator for advisory suggestions"
+                      >
+                        <Icon name="sparkles" size={13} /> {isFetchingSugg ? "Analyzing…" : "Curator Advisory"}
+                      </button>
+                      <button className="btn btn-primary btn-sm" onClick={() => handleApprove(ev.id)}>
+                        <Icon name="check" size={13} /> Approve &amp; Persist
                       </button>
                       <button className="btn btn-secondary btn-sm" onClick={() => handleReject(ev.id)}>
                         <Icon name="close" size={13} /> Reject
                       </button>
                     </div>
                   </div>
-                  <div className="col gap1" style={{ marginTop: 8 }}>
-                    {mems.map((m: any, idx: number) => (
-                      <div key={idx} className="t-body-sm">
-                        • <strong>[{m.kind}]</strong> {m.content} <span className="chip chip-mono t-micro">conf {m.confidence}</span>
+
+                  {/* Warnings / Review Reasons */}
+                  {reasons.length > 0 && (
+                    <div className="card" style={{ padding: "8px 12px", background: "rgba(234, 179, 8, 0.1)", border: "1px solid rgba(234, 179, 8, 0.3)", marginBottom: 10 }}>
+                      <div className="t-caption" style={{ color: "var(--warn, #eab308)", fontWeight: 600 }}>Validation Warnings:</div>
+                      <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                        {reasons.map((r, i) => (
+                          <li key={i} className="t-caption fg-2">{r}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Advisory Suggestions Banner */}
+                  {evSuggs.length > 0 && (
+                    <div className="card" style={{ padding: "10px 12px", background: "rgba(99, 102, 241, 0.08)", border: "1px solid rgba(99, 102, 241, 0.3)", marginBottom: 12 }}>
+                      <div className="row spread" style={{ alignItems: "center", marginBottom: 6 }}>
+                        <span className="t-caption" style={{ color: "var(--accent, #6366f1)", fontWeight: 600 }}>
+                          Memory Curator Advisory Recommendations
+                        </span>
+                        <span className="chip chip-mono t-micro">{evSuggs.length} suggestions</span>
                       </div>
-                    ))}
-                    {ents.length > 0 && (
-                      <div className="t-caption fg-2" style={{ marginTop: 4 }}>
-                        Entities: {ents.map((e: any) => `${e.name} (${e.kind})`).join(", ")}
+                      <div className="col gap2">
+                        {evSuggs.map((sugg, sIdx) => (
+                          <div key={sIdx} className="card row spread" style={{ padding: 8, background: "var(--bg-card)", alignItems: "center" }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div className="row gap2" style={{ alignItems: "center" }}>
+                                <span className="badge">{sugg.target_type}</span>
+                                <span className="t-body-sm mono" style={{ fontWeight: 600 }}>{sugg.target_ref}</span>
+                                {sugg.suggested_kind && (
+                                  <span className="t-caption">→ Suggests: <strong style={{ color: "var(--ok, #22c55e)" }}>{sugg.suggested_kind}</strong></span>
+                                )}
+                                {sugg.suggested_direction && (
+                                  <span className="t-caption">→ Direction: <strong>{sugg.suggested_direction}</strong></span>
+                                )}
+                              </div>
+                              <div className="t-caption fg-2" style={{ marginTop: 2 }}>{sugg.explanation}</div>
+                              {sugg.evidence_refs?.length > 0 && (
+                                <div className="t-micro fg-3" style={{ marginTop: 2 }}>Evidence: {sugg.evidence_refs.join(", ")}</div>
+                              )}
+                            </div>
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              style={{ flex: "none", marginLeft: 8 }}
+                              onClick={() => applySuggestion(ev.id, sugg)}
+                            >
+                              Apply Suggestion
+                            </button>
+                          </div>
+                        ))}
                       </div>
-                    )}
-                    {rels.length > 0 && (
-                      <div className="t-caption fg-2">
-                        Relationships: {rels.map((r: any) => `${r.source_ref} -[${r.kind}]-> ${r.target_ref}`).join(", ")}
+                    </div>
+                  )}
+
+                  {/* Extracted Memories */}
+                  {mems.length > 0 && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div className="t-caption fg-2" style={{ fontWeight: 600, marginBottom: 4 }}>Durable Facts:</div>
+                      <div className="col gap1">
+                        {mems.map((m: any, idx: number) => (
+                          <div key={idx} className="t-body-sm" style={{ padding: "4px 8px", background: "var(--bg-card)", borderRadius: 4 }}>
+                            • <strong>[{m.kind}]</strong> {m.content} <span className="chip chip-mono t-micro" style={{ marginLeft: 6 }}>conf {m.confidence}</span>
+                          </div>
+                        ))}
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
+
+                  {/* Editable Entities */}
+                  {ents.length > 0 && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div className="t-caption fg-2" style={{ fontWeight: 600, marginBottom: 4 }}>Entities (Review &amp; Edit Type/Description):</div>
+                      <div className="col gap2">
+                        {ents.map((e: any) => {
+                          const nodeKey = e.temporary_id || e.name;
+                          const nodeEdit = currentEdits.nodes[nodeKey] || {
+                            kind: e.kind || "entity",
+                            customKind: "",
+                            description: e.description || "",
+                          };
+                          const isCustom = nodeEdit.kind === "__custom__";
+                          return (
+                            <div key={nodeKey} className="card" style={{ padding: 10, background: "var(--bg-card)" }}>
+                              <div className="row spread" style={{ alignItems: "center", marginBottom: 6 }}>
+                                <span className="t-body-sm mono" style={{ fontWeight: 600 }}>{e.name}</span>
+                                <span className="chip chip-mono t-micro">Proposed: {e.kind}</span>
+                              </div>
+                              <div className="row gap2" style={{ alignItems: "center", marginBottom: 6 }}>
+                                <span className="t-caption fg-2" style={{ flex: "none", width: 70 }}>Type:</span>
+                                <select
+                                  className="input"
+                                  style={{ flex: 1 }}
+                                  value={nodeEdit.kind}
+                                  onChange={(evt) => {
+                                    const val = evt.target.value;
+                                    setEventEdits((prev) => {
+                                      const cur = prev[ev.id] || { nodes: {}, edges: {} };
+                                      return {
+                                        ...prev,
+                                        [ev.id]: {
+                                          ...cur,
+                                          nodes: {
+                                            ...cur.nodes,
+                                            [nodeKey]: {
+                                              ...nodeEdit,
+                                              kind: val,
+                                            },
+                                          },
+                                        },
+                                      };
+                                    });
+                                  }}
+                                >
+                                  {availableEntityKinds.map((k) => (
+                                    <option key={k} value={k}>{k}</option>
+                                  ))}
+                                  <option value="__custom__">+ Propose New Ontology Type…</option>
+                                </select>
+                                {isCustom && (
+                                  <input
+                                    className="input"
+                                    placeholder="New entity type name…"
+                                    style={{ flex: 1 }}
+                                    value={nodeEdit.customKind}
+                                    onChange={(evt) => {
+                                      const val = evt.target.value;
+                                      setEventEdits((prev) => {
+                                        const cur = prev[ev.id] || { nodes: {}, edges: {} };
+                                        return {
+                                          ...prev,
+                                          [ev.id]: {
+                                            ...cur,
+                                            nodes: {
+                                              ...cur.nodes,
+                                              [nodeKey]: {
+                                                ...nodeEdit,
+                                                customKind: val,
+                                              },
+                                            },
+                                          },
+                                        };
+                                      });
+                                    }}
+                                  />
+                                )}
+                              </div>
+                              <div className="row gap2" style={{ alignItems: "center" }}>
+                                <span className="t-caption fg-2" style={{ flex: "none", width: 70 }}>Description:</span>
+                                <input
+                                  className="input"
+                                  style={{ flex: 1 }}
+                                  value={nodeEdit.description}
+                                  placeholder="Entity description…"
+                                  onChange={(evt) => {
+                                    const val = evt.target.value;
+                                    setEventEdits((prev) => {
+                                      const cur = prev[ev.id] || { nodes: {}, edges: {} };
+                                      return {
+                                        ...prev,
+                                        [ev.id]: {
+                                          ...cur,
+                                          nodes: {
+                                            ...cur.nodes,
+                                            [nodeKey]: {
+                                              ...nodeEdit,
+                                              description: val,
+                                            },
+                                          },
+                                        },
+                                      };
+                                    });
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Editable Relationships */}
+                  {rels.length > 0 && (
+                    <div>
+                      <div className="t-caption fg-2" style={{ fontWeight: 600, marginBottom: 4 }}>Relationships (Review &amp; Edit Type/Direction):</div>
+                      <div className="col gap2">
+                        {rels.map((r: any, rIdx: number) => {
+                          const edgeEdit = currentEdits.edges[rIdx] || {
+                            kind: r.kind || "RELATES_TO",
+                            customKind: "",
+                            direction: "normal" as const,
+                            source_ref: r.source_ref,
+                            target_ref: r.target_ref,
+                          };
+                          const isCustom = edgeEdit.kind === "__custom__";
+                          const isReversed = edgeEdit.direction === "reverse";
+                          const displaySrc = isReversed ? edgeEdit.target_ref : edgeEdit.source_ref;
+                          const displayTgt = isReversed ? edgeEdit.source_ref : edgeEdit.target_ref;
+
+                          return (
+                            <div key={rIdx} className="card" style={{ padding: 10, background: "var(--bg-card)" }}>
+                              <div className="row spread" style={{ alignItems: "center", marginBottom: 6 }}>
+                                <div className="row gap2" style={{ alignItems: "center" }}>
+                                  <span className="mono" style={{ fontWeight: 600 }}>{displaySrc}</span>
+                                  <span className="fg-2">→</span>
+                                  <span className="mono" style={{ fontWeight: 600 }}>{displayTgt}</span>
+                                  {isReversed && <span className="chip chip-mono t-micro">reversed</span>}
+                                </div>
+                                <button
+                                  className="btn btn-secondary btn-sm"
+                                  title="Flip direction"
+                                  onClick={() => {
+                                    setEventEdits((prev) => {
+                                      const cur = prev[ev.id] || { nodes: {}, edges: {} };
+                                      return {
+                                        ...prev,
+                                        [ev.id]: {
+                                          ...cur,
+                                          edges: {
+                                            ...cur.edges,
+                                            [rIdx]: {
+                                              ...edgeEdit,
+                                              direction: isReversed ? "normal" : "reverse",
+                                            },
+                                          },
+                                        },
+                                      };
+                                    });
+                                  }}
+                                >
+                                  ⇄ Swap Direction
+                                </button>
+                              </div>
+                              <div className="row gap2" style={{ alignItems: "center" }}>
+                                <span className="t-caption fg-2" style={{ flex: "none", width: 70 }}>Type:</span>
+                                <select
+                                  className="input"
+                                  style={{ flex: 1 }}
+                                  value={edgeEdit.kind}
+                                  onChange={(evt) => {
+                                    const val = evt.target.value;
+                                    setEventEdits((prev) => {
+                                      const cur = prev[ev.id] || { nodes: {}, edges: {} };
+                                      return {
+                                        ...prev,
+                                        [ev.id]: {
+                                          ...cur,
+                                          edges: {
+                                            ...cur.edges,
+                                            [rIdx]: {
+                                              ...edgeEdit,
+                                              kind: val,
+                                            },
+                                          },
+                                        },
+                                      };
+                                    });
+                                  }}
+                                >
+                                  {availableRelKinds.map((k) => (
+                                    <option key={k} value={k}>{k}</option>
+                                  ))}
+                                  <option value="__custom__">+ Propose New Relationship Type…</option>
+                                </select>
+                                {isCustom && (
+                                  <input
+                                    className="input"
+                                    placeholder="New relationship type (e.g. DEPLOYED_VIA)…"
+                                    style={{ flex: 1 }}
+                                    value={edgeEdit.customKind}
+                                    onChange={(evt) => {
+                                      const val = evt.target.value;
+                                      setEventEdits((prev) => {
+                                        const cur = prev[ev.id] || { nodes: {}, edges: {} };
+                                        return {
+                                          ...prev,
+                                          [ev.id]: {
+                                            ...cur,
+                                            edges: {
+                                              ...cur.edges,
+                                              [rIdx]: {
+                                                ...edgeEdit,
+                                                customKind: val,
+                                              },
+                                            },
+                                          },
+                                        };
+                                      });
+                                    }}
+                                  />
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}

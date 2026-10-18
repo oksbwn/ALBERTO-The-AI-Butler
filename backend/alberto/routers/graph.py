@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from alberto.deps import CurrentUser, current_tenant_id, require_role
+from alberto.deps import CurrentUser, current_tenant_id, get_session, require_role
 from alberto.knowledge.graph import (
     GraphEntity,
     GraphRelationship,
@@ -22,7 +23,14 @@ from alberto.schemas.dto import (
     GraphStatsOut,
     GraphSubgraphOut,
 )
+from alberto.schemas.memory_curator import (
+    OntologyEntityTypeIn,
+    OntologyEntityTypeOut,
+    OntologyRelationshipTypeIn,
+    OntologyRelationshipTypeOut,
+)
 from alberto.services.audit import AuditService
+from alberto.services.ontology_registry import OntologyRegistryService
 
 router = APIRouter(prefix="/v1/projects/{project_id}/graph", tags=["graph"])
 
@@ -258,4 +266,162 @@ async def delete_relationship(
         actor_email=user.email if user else None,
         resource_type="graph_relationship",
         resource_id=rel_id,
+    )
+
+
+# --- Dynamic Ontology Registry Endpoints ---
+
+@router.get("/ontology/entity-types", response_model=list[OntologyEntityTypeOut])
+async def list_ontology_entity_types(
+    project_id: str,
+    status: str | None = None,
+    tenant_id: str = Depends(current_tenant_id),
+    session: AsyncSession = Depends(get_session),
+    _: CurrentUser = Depends(require_role("viewer")),
+):
+    """List approved and scoped Knowledge Graph entity types."""
+    types = await OntologyRegistryService.list_entity_types(
+        session, tenant_id, project_id, status=status
+    )
+    return [
+        OntologyEntityTypeOut(
+            id=t.id,
+            tenant_id=t.tenant_id,
+            project_id=t.project_id,
+            canonical_key=t.canonical_key,
+            display_name=t.display_name,
+            description=t.description,
+            aliases=t.aliases or [],
+            status=t.status,
+            provenance=t.provenance,
+            created_at=t.created_at,
+            updated_at=t.updated_at,
+        )
+        for t in types
+    ]
+
+
+@router.post("/ontology/entity-types", response_model=OntologyEntityTypeOut, status_code=201)
+async def register_ontology_entity_type(
+    project_id: str,
+    body: OntologyEntityTypeIn,
+    tenant_id: str = Depends(current_tenant_id),
+    session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(require_role("editor")),
+):
+    """Register or approve an entity type definition in project scope."""
+    ent_type = await OntologyRegistryService.register_entity_type(
+        session=session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        canonical_key=body.canonical_key,
+        display_name=body.display_name,
+        description=body.description,
+        aliases=body.aliases,
+        status=body.status,
+        provenance="human_approved",
+    )
+    await AuditService.log(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        action="graph.ontology.entity_type.create",
+        actor_id=user.id if user else None,
+        actor_email=user.email if user else None,
+        resource_type="ontology_entity_type",
+        resource_id=ent_type.id,
+        meta={"canonical_key": ent_type.canonical_key},
+    )
+    return OntologyEntityTypeOut(
+        id=ent_type.id,
+        tenant_id=ent_type.tenant_id,
+        project_id=ent_type.project_id,
+        canonical_key=ent_type.canonical_key,
+        display_name=ent_type.display_name,
+        description=ent_type.description,
+        aliases=ent_type.aliases or [],
+        status=ent_type.status,
+        provenance=ent_type.provenance,
+        created_at=ent_type.created_at,
+        updated_at=ent_type.updated_at,
+    )
+
+
+@router.get("/ontology/relationship-types", response_model=list[OntologyRelationshipTypeOut])
+async def list_ontology_relationship_types(
+    project_id: str,
+    status: str | None = None,
+    tenant_id: str = Depends(current_tenant_id),
+    session: AsyncSession = Depends(get_session),
+    _: CurrentUser = Depends(require_role("viewer")),
+):
+    """List approved and scoped Knowledge Graph relationship types."""
+    types = await OntologyRegistryService.list_relationship_types(
+        session, tenant_id, project_id, status=status
+    )
+    return [
+        OntologyRelationshipTypeOut(
+            id=t.id,
+            tenant_id=t.tenant_id,
+            project_id=t.project_id,
+            canonical_key=t.canonical_key,
+            description=t.description,
+            allowed_source_types=t.allowed_source_types or [],
+            allowed_target_types=t.allowed_target_types or [],
+            direction_semantics=t.direction_semantics,
+            aliases=t.aliases or [],
+            status=t.status,
+            provenance=t.provenance,
+            created_at=t.created_at,
+            updated_at=t.updated_at,
+        )
+        for t in types
+    ]
+
+
+@router.post("/ontology/relationship-types", response_model=OntologyRelationshipTypeOut, status_code=201)
+async def register_ontology_relationship_type(
+    project_id: str,
+    body: OntologyRelationshipTypeIn,
+    tenant_id: str = Depends(current_tenant_id),
+    session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(require_role("editor")),
+):
+    """Register or approve a relationship type definition in project scope."""
+    rel_type = await OntologyRegistryService.register_relationship_type(
+        session=session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        canonical_key=body.canonical_key,
+        description=body.description,
+        allowed_source_types=body.allowed_source_types,
+        allowed_target_types=body.allowed_target_types,
+        direction_semantics=body.direction_semantics,
+        aliases=body.aliases,
+        status=body.status,
+        provenance="human_approved",
+    )
+    await AuditService.log(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        action="graph.ontology.relationship_type.create",
+        actor_id=user.id if user else None,
+        actor_email=user.email if user else None,
+        resource_type="ontology_relationship_type",
+        resource_id=rel_type.id,
+        meta={"canonical_key": rel_type.canonical_key},
+    )
+    return OntologyRelationshipTypeOut(
+        id=rel_type.id,
+        tenant_id=rel_type.tenant_id,
+        project_id=rel_type.project_id,
+        canonical_key=rel_type.canonical_key,
+        description=rel_type.description,
+        allowed_source_types=rel_type.allowed_source_types or [],
+        allowed_target_types=rel_type.allowed_target_types or [],
+        direction_semantics=rel_type.direction_semantics,
+        aliases=rel_type.aliases or [],
+        status=rel_type.status,
+        provenance=rel_type.provenance,
+        created_at=rel_type.created_at,
+        updated_at=rel_type.updated_at,
     )

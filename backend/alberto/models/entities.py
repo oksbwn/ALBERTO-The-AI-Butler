@@ -450,6 +450,56 @@ class MemoryLearningEvent(PkTimestamp, Base):
     applied_graph_rel_ids: Mapped[list] = mapped_column(JSON, default=list)
 
 
+class OntologyEntityType(PkTimestamp, Base):
+    """Dynamically extensible Knowledge Graph entity type definition."""
+
+    __tablename__ = "ontology_entity_types"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "project_id", "canonical_key", name="uq_ontology_entity_type"),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    canonical_key: Mapped[str] = mapped_column(String(64), index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    aliases: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(30), default="approved", index=True)  # approved|pending_approval|deprecated|rejected
+    provenance: Mapped[str] = mapped_column(String(64), default="system_seed")  # system_seed|human_approved|llm_proposed|human_correction
+
+
+class OntologyRelationshipType(PkTimestamp, Base):
+    """Dynamically extensible Knowledge Graph relationship type definition."""
+
+    __tablename__ = "ontology_relationship_types"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "project_id", "canonical_key", name="uq_ontology_rel_type"),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    canonical_key: Mapped[str] = mapped_column(String(64), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    allowed_source_types: Mapped[list] = mapped_column(JSON, default=list)
+    allowed_target_types: Mapped[list] = mapped_column(JSON, default=list)
+    direction_semantics: Mapped[str] = mapped_column(String(40), default="source_to_target")
+    aliases: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(30), default="approved", index=True)  # approved|pending_approval|deprecated|rejected
+    provenance: Mapped[str] = mapped_column(String(64), default="system_seed")  # system_seed|human_approved|llm_proposed|human_correction
+
+
+class OntologyEntityMapping(PkTimestamp, Base):
+    """Persistent learned mapping from specific entity canonical name to target entity type."""
+
+    __tablename__ = "ontology_entity_mappings"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "project_id", "entity_canonical_name", name="uq_ontology_entity_mapping"),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    entity_canonical_name: Mapped[str] = mapped_column(String(120), index=True)
+    target_entity_type: Mapped[str] = mapped_column(String(64), index=True)
+    provenance: Mapped[str] = mapped_column(String(64), default="human_correction")  # human_correction|seed|human_approved
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)  # active|rejected
+
 
 class Dataset(PkTimestamp, Base):
     """An evaluation dataset: inputs + expected outputs run against a workflow to score

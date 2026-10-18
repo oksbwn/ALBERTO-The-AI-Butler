@@ -23,105 +23,31 @@ from alberto.knowledge.graph import (
     make_entity_id,
     make_relationship_id,
 )
-from alberto.schemas.memory_curator import EntityCandidate, RelationshipCandidate
+from alberto.schemas.memory_curator import (
+    CANONICAL_ENTITY_KINDS,
+    CANONICAL_RELATIONSHIP_KINDS,
+    EntityCandidate,
+    RelationshipCandidate,
+)
+from alberto.services.ontology_registry import (
+    DEFAULT_ENTITY_MAPPINGS,
+    OntologyRegistryService,
+)
 
 logger = logging.getLogger("alberto.services.graph_manager")
 
-VALID_RELATIONSHIP_KINDS = {
-    "RUNS",
-    "PREFERS",
-    "USES",
-    "LOCATED_IN",
-    "MANAGES",
-    "OWNS",
-    "CONNECTS_TO",
-    "PART_OF",
-    "REQUIRES",
-    "WORKS_WITH",
-    "RELATES_TO",
-}
+VALID_RELATIONSHIP_KINDS = set(CANONICAL_RELATIONSHIP_KINDS)
+VALID_ENTITY_KINDS = set(CANONICAL_ENTITY_KINDS)
 
-
-VALID_ENTITY_KINDS = {
-    "device",
-    "hardware",
-    "appliance",
-    "host",
-    "operating_system",
-    "platform",
-    "application",
-    "software",
-    "framework",
-    "model",
-    "modelrunner",
-    "person",
-    "location",
-    "service",
-    "technology",
-    "topic",
-    "concept",
-    "project",
-}
-
+# Legacy alias reference mappings preserved for test and module backwards compatibility
 KNOWN_OPERATING_SYSTEMS = {
-    "macos",
-    "mac os",
-    "os x",
-    "darwin",
-    "windows",
-    "win11",
-    "win10",
-    "win8",
-    "win7",
-    "linux",
-    "ubuntu",
-    "debian",
-    "fedora",
-    "arch",
-    "arch linux",
-    "centos",
-    "redhat",
-    "rhel",
-    "alpine",
-    "ios",
-    "ipados",
-    "watchos",
-    "android",
-    "freebsd",
-    "openbsd",
-    "unix",
+    k for k, v in DEFAULT_ENTITY_MAPPINGS.items() if v == "operating_system"
 }
-
 KNOWN_HARDWARE_DEVICES = {
-    "mac",
-    "mac mini",
-    "mac studio",
-    "macbook",
-    "macbook pro",
-    "macbook air",
-    "imac",
-    "mac pro",
-    "pc",
-    "laptop",
-    "desktop",
-    "server",
-    "raspberry pi",
-    "iphone",
-    "ipad",
-    "android phone",
+    k for k, v in DEFAULT_ENTITY_MAPPINGS.items() if v == "device"
 }
-
 KNOWN_FRAMEWORKS_AND_APPS = {
-    "olmx",
-    "ollama",
-    "lm studio",
-    "vllm",
-    "llama.cpp",
-    "tgi",
-    "pytorch",
-    "tensorflow",
-    "transformers",
-    "langchain",
+    k for k, v in DEFAULT_ENTITY_MAPPINGS.items() if v in ("application", "framework")
 }
 
 COMPATIBLE_KIND_SETS = [
@@ -180,6 +106,7 @@ class GraphManagerService:
         candidate_entities: list[EntityCandidate],
         candidate_relationships: list[RelationshipCandidate],
         source_ref: str = "memory_curator",
+        session: Any | None = None,
     ) -> dict[str, Any]:
         """Resolve canonical identities and validate candidates deterministically WITHOUT mutating graph.
 
@@ -224,26 +151,45 @@ class GraphManagerService:
             c_canon = cls.canonicalize_name(c_name)
             k = (cand.kind or "").strip().lower()
 
-            # Deterministic entity classification rules (unambiguous known types only)
-            if c_canon in KNOWN_OPERATING_SYSTEMS:
-                if k in ("device", "host", "hardware", "concept"):
-                    logger.info("Deterministic entity kind normalization: '%s' is an operating system, not %s", c_name, k)
+            # 1. Learned entity mapping lookup (e.g. macOS -> operating_system, Mac mini -> device)
+            mapped_type = await OntologyRegistryService.get_entity_mapping(
+                session, tenant_id, project_id, c_canon
+            )
+            if mapped_type:
+                if mapped_type == "operating_system" and k in ("device", "host", "hardware", "concept"):
+                    logger.info("Learned ontology kind normalization: '%s' is an operating system, not %s", c_name, k)
                     cand.kind = "operating_system"
                     k = "operating_system"
-            elif c_canon in KNOWN_HARDWARE_DEVICES:
-                if k in ("operating_system", "platform", "application", "framework"):
-                    logger.info("Deterministic entity kind normalization: '%s' is a physical device, not %s", c_name, k)
+                elif mapped_type == "device" and k in ("operating_system", "platform", "application", "framework"):
+                    logger.info("Learned ontology kind normalization: '%s' is a physical device, not %s", c_name, k)
                     cand.kind = "device"
                     k = "device"
-            elif c_canon in KNOWN_FRAMEWORKS_AND_APPS:
-                if k in ("device", "host"):
-                    logger.info("Deterministic entity kind normalization: '%s' is an application/framework, not %s", c_name, k)
+                elif mapped_type == "application" and k in ("device", "host", "unknown_software", "software", "tool"):
+                    logger.info("Learned ontology kind normalization: '%s' is an application, not %s", c_name, k)
                     cand.kind = "application"
                     k = "application"
+                elif k != mapped_type and (k in ("device", "concept", "hardware", "unknown_software") or k not in CANONICAL_ENTITY_KINDS):
+                    cand.kind = mapped_type
+                    k = mapped_type
 
-            if k not in VALID_ENTITY_KINDS:
+            # 2. Dynamic ontology entity-type resolution
+            resolved_k, k_status = await OntologyRegistryService.resolve_entity_type(
+                session, tenant_id, project_id, k
+            )
+            if resolved_k:
+                cand.kind = resolved_k
+                k = resolved_k
+                if k_status != "approved":
+                    requires_review = True
+                    review_reasons.append(
+                        f"Entity type '{cand.kind}' proposed for '{c_name}' has status '{k_status}' and requires approval"
+                    )
+            else:
+                # Novel entity kind proposal
                 requires_review = True
-                review_reasons.append(f"Unrecognized entity kind '{cand.kind}' for candidate '{c_name}'")
+                review_reasons.append(
+                    f"Novel entity type '{cand.kind}' proposed for '{c_name}' requires human review and ontology approval"
+                )
 
             matches = list(by_canonical.get(c_canon, []))
 
@@ -270,9 +216,9 @@ class GraphManagerService:
                 existing_k = (existing.kind or "").strip().lower()
 
                 # Remediate/normalize existing entity kind if it was misclassified under older taxonomy
-                if c_canon in KNOWN_OPERATING_SYSTEMS and existing_k == "device":
-                    existing.kind = "operating_system"
-                    existing_k = "operating_system"
+                if mapped_type and existing_k != mapped_type and existing_k in ("device", "concept"):
+                    existing.kind = mapped_type
+                    existing_k = mapped_type
 
                 # Check kind compatibility
                 is_compatible = (
@@ -343,11 +289,22 @@ class GraphManagerService:
             if src_id == tgt_id:
                 continue
 
+            # Dynamic ontology relationship-type resolution
             clean_kind = re.sub(r"[^A-Z0-9_]", "_", rel.kind.strip().upper())
-            if clean_kind not in VALID_RELATIONSHIP_KINDS:
+            resolved_rel_k, rel_status = await OntologyRegistryService.resolve_relationship_type(
+                session, tenant_id, project_id, rel.kind
+            )
+            if resolved_rel_k:
+                clean_kind = resolved_rel_k
+                if rel_status != "approved":
+                    requires_review = True
+                    review_reasons.append(
+                        f"Relationship type '{clean_kind}' has status '{rel_status}' and requires approval"
+                    )
+            else:
                 requires_review = True
                 review_reasons.append(
-                    f"Unknown relationship kind '{rel.kind}' (normalized: '{clean_kind}') requires confirmation"
+                    f"Unknown relationship kind '{rel.kind}' (normalized: '{clean_kind}') requires confirmation and ontology approval"
                 )
                 clean_kind = "RELATES_TO"
 
@@ -355,6 +312,23 @@ class GraphManagerService:
             if rel_conf < 0.75:
                 requires_review = True
                 review_reasons.append(f"Low confidence ({rel_conf:.2f}) on relationship candidate '{clean_kind}'")
+
+            # Directional semantic validation
+            src_ent = by_id.get(src_id) or next((e for e in resolved_entities if e.id == src_id), None)
+            tgt_ent = by_id.get(tgt_id) or next((e for e in resolved_entities if e.id == tgt_id), None)
+            if src_ent and tgt_ent:
+                src_k = (src_ent.kind or "").lower()
+                tgt_k = (tgt_ent.kind or "").lower()
+                if clean_kind == "RUNS" and src_k in ("application", "framework", "service") and tgt_k in ("device", "host", "platform"):
+                    requires_review = True
+                    review_reasons.append(
+                        f"Possible inverted relationship direction: '{src_ent.name}' ({src_k}) RUNS '{tgt_ent.name}' ({tgt_k})"
+                    )
+                elif clean_kind == "DEPLOYED_VIA" and tgt_k in ("application", "framework") and src_k in ("platform", "device"):
+                    requires_review = True
+                    review_reasons.append(
+                        f"Possible inverted deployment direction: '{src_ent.name}' DEPLOYED_VIA '{tgt_ent.name}'"
+                    )
 
             rel_id = make_relationship_id(src_id, clean_kind, tgt_id)
             relationship = GraphRelationship(
@@ -422,6 +396,7 @@ class GraphManagerService:
         candidate_entities: list[EntityCandidate],
         candidate_relationships: list[RelationshipCandidate],
         source_ref: str = "memory_curator",
+        session: Any | None = None,
     ) -> dict[str, Any]:
         """Validate and apply candidates ONLY if acceptance policy passes without review."""
         val = await cls.resolve_and_validate(
@@ -430,6 +405,7 @@ class GraphManagerService:
             candidate_entities=candidate_entities,
             candidate_relationships=candidate_relationships,
             source_ref=source_ref,
+            session=session,
         )
 
         # STRICT INVARIANT: If review is required, DO NOT MUTATE THE GRAPH!

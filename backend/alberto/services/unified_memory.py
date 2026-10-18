@@ -652,12 +652,16 @@ class UnifiedMemoryManager:
 
     @staticmethod
     async def approve_learning_event(
-        session: AsyncSession, tenant_id: str, project_id: str, event_id: str
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        event_id: str,
+        edits: Any | None = None,
     ) -> Any | None:
-        """Approve pending learning candidates in a review_required event."""
+        """Approve pending learning candidates in a review_required event with optional human edits."""
         from alberto.services.learning_coordinator import LearningCoordinator
 
-        res = await LearningCoordinator.approve_event(session, tenant_id, project_id, event_id)
+        res = await LearningCoordinator.approve_event(session, tenant_id, project_id, event_id, edits=edits)
         try:
             from alberto.nodes.agent_node import MemoryRecallMiddleware
             MemoryRecallMiddleware.invalidate_cache(tenant_id=tenant_id, project_id=project_id)

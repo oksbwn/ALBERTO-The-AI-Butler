@@ -7,13 +7,58 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+CANONICAL_MEMORY_KINDS: tuple[str, ...] = (
+    "preference",
+    "fact",
+    "instruction",
+    "profile",
+    "technology",
+    "home",
+    "project",
+)
+
+CANONICAL_ENTITY_KINDS: tuple[str, ...] = (
+    "device",
+    "hardware",
+    "appliance",
+    "host",
+    "operating_system",
+    "platform",
+    "application",
+    "software",
+    "framework",
+    "model",
+    "modelrunner",
+    "person",
+    "location",
+    "service",
+    "technology",
+    "topic",
+    "concept",
+    "project",
+)
+
+CANONICAL_RELATIONSHIP_KINDS: tuple[str, ...] = (
+    "RUNS",
+    "PREFERS",
+    "USES",
+    "LOCATED_IN",
+    "MANAGES",
+    "OWNS",
+    "CONNECTS_TO",
+    "PART_OF",
+    "REQUIRES",
+    "WORKS_WITH",
+    "RELATES_TO",
+)
+
 
 class MemoryCandidate(BaseModel):
     """A durable memory candidate extracted from conversation."""
 
     kind: str = Field(
         default="preference",
-        description="Category: preference, fact, instruction, profile, technology, home, project",
+        description=f"Category: {', '.join(CANONICAL_MEMORY_KINDS)}",
     )
     content: str = Field(description="The factual, durable statement to remember.")
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -46,7 +91,7 @@ class EntityCandidate(BaseModel):
     name: str = Field(description="Entity name as explicitly stated (e.g. Mac mini, LM Studio).")
     kind: str = Field(
         default="concept",
-        description="Entity type: device, operating_system, platform, application, framework, model, modelrunner, person, location, service, topic, concept",
+        description=f"Entity type: {', '.join(CANONICAL_ENTITY_KINDS)}",
     )
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     description: str = Field(default="", description="Brief description or context.")
@@ -61,7 +106,7 @@ class RelationshipCandidate(BaseModel):
     target_ref: str = Field(description="Target entity temporary_id or exact entity name.")
     kind: str = Field(
         default="RELATES_TO",
-        description="Controlled uppercase relationship kind (e.g. RUNS, PREFERS, USES, LOCATED_IN, OWNS).",
+        description=f"Controlled uppercase relationship kind: {', '.join(CANONICAL_RELATIONSHIP_KINDS)}",
     )
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     evidence_refs: list[str] = Field(default_factory=list, description="Supporting evidence references.")
@@ -175,3 +220,99 @@ class MarkdownMemoryFileOut(BaseModel):
     size_bytes: int
     updated_at: str
     content: str | None = None
+
+
+# --- Dynamic Ontology & HITL Approval DTOs ---
+
+class CuratorAdvisorySuggestion(BaseModel):
+    """Advisory recommendation from Memory Curator when warnings occur during review."""
+
+    target_type: Literal["entity", "relationship"]
+    target_ref: str = Field(description="Entity temporary_id / name or relationship index / label.")
+    suggested_kind: str | None = None
+    existing_type_mapping: str | None = None
+    suggested_direction: Literal["normal", "reverse"] | None = None
+    explanation: str = Field(default="", description="Grounding justification for the recommendation.")
+    evidence_refs: list[str] = Field(default_factory=list)
+    uncertainty: float = Field(default=0.0, ge=0.0, le=1.0)
+    requires_new_ontology_definition: bool = False
+
+
+class NodeApprovalEdit(BaseModel):
+    """Reviewer modifications to candidate entity before approval."""
+
+    temporary_id: str
+    name: str | None = None
+    kind: str | None = None
+    description: str | None = None
+    action: Literal["approve", "reject", "reclassify"] = "approve"
+    is_new_ontology_type: bool = False
+    ontology_type_description: str | None = None
+
+
+class EdgeApprovalEdit(BaseModel):
+    """Reviewer modifications to candidate relationship before approval."""
+
+    source_ref: str | None = None
+    target_ref: str | None = None
+    kind: str | None = None
+    direction: Literal["normal", "reverse"] = "normal"
+    action: Literal["approve", "reject"] = "approve"
+    is_new_ontology_type: bool = False
+    ontology_type_description: str | None = None
+
+
+class LearningEventApprovalIn(BaseModel):
+    """Reviewer decision payload for learning event approval."""
+
+    node_edits: list[NodeApprovalEdit] = Field(default_factory=list)
+    edge_edits: list[EdgeApprovalEdit] = Field(default_factory=list)
+    approved_memories: list[dict[str, Any]] | None = None
+
+
+class OntologyEntityTypeOut(BaseModel):
+    id: str
+    tenant_id: str
+    project_id: str
+    canonical_key: str
+    display_name: str
+    description: str
+    aliases: list[str] = Field(default_factory=list)
+    status: str
+    provenance: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class OntologyEntityTypeIn(BaseModel):
+    canonical_key: str
+    display_name: str | None = None
+    description: str = ""
+    aliases: list[str] = Field(default_factory=list)
+    status: str = "approved"
+
+
+class OntologyRelationshipTypeOut(BaseModel):
+    id: str
+    tenant_id: str
+    project_id: str
+    canonical_key: str
+    description: str
+    allowed_source_types: list[str] = Field(default_factory=list)
+    allowed_target_types: list[str] = Field(default_factory=list)
+    direction_semantics: str = "source_to_target"
+    aliases: list[str] = Field(default_factory=list)
+    status: str
+    provenance: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class OntologyRelationshipTypeIn(BaseModel):
+    canonical_key: str
+    description: str = ""
+    allowed_source_types: list[str] = Field(default_factory=list)
+    allowed_target_types: list[str] = Field(default_factory=list)
+    direction_semantics: str = "source_to_target"
+    aliases: list[str] = Field(default_factory=list)
+    status: str = "approved"

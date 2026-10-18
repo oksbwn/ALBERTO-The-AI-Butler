@@ -19,12 +19,16 @@ from alberto.schemas.dto import (
     MemoryStatusOut,
 )
 from alberto.schemas.memory_curator import (
+    CuratorAdvisorySuggestion,
+    EntityCandidate,
+    LearningEventApprovalIn,
     LearningEventOut,
     MarkdownMemoryFileOut,
     MemoryLearningSettingsIn,
     MemoryLearningSettingsOut,
     MemoryRecordDetailOut,
     MemoryRecordUpdateIn,
+    RelationshipCandidate,
 )
 from alberto.services.audit import AuditService
 from alberto.services.memory_curator import MemoryCurator
@@ -433,12 +437,15 @@ async def list_learning_events(
 async def approve_learning_event(
     project_id: str,
     event_id: str,
+    body: LearningEventApprovalIn | None = None,
     tenant_id: str = Depends(current_tenant_id),
     session: AsyncSession = Depends(get_session),
     user: CurrentUser = Depends(require_role("editor")),
 ):
-    """Approve candidate knowledge in a review_required event."""
-    ev = await UnifiedMemoryManager.approve_learning_event(session, tenant_id, project_id, event_id)
+    """Approve candidate knowledge in a review_required event with optional human edits."""
+    ev = await UnifiedMemoryManager.approve_learning_event(
+        session, tenant_id, project_id, event_id, edits=body
+    )
     if not ev:
         raise HTTPException(status_code=404, detail="Learning event not found or not in review_required status")
 
@@ -450,6 +457,7 @@ async def approve_learning_event(
         actor_email=user.email if user else None,
         resource_type="memory_learning_event",
         resource_id=event_id,
+        meta={"has_edits": body is not None},
     )
     return LearningEventOut(
         id=ev.id,
@@ -468,6 +476,57 @@ async def approve_learning_event(
         created_at=ev.created_at,
         updated_at=ev.updated_at,
     )
+
+
+@router.post("/learning/events/{event_id}/suggest", response_model=list[CuratorAdvisorySuggestion])
+async def get_learning_event_suggestions(
+    project_id: str,
+    event_id: str,
+    tenant_id: str = Depends(current_tenant_id),
+    session: AsyncSession = Depends(get_session),
+    _: CurrentUser = Depends(require_role("viewer")),
+):
+    """Retrieve or generate advisory recommendations from Memory Curator for review items."""
+    from alberto.models import MemoryLearningEvent
+
+    event = (
+        await session.execute(
+            select(MemoryLearningEvent).where(
+                MemoryLearningEvent.id == event_id,
+                MemoryLearningEvent.tenant_id == tenant_id,
+                MemoryLearningEvent.project_id == project_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=404, detail="Learning event not found")
+
+    payload = dict(event.extraction_payload or {})
+    # Check cache by payload content
+    if "advisory_suggestions" in payload and payload.get("advisory_suggestions"):
+        return [CuratorAdvisorySuggestion.model_validate(s) for s in payload["advisory_suggestions"]]
+
+    output_data = payload.get("curator_output") or payload
+    entities_data = [EntityCandidate.model_validate(e) for e in output_data.get("entities", [])]
+    rels_data = [RelationshipCandidate.model_validate(r) for r in output_data.get("relationships", [])]
+    review_reasons = output_data.get("review_reasons") or ([event.error] if event.error else [])
+    turn_info = payload.get("turn", {})
+    context_text = f"User: {turn_info.get('user_message', '')}\nAssistant: {turn_info.get('ai_response', '')}"
+
+    suggestions = await MemoryCurator.suggest_review_correction(
+        session=session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        review_reasons=review_reasons,
+        candidate_entities=entities_data,
+        candidate_relationships=rels_data,
+        conversation_context=context_text,
+    )
+
+    payload["advisory_suggestions"] = [s.model_dump() for s in suggestions]
+    event.extraction_payload = payload
+    await session.commit()
+    return suggestions
 
 
 @router.post("/learning/events/{event_id}/reject", response_model=LearningEventOut)

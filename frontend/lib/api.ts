@@ -362,6 +362,74 @@ export interface MarkdownMemoryFile {
   content?: string | null;
 }
 
+export interface CuratorAdvisorySuggestion {
+  target_type: "entity" | "relationship";
+  target_ref: string;
+  suggested_kind?: string | null;
+  existing_type_mapping?: string | null;
+  suggested_direction?: "normal" | "reverse" | null;
+  explanation: string;
+  evidence_refs: string[];
+  uncertainty: number;
+  requires_new_ontology_definition: boolean;
+}
+
+export interface NodeApprovalEdit {
+  temporary_id: string;
+  name?: string;
+  kind?: string;
+  description?: string;
+  action?: "approve" | "reject" | "reclassify";
+  is_new_ontology_type?: boolean;
+  ontology_type_description?: string;
+}
+
+export interface EdgeApprovalEdit {
+  source_ref?: string;
+  target_ref?: string;
+  kind?: string;
+  direction?: "normal" | "reverse";
+  action?: "approve" | "reject";
+  is_new_ontology_type?: boolean;
+  ontology_type_description?: string;
+}
+
+export interface LearningEventApprovalIn {
+  node_edits?: NodeApprovalEdit[];
+  edge_edits?: EdgeApprovalEdit[];
+  approved_memories?: Record<string, any>[];
+}
+
+export interface OntologyEntityType {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  canonical_key: string;
+  display_name: string;
+  description: string;
+  aliases: string[];
+  status: string;
+  provenance: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface OntologyRelationshipType {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  canonical_key: string;
+  description: string;
+  allowed_source_types: string[];
+  allowed_target_types: string[];
+  direction_semantics: string;
+  aliases: string[];
+  status: string;
+  provenance: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface StatRollup { runs: number; tokens: number; cost_usd: number; avg_latency_ms: number; errors?: number; error_rate?: number; }
 export interface ReportRow extends StatRollup { label: string; kind: "workflow" | "assistant" | "other"; }
 
@@ -800,10 +868,19 @@ export const api = {
     json<MemoryLearningSettings>(`/v1/projects/${pid}/memory/learning/settings`, { method: "PATCH", body: JSON.stringify(body) }),
   listLearningEvents: (pid: string, status?: string) =>
     json<LearningEventItem[]>(`/v1/projects/${pid}/memory/learning/events${status ? `?status=${status}` : ""}`),
-  approveLearningEvent: (pid: string, id: string) =>
-    json<LearningEventItem>(`/v1/projects/${pid}/memory/learning/events/${id}/approve`, { method: "POST" }),
+  approveLearningEvent: (pid: string, id: string, edits?: LearningEventApprovalIn) =>
+    json<LearningEventItem>(`/v1/projects/${pid}/memory/learning/events/${id}/approve`, {
+      method: "POST",
+      body: edits ? JSON.stringify(edits) : undefined,
+    }),
+  getLearningEventSuggestions: (pid: string, id: string) =>
+    json<CuratorAdvisorySuggestion[]>(`/v1/projects/${pid}/memory/learning/events/${id}/suggest`, { method: "POST" }),
   rejectLearningEvent: (pid: string, id: string) =>
     json<LearningEventItem>(`/v1/projects/${pid}/memory/learning/events/${id}/reject`, { method: "POST" }),
+  listOntologyEntityTypes: (pid: string, status?: string) =>
+    json<OntologyEntityType[]>(`/v1/projects/${pid}/graph/ontology/entity-types${status ? `?status=${status}` : ""}`),
+  listOntologyRelationshipTypes: (pid: string, status?: string) =>
+    json<OntologyRelationshipType[]>(`/v1/projects/${pid}/graph/ontology/relationship-types${status ? `?status=${status}` : ""}`),
   listMarkdownMemoryFiles: (pid: string, filename?: string) =>
     json<MarkdownMemoryFile[]>(`/v1/projects/${pid}/memory/markdown${filename ? `?filename=${encodeURIComponent(filename)}` : ""}`),
   // traces + conversations (Traces view)

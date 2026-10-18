@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,7 @@ from alberto.db import SessionLocal
 from alberto.models import MemoryLearningEvent
 from alberto.schemas.memory_curator import (
     EntityCandidate,
+    LearningEventApprovalIn,
     MemoryCuratorOutput,
     RelationshipCandidate,
 )
@@ -90,6 +92,7 @@ class LearningCoordinator:
     """Orchestrates durable learning lifecycle from completed conversation turns."""
 
     _active_tasks: set[asyncio.Task] = set()
+    _in_progress_keys: set[str] = set()
 
     @classmethod
     async def is_learning_enabled(
@@ -161,7 +164,12 @@ class LearningCoordinator:
                 await session.commit()
                 await session.refresh(event)
 
-        # 2. Dispatch managed in-process background worker
+        # 2. Dispatch managed in-process background worker if not already running
+        key = f"{tenant_id}:{project_id}:{source_event_id}"
+        if key in cls._in_progress_keys:
+            return event
+
+        cls._in_progress_keys.add(key)
         task = asyncio.create_task(
             cls._safe_run_turn_learning(
                 tenant_id, project_id, source_event_id, user_message, ai_response
@@ -180,6 +188,8 @@ class LearningCoordinator:
         user_message: str,
         ai_response: str,
     ) -> None:
+        key = f"{tenant_id}:{project_id}:{source_event_id}"
+        cls._in_progress_keys.add(key)
         timeout = getattr(settings, "memory_learning_timeout_seconds", 30.0)
         try:
             async with asyncio.timeout(timeout):
@@ -226,6 +236,8 @@ class LearningCoordinator:
                     ev.error = str(e)[:200]
                     ev.retry_count += 1
                     await session.commit()
+        finally:
+            cls._in_progress_keys.discard(key)
 
     @classmethod
     async def process_learning_turn(
@@ -551,10 +563,15 @@ class LearningCoordinator:
 
     @classmethod
     async def approve_event(
-        cls, session: AsyncSession, tenant_id: str, project_id: str, event_id: str
+        cls,
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        event_id: str,
+        edits: LearningEventApprovalIn | None = None,
     ) -> MemoryLearningEvent | None:
         """Human approval of pending candidates in a review_required learning event.
-        Applies both candidate memories and graph entities/relationships."""
+        Applies candidate memories and graph entities/relationships with reviewer corrections."""
         event = (
             await session.execute(
                 select(MemoryLearningEvent).where(
@@ -568,11 +585,114 @@ class LearningCoordinator:
         if not event or event.status != "review_required":
             return event
 
-        payload = event.extraction_payload or {}
+        payload = dict(event.extraction_payload or {})
         output_data = payload.get("curator_output") or payload
         memories = output_data.get("memories", [])
         entities_data = [EntityCandidate.model_validate(e) for e in output_data.get("entities", [])]
         rels_data = [RelationshipCandidate.model_validate(r) for r in output_data.get("relationships", [])]
+
+        from alberto.services.ontology_registry import OntologyRegistryService
+
+        applied_edits_audit: dict[str, Any] = {"node_edits": [], "edge_edits": []}
+
+        if edits:
+            # 1. Apply reviewer node edits
+            for n_edit in edits.node_edits:
+                for e in entities_data:
+                    if e.temporary_id == n_edit.temporary_id or e.name.strip().lower() == (n_edit.name or "").strip().lower():
+                        old_k = e.kind
+                        if n_edit.kind and n_edit.kind.strip():
+                            new_k = n_edit.kind.strip().lower()
+                            if new_k != old_k:
+                                e.kind = new_k
+                                # Learn from human correction: persist entity name -> kind mapping
+                                await OntologyRegistryService.record_entity_mapping(
+                                    session=session,
+                                    tenant_id=tenant_id,
+                                    project_id=project_id,
+                                    entity_name=e.name,
+                                    target_type=new_k,
+                                    provenance="human_correction",
+                                )
+                        if n_edit.is_new_ontology_type and n_edit.kind:
+                            # Register approved novel ontology entity type
+                            await OntologyRegistryService.register_entity_type(
+                                session=session,
+                                tenant_id=tenant_id,
+                                project_id=project_id,
+                                canonical_key=n_edit.kind,
+                                description=n_edit.ontology_type_description or f"Approved entity type: {n_edit.kind}",
+                                status="approved",
+                                provenance="human_approved",
+                            )
+                        if n_edit.description:
+                            e.description = n_edit.description
+                        applied_edits_audit["node_edits"].append({
+                            "temporary_id": e.temporary_id,
+                            "name": e.name,
+                            "original_kind": old_k,
+                            "approved_kind": e.kind,
+                            "action": n_edit.action,
+                        })
+
+            rejected_temp_ids = {ne.temporary_id for ne in edits.node_edits if ne.action == "reject"}
+            entities_data = [e for e in entities_data if e.temporary_id not in rejected_temp_ids]
+
+            # 2. Apply reviewer edge edits
+            for idx, r_edit in enumerate(edits.edge_edits):
+                target_rel: RelationshipCandidate | None = None
+                if idx < len(rels_data):
+                    target_rel = rels_data[idx]
+                elif r_edit.source_ref and r_edit.target_ref:
+                    target_rel = next(
+                        (r for r in rels_data if r.source_ref == r_edit.source_ref and r.target_ref == r_edit.target_ref),
+                        None,
+                    )
+
+                if target_rel:
+                    old_rel_k = target_rel.kind
+                    if r_edit.direction == "reverse":
+                        target_rel.source_ref, target_rel.target_ref = target_rel.target_ref, target_rel.source_ref
+                    if r_edit.kind and r_edit.kind.strip():
+                        target_rel.kind = r_edit.kind.strip().upper()
+                    if r_edit.is_new_ontology_type and r_edit.kind:
+                        # Register approved novel ontology relationship type
+                        await OntologyRegistryService.register_relationship_type(
+                            session=session,
+                            tenant_id=tenant_id,
+                            project_id=project_id,
+                            canonical_key=target_rel.kind,
+                            description=r_edit.ontology_type_description or f"Approved relationship type: {target_rel.kind}",
+                            status="approved",
+                            provenance="human_approved",
+                        )
+                    applied_edits_audit["edge_edits"].append({
+                        "original_kind": old_rel_k,
+                        "approved_kind": target_rel.kind,
+                        "direction": r_edit.direction,
+                        "action": r_edit.action,
+                    })
+
+            rejected_edges = {
+                (re.source_ref, re.target_ref) for re in edits.edge_edits if re.action == "reject"
+            }
+            rels_data = [
+                r
+                for r in rels_data
+                if (r.source_ref, r.target_ref) not in rejected_edges
+                and r.source_ref not in rejected_temp_ids
+                and r.target_ref not in rejected_temp_ids
+            ]
+
+        # Audit trail preservation
+        if "original_proposal" not in payload:
+            payload["original_proposal"] = {
+                "entities": output_data.get("entities", []),
+                "relationships": output_data.get("relationships", []),
+                "memories": output_data.get("memories", []),
+            }
+        payload["human_edits"] = applied_edits_audit
+        event.extraction_payload = payload
 
         # 1. Apply Knowledge Graph candidates
         if entities_data or rels_data:
@@ -582,6 +702,7 @@ class LearningCoordinator:
                 candidate_entities=entities_data,
                 candidate_relationships=rels_data,
                 source_ref=f"turn:{event.source_event_id}",
+                session=session,
             )
             graph_app = await GraphManagerService.apply_resolved(
                 tenant_id=tenant_id,
@@ -662,7 +783,8 @@ class LearningCoordinator:
         recovered = 0
         async with SessionLocal() as session:
             stmt = select(MemoryLearningEvent).where(
-                MemoryLearningEvent.status.in_(["pending", "extracted", "applying"])
+                MemoryLearningEvent.status.in_(["pending", "extracted", "applying"]),
+                MemoryLearningEvent.requires_review.is_(False),
             )
             if tenant_id:
                 stmt = stmt.where(MemoryLearningEvent.tenant_id == tenant_id)
@@ -683,6 +805,11 @@ class LearningCoordinator:
             ]
 
             for ev_id, tenant_id, project_id, source_event_id, retry_count, payload in ev_snapshots:
+                key = f"{tenant_id}:{project_id}:{source_event_id}"
+                if key in cls._in_progress_keys:
+                    logger.debug("Event %s already owned by active worker task; skipping recovery", key)
+                    continue
+
                 enabled = await cls.is_learning_enabled(session, tenant_id, project_id)
                 if not enabled:
                     ev_obj = await session.get(MemoryLearningEvent, ev_id)
@@ -717,6 +844,7 @@ class LearningCoordinator:
                     ev_obj.retry_count += 1
                     await session.commit()
 
+                cls._in_progress_keys.add(key)
                 task = asyncio.create_task(
                     cls._safe_run_turn_learning(
                         tenant_id=tenant_id,

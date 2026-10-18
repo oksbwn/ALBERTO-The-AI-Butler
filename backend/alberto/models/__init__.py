@@ -16,6 +16,9 @@ from alberto.models.entities import (
     MemoryLearningEvent,
     ModelServer,
     OAuthClient,
+    OntologyEntityMapping,
+    OntologyEntityType,
+    OntologyRelationshipType,
     Project,
     QaPair,
     RegisteredModel,
@@ -41,6 +44,7 @@ __all__ = [
     "Tenant", "User", "Project", "Workflow", "Thread", "Run", "Trace", "Span",
     "Tool", "ToolSet", "ToolSetMember", "AuthProvider", "Secret", "McpClient", "Agent", "KbSource", "QaPair",
     "AuditLog", "Trigger", "Channel", "Component", "HandoffRequest", "Dataset", "Memory", "MemoryLearningEvent",
+    "OntologyEntityType", "OntologyRelationshipType", "OntologyEntityMapping",
     "EntityVersion", "EvalRun", "EvalResult", "OAuthClient", "ConnectorInstall",
     "ModelServer", "RegisteredModel",
 ]
