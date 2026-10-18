@@ -304,7 +304,15 @@ export interface MemoryStatus {
   memory_learning_enabled: boolean;
   sqlite: { memory_count: number; qa_count: number };
   ladybug_graph: { available: boolean; entity_count: number; relationship_count: number; path?: string; error?: string };
-  chroma: { available: boolean; path: string };
+  chroma: {
+    available: boolean;
+    path: string;
+    status?: string;
+    mode?: string;
+    durable?: boolean;
+    backend?: string;
+    reason?: string;
+  };
   markdown: { status: string; active_writer: boolean; deferred_milestone?: string; path: string; directory_exists: boolean; file_count?: number };
 }
 

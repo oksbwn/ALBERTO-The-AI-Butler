@@ -230,8 +230,22 @@ async def test_curator_provider_capability_skips_structured_when_unsupported():
     assert output.should_learn is False
 
 
+@pytest.fixture
+def temp_graph_adapter():
+    import tempfile
+    from pathlib import Path
+    from alberto.knowledge.graph import LadybugGraphAdapter, set_graph_adapter
+
+    with tempfile.TemporaryDirectory(prefix="ladybug_audit_") as tmp:
+        ad = LadybugGraphAdapter(db_path=Path(tmp))
+        set_graph_adapter(ad)
+        yield ad
+        ad.close()
+        set_graph_adapter(None)
+
+
 @pytest.mark.asyncio
-async def test_explicit_named_entities_like_alberto_not_blocked():
+async def test_explicit_named_entities_like_alberto_not_blocked(temp_graph_adapter):
     """Verify that explicitly named entities (e.g. 'Alberto', 'OLMX') are not blocked by generic name guards."""
     from alberto.schemas.memory_curator import EntityCandidate
     from alberto.services.graph_manager import GraphManagerService

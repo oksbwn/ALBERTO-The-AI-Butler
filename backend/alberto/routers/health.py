@@ -33,12 +33,14 @@ async def health() -> dict:
 
 def _vector_status() -> str:
     try:
-        import chromadb
+        from alberto.knowledge.store import get_vector_store_status
 
-        chromadb.PersistentClient(path=settings.chroma_path).heartbeat()
+        status = get_vector_store_status(settings.chroma_path)
+        if status.get("available"):
+            return "ok" if status.get("status") == "healthy" else status.get("status", "ok")
+        return f"error: {status.get('reason', 'unavailable')}"
     except Exception as e:  # noqa: BLE001
         return f"error: {type(e).__name__}"
-    return "ok"
 
 
 @router.get("/readyz")

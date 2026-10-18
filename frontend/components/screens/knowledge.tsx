@@ -1044,18 +1044,38 @@ function KnowledgeGraphView({ project }: { project: any }) {
             </div>
           </div>
 
-          {/* ChromaDB */}
+          {/* Vector Store */}
           <div className="card row spread" style={{ padding: 12, alignItems: "center", background: "var(--bg-1)" }}>
             <div>
               <div className="row gap2" style={{ alignItems: "center" }}>
-                <span className="mono" style={{ fontWeight: 600 }}>ChromaDB</span>
-                <span className="badge">Semantic Index</span>
+                <span className="mono" style={{ fontWeight: 600 }}>Vector Store</span>
+                <span className="badge">
+                  {memStatus?.chroma?.mode === "native" ? "Native ChromaDB" : memStatus?.chroma?.mode === "fallback" ? "Fallback Store" : "Semantic Index"}
+                </span>
+                {memStatus?.chroma?.durable !== undefined && (
+                  <span
+                    className="badge"
+                    style={{
+                      background: memStatus.chroma.durable ? "rgba(34, 197, 94, 0.15)" : "rgba(234, 179, 8, 0.15)",
+                      color: memStatus.chroma.durable ? "var(--ok, #22c55e)" : "var(--warn, #eab308)",
+                    }}
+                  >
+                    {memStatus.chroma.durable ? "Durable" : "In-Memory"}
+                  </span>
+                )}
               </div>
               <div className="fg-2 t-caption" style={{ marginTop: 2 }}>
-                Embedded vector index for active semantic memory recall &amp; document RAG chunks.
+                {memStatus?.chroma?.backend ? `${memStatus.chroma.backend} · ` : ""}Embedded vector index for active semantic memory recall &amp; document RAG chunks.
               </div>
             </div>
-            <span className="badge" style={{ color: "var(--ok, #22c55e)" }}>Active</span>
+            <span
+              className="badge"
+              style={{
+                color: memStatus?.chroma?.status === "healthy" ? "var(--ok, #22c55e)" : memStatus?.chroma?.available ? "var(--warn, #eab308)" : "var(--danger, #ef4444)",
+              }}
+            >
+              {memStatus?.chroma?.status ?? (memStatus?.chroma?.available ? "Active" : "Offline")}
+            </span>
           </div>
 
           {/* LadybugDB */}
