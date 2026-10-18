@@ -9,6 +9,7 @@ token-by-token over SSE, emitting `tool` events as it performs each action.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ from alberto.services.knowledge import KnowledgeService
 from alberto.services.runtime import build_compile_context
 from alberto.services.workflows import WorkflowService
 from alberto.util.serialize import content_to_text, jsonable
+
+log = logging.getLogger("alberto.services.assistant")
 
 GROUNDING_PROMPT = (
     "You are the support assistant for this project. Be friendly, natural, and concise.\n"
@@ -893,6 +896,10 @@ class AssistantService:
             from langchain.agents.middleware import LLMToolSelectorMiddleware
             middleware.append(LLMToolSelectorMiddleware(model=model, max_tools=12))
 
+        # Milestone 2.2: Contextual memory recall hook
+        from alberto.nodes.agent_node import MemoryRecallMiddleware
+        middleware.append(MemoryRecallMiddleware(tenant_id=tenant_id, project_id=project_id))
+
         tools = build_assistant_tools(tenant_id, project_id, mutated)
         kwargs: dict[str, Any] = {
             "model": model,
@@ -921,6 +928,8 @@ class AssistantService:
     async def _persist_trace(
         *, tenant_id: str, project_id: str, thread_id: str | None, tracer,
         user_message: str = "", ai_response: str = "",
+        token_metrics: dict | None = None,
+        error: str | None = None, status: str = "done",
     ) -> None:
         """Persist one assistant turn as a Trace (name='assistant') + spans, so SPEND and
         the per-project reports include assistant usage like any workflow run. The turn is
@@ -936,19 +945,23 @@ class AssistantService:
         tokens, cost = tracer.totals()
         started = min((s.start for s in spans), default=0.0)
         latency_ms = int((max((s.end or s.start for s in spans), default=started) - started) * 1000)
+        trace_id = None
         try:
             async with SessionLocal() as s:
                 trace = Trace(
                     tenant_id=tenant_id, project_id=project_id, workflow_id=None,
                     run_id=f"assistant-{_uuid.uuid4()}", thread_id=thread_id,
-                    name="assistant", status="done",
+                    name="assistant", status=status,
                     started_at=datetime.utcnow(), ended_at=datetime.utcnow(),
                     latency_ms=latency_ms, total_tokens=tokens, total_cost_usd=cost,
                     source="assistant", actor="System",
                     user_message=(user_message or None), ai_response=(ai_response or None),
+                    error=(error or None),
+                    meta={"token_metrics": token_metrics} if token_metrics else {},
                 )
                 s.add(trace)
                 await s.flush()
+                trace_id = trace.id
                 for sr in spans:
                     s.add(Span(
                         id=sr.id, tenant_id=tenant_id, trace_id=trace.id,
@@ -958,6 +971,20 @@ class AssistantService:
                         cost_usd=sr.cost_usd, error=sr.error, attributes=sr.attributes,
                     ))
                 await s.commit()
+
+            # Schedule conversation learning asynchronously if turn completed successfully
+            if status == "done" and user_message and ai_response and trace_id:
+                try:
+                    from alberto.services.learning_coordinator import LearningCoordinator
+                    await LearningCoordinator.schedule_turn_learning(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        source_event_id=trace_id,
+                        user_message=user_message,
+                        ai_response=ai_response,
+                    )
+                except Exception as le:
+                    log.warning("Failed to schedule assistant turn learning for trace %s: %s", trace_id, le)
         except Exception:  # noqa: BLE001 - tracing must never break the assistant
             pass
 
@@ -996,13 +1023,27 @@ class AssistantService:
         if interrupts:
             yield {"event": "interrupt", "data": {"interrupts": interrupts}}
         tracer_cb = next((cb for cb in config.get("callbacks", []) if hasattr(cb, "totals")), None)
-        total_tokens = tracer_cb.totals()[0] if tracer_cb else 0
-        yield {"event": "done", "data": {"mutated": mutated, "interrupted": bool(interrupts), "tokens": total_tokens}}
+        in_tok, out_tok, total_tok = tracer_cb.token_totals() if (tracer_cb and hasattr(tracer_cb, "token_totals")) else (0, 0, tracer_cb.totals()[0] if tracer_cb else 0)
+        has_usage = tracer_cb.has_token_counts() if (tracer_cb and hasattr(tracer_cb, "has_token_counts")) else (total_tok > 0)
+        yield {
+            "event": "done",
+            "data": {
+                "mutated": mutated,
+                "interrupted": bool(interrupts),
+                "tokens": total_tok if has_usage else None,
+                "prompt_tokens": in_tok if has_usage else None,
+                "completion_tokens": out_tok if has_usage else None,
+                "total_tokens": total_tok if has_usage else None,
+            },
+        }
 
     @staticmethod
     async def _fast_stream(
-        *, tenant_id: str, project_id: str, messages: list[dict], model: str | None = None,
+        *, tenant_id: str, project_id: str, messages: list[dict],
+        thread_id: str | None = None, model: str | None = None,
     ) -> AsyncIterator[dict]:
+        import time
+
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
         from alberto.tracing.tracer import ForgeTracer
@@ -1010,44 +1051,117 @@ class AssistantService:
         tracer = ForgeTracer()
         async with SessionLocal() as s:
             ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id)
-            proj = (await s.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
+            proj = (await s.execute(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))).scalar_one_or_none()
             ctx.project_config = (proj.config or {}) if proj else {}
 
-        primary_ref = model or _assistant_model_ref(ctx)
-        model_inst = resolve_model(primary_ref, ctx, params={"thinking": False})
+            primary_ref = model or _assistant_model_ref(ctx)
+            model_inst = resolve_model(primary_ref, ctx, params={"thinking": False})
 
-        user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") in ("user", "human")), "")
-        user_lower = user_msg.lower()
+            user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") in ("user", "human")), "")
+            user_lower = user_msg.lower()
 
-        # Hermes-style on-demand tool injection:
-        # Only inject tools when query asks for project resources/automations
-        tools_to_bind = []
-        if any(w in user_lower for w in ("what workflow", "what automation", "list workflow", "list resource", "what do i have", "my tools", "my agents")):
-            all_tools = build_assistant_tools(tenant_id, project_id, [])
-            tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow")]
+            # Hermes-style on-demand tool injection:
+            # Only inject tools when query asks for project resources/automations
+            tools_to_bind = []
+            if any(w in user_lower for w in ("what workflow", "what automation", "list workflow", "list resource", "what do i have", "my tools", "my agents")):
+                all_tools = build_assistant_tools(tenant_id, project_id, [])
+                tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow")]
 
-        runnable = model_inst.bind_tools(tools_to_bind) if tools_to_bind else model_inst
+            runnable = model_inst.bind_tools(tools_to_bind) if tools_to_bind else model_inst
 
-        fast_sys_prompt = (
-            "You are Alberto, a helpful, intelligent AI Home Butler. "
-            "Be natural, warm, and concise (1-3 sentences). Answer questions directly. "
-            "If the user asks for multi-step automation design or deep reasoning, "
-            "mention they can toggle Deep Thinking mode or ask you to execute it."
-        )
+            fast_sys_prompt = (
+                "You are Alberto, a helpful, intelligent AI Home Butler. "
+                "Be natural, warm, and concise (1-3 sentences). Answer questions directly. "
+                "If the user asks for multi-step automation design or deep reasoning, "
+                "mention they can toggle Deep Thinking mode or ask you to execute it."
+            )
 
-        formatted_messages: list[Any] = [SystemMessage(content=fast_sys_prompt)]
-        for m in messages:
-            r = m.get("role", "user")
-            c = m.get("content", "")
-            if not c:
-                continue
-            if r in ("user", "human"):
-                formatted_messages.append(HumanMessage(content=c))
-            elif r in ("assistant", "ai"):
-                formatted_messages.append(AIMessage(content=c))
+            # 1. Unified Knowledge & Memory Recall
+            recalled_block = ""
+            if user_msg:
+                try:
+                    from alberto.services.context_assembler import ContextAssembler
+                    from alberto.services.unified_memory import UnifiedMemoryManager
+
+                    hits = await UnifiedMemoryManager.recall(
+                        session=s,
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        query=user_msg.strip(),
+                        top_k=5,
+                    )
+                    if hits:
+                        recalled_block = ContextAssembler.assemble_context(hits)
+                except Exception as me:
+                    log.warning("Assistant memory recall error: %s", me)
+
+            if recalled_block:
+                fast_sys_prompt = f"{fast_sys_prompt}\n\n{recalled_block}"
+
+            # 2. Conversation History Retrieval & Context Window Budgeting
+            history_turns: list[dict] = []
+            if thread_id:
+                from alberto.services.conversations import ConversationService
+
+                prior_traces = await ConversationService.turns(s, tenant_id, project_id, thread_id)
+                for pt in prior_traces:
+                    if pt.user_message:
+                        history_turns.append({"role": "user", "content": pt.user_message})
+                    if pt.ai_response:
+                        history_turns.append({"role": "assistant", "content": pt.ai_response})
+
+            if not history_turns and len(messages) > 1:
+                # Explicit stateless messages sent by client
+                history_turns = [m for m in messages if m.get("content")]
+            elif user_msg:
+                # Append current user prompt if not already present as the last turn
+                if not (history_turns and history_turns[-1].get("role") == "user" and history_turns[-1].get("content") == user_msg):
+                    history_turns.append({"role": "user", "content": user_msg})
+
+            # Calculate context budget based on configured model context window
+            reg = ctx.registered_models.get(primary_ref) or next((r for r in ctx.registered_models.values() if r.model_name == primary_ref), None)
+            ctx_max = (reg.context_window_configured or reg.context_window_max or 32768) if reg else 32768
+            max_output = (reg.max_output_tokens or 4096) if reg else 4096
+            input_budget_chars = max(4000, (ctx_max - max_output) * 3)
+
+            # Prioritize: (1) System prompt + (2) Current turn, then (3) Recent conversation turns
+            if len(history_turns) > 1:
+                current_turn_list = history_turns[-1:]
+                older_turns = history_turns[:-1]
+                base_chars = len(fast_sys_prompt) + len(current_turn_list[0].get("content", ""))
+                available_chars = max(1000, input_budget_chars - base_chars)
+
+                kept_older = []
+                accum_chars = 0
+                for m in reversed(older_turns):
+                    c_len = len(m.get("content", ""))
+                    if accum_chars + c_len > available_chars and kept_older:
+                        break
+                    kept_older.append(m)
+                    accum_chars += c_len
+                kept_older.reverse()
+                final_turns = kept_older + current_turn_list
+            else:
+                final_turns = history_turns
+
+            formatted_messages: list[Any] = [SystemMessage(content=fast_sys_prompt)]
+            for m in final_turns:
+                r = m.get("role", "user")
+                c = m.get("content", "")
+                if not c:
+                    continue
+                if r in ("user", "human"):
+                    formatted_messages.append(HumanMessage(content=c))
+                elif r in ("assistant", "ai"):
+                    formatted_messages.append(AIMessage(content=c))
 
         config: Any = {"callbacks": [tracer]}
         final_text = ""
+        err_msg: str | None = None
+        t_start = time.monotonic()
+        first_token_time: float | None = None
+        last_token_time: float | None = None
+
         try:
             async for chunk in runnable.astream(formatted_messages, config=config):
                 tool_calls = getattr(chunk, "tool_calls", None) or []
@@ -1062,10 +1176,14 @@ class AssistantService:
                                 yield {"event": "tool", "data": {"name": t_name, "result": str(res)}}
                                 formatted_messages.append(AIMessage(content="", tool_calls=[tc]))
                                 from langchain_core.messages import ToolMessage
+
                                 formatted_messages.append(ToolMessage(tool_call_id=tc.get("id", "tc1"), content=str(res)))
                                 async for follow_chunk in model_inst.astream(formatted_messages, config=config):
                                     txt = content_to_text(getattr(follow_chunk, "content", ""))
                                     if txt:
+                                        if first_token_time is None:
+                                            first_token_time = time.monotonic()
+                                        last_token_time = time.monotonic()
                                         final_text += txt
                                         yield {"event": "messages", "data": {"content": txt}}
                             except Exception as te:
@@ -1074,16 +1192,49 @@ class AssistantService:
 
                 txt = content_to_text(getattr(chunk, "content", ""))
                 if txt:
+                    if first_token_time is None:
+                        first_token_time = time.monotonic()
+                    last_token_time = time.monotonic()
                     final_text += txt
                     yield {"event": "messages", "data": {"content": txt}}
-            toks, _ = tracer.totals()
-            yield {"event": "done", "data": {"mutated": False, "interrupted": False, "tokens": toks}}
+
+            in_tok, out_tok, total_tok = tracer.token_totals()
+            has_usage = tracer.has_token_counts()
+            yield {
+                "event": "done",
+                "data": {
+                    "mutated": False,
+                    "interrupted": False,
+                    "tokens": total_tok if has_usage else None,
+                    "prompt_tokens": in_tok if has_usage else None,
+                    "completion_tokens": out_tok if has_usage else None,
+                    "total_tokens": total_tok if has_usage else None,
+                },
+            }
         except Exception as e:
-            yield {"event": "error", "data": {"message": str(e)}}
+            err_msg = str(e)
+            yield {"event": "error", "data": {"message": err_msg}}
         finally:
+            ttft_s = (first_token_time - t_start) if first_token_time else None
+            decode_s = (last_token_time - first_token_time) if (first_token_time and last_token_time) else None
+            total_s = (time.monotonic() - t_start)
+            in_tok, out_tok, total_tok = tracer.token_totals()
+            has_usage = tracer.has_token_counts()
+            tps = (out_tok / decode_s) if (has_usage and out_tok and decode_s and decode_s > 0.05) else None
+            metrics = {
+                "prompt_tokens": in_tok if has_usage else None,
+                "completion_tokens": out_tok if has_usage else None,
+                "total_tokens": total_tok if has_usage else None,
+                "ttft_secs": round(ttft_s, 3) if ttft_s is not None else None,
+                "decode_duration_secs": round(decode_s, 3) if decode_s is not None else None,
+                "total_duration_secs": round(total_s, 3) if total_s is not None else None,
+                "tokens_per_sec": round(tps, 1) if tps is not None else None,
+            }
             await AssistantService._persist_trace(
-                tenant_id=tenant_id, project_id=project_id, thread_id=None, tracer=tracer,
+                tenant_id=tenant_id, project_id=project_id, thread_id=thread_id, tracer=tracer,
                 user_message=user_msg, ai_response=final_text,
+                token_metrics=metrics,
+                error=err_msg, status="error" if err_msg else "done",
             )
 
     @staticmethod
@@ -1092,10 +1243,13 @@ class AssistantService:
         thread_id: str | None = None, checkpointer=None, model: str | None = None,
         thinking: bool = False,
     ) -> AsyncIterator[dict]:
+        import time
+
         # Fast Butler Path: When thinking=False, skip heavy deep-agent loops & tool schemas
         if not thinking:
             async for frame in AssistantService._fast_stream(
-                tenant_id=tenant_id, project_id=project_id, messages=messages, model=model,
+                tenant_id=tenant_id, project_id=project_id, messages=messages,
+                thread_id=thread_id, model=model,
             ):
                 yield frame
             return
@@ -1122,6 +1276,8 @@ class AssistantService:
             # Persistent conversation: the checkpointer holds history/todos/files for the
             # thread, so the frontend sends ONLY the new message.
             config["configurable"] = {"thread_id": f"assistant:{project_id}:{thread_id}"}
+        t_start = time.monotonic()
+        err_msg: str | None = None
         try:
             async for frame in AssistantService._run(agent, {"messages": lc_messages}, config, mutated):
                 yield frame
@@ -1133,11 +1289,23 @@ class AssistantService:
             except Exception:  # noqa: BLE001 - transcript capture must never break the turn
                 pass
         except Exception as e:  # noqa: BLE001
+            err_msg = str(e)
             yield {"event": "error", "data": {"message": str(e)}}
         finally:
+            in_tok, out_tok, total_tok = tracer.token_totals()
+            has_usage = tracer.has_token_counts()
+            total_s = time.monotonic() - t_start
+            metrics = {
+                "prompt_tokens": in_tok if has_usage else None,
+                "completion_tokens": out_tok if has_usage else None,
+                "total_tokens": total_tok if has_usage else None,
+                "total_duration_secs": round(total_s, 3),
+            }
             await AssistantService._persist_trace(
                 tenant_id=tenant_id, project_id=project_id, thread_id=thread_id, tracer=tracer,
                 user_message=user_msg, ai_response=final_text,
+                token_metrics=metrics,
+                error=err_msg, status="error" if err_msg else "done",
             )
 
     @staticmethod

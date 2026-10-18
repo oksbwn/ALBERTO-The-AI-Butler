@@ -255,6 +255,7 @@ class LearningCoordinator:
                 event.status = "extracted"
                 existing_active_mems = await MemoryService.list(session, tenant_id, project_id, status="active")
                 mem_texts = [m.text for m in existing_active_mems]
+                await session.commit()
 
                 curator_output = await MemoryCuratorService.extract(
                     session=session,
@@ -267,7 +268,7 @@ class LearningCoordinator:
 
                 if curator_output.extraction_error:
                     event.status = "failed"
-                    err_str = str(curator_output.extraction_error)
+                    err_str = curator_output.extraction_error
                     event.error = err_str
                     event.retry_count += 1
                     payload["error"] = err_str
@@ -611,14 +612,17 @@ class LearningCoordinator:
                     ev_obj.retry_count += 1
                     await session.commit()
 
-                await cls.process_learning_turn(
-                    session=session,
-                    tenant_id=tenant_id,
-                    project_id=project_id,
-                    source_event_id=source_event_id,
-                    user_message=u_text,
-                    ai_response=a_text,
+                task = asyncio.create_task(
+                    cls._safe_run_turn_learning(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        source_event_id=source_event_id,
+                        user_message=u_text,
+                        ai_response=a_text,
+                    )
                 )
+                cls._active_tasks.add(task)
+                task.add_done_callback(cls._active_tasks.discard)
                 recovered += 1
         return recovered
 

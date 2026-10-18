@@ -23,7 +23,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alberto.config import settings
 from alberto.engine.models import resolve_model
 from alberto.models import Agent
 from alberto.schemas.memory_curator import MemoryCuratorOutput
@@ -204,6 +203,11 @@ Remember: Output strictly valid JSON conforming to the schema."""
             SystemMessage(content=CURATOR_SYSTEM_PROMPT),
             HumanMessage(content=user_prompt),
         ]
+
+        try:
+            await session.commit()
+        except Exception:
+            pass
 
         try:
             response = await model.ainvoke(messages)

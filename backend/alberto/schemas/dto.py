@@ -109,6 +109,7 @@ class TurnOut(BaseModel):
     total_tokens: int
     total_cost_usd: float
     started_at: datetime | None = None
+    meta: dict = Field(default_factory=dict)
 
 
 class ConversationDetailOut(BaseModel):

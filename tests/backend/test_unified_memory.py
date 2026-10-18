@@ -113,7 +113,7 @@ async def test_unified_remember_and_recall(setup_unified_env, sample_project: Pr
         )
         assert len(results) >= 1
         sources = {r.source for r in results}
-        assert "memory" in sources or "graph" in sources
+        assert any(s in sources for s in ("sqlite_memory", "chroma_memory", "ladybug_graph", "memory", "graph"))
 
         # 4. Tenant isolation: foreign tenant recall returns zero
         foreign_results = await UnifiedMemoryManager.recall(

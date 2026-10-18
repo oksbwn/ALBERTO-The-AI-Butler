@@ -56,10 +56,14 @@ async def assistant_stream(
         if await ProjectService.get(session, tenant_id, project_id) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found")
 
-    if body.message:
+    if body.messages:
+        messages = [m.model_dump() for m in body.messages]
+        if body.message and (not messages or messages[-1].get("content") != body.message):
+            messages.append({"role": "user", "content": body.message})
+    elif body.message:
         messages = [{"role": "user", "content": body.message}]
     else:
-        messages = [m.model_dump() for m in body.messages]
+        messages = []
 
     async def event_gen():
         async for frame in AssistantService.stream(

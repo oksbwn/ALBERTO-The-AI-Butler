@@ -31,11 +31,179 @@ interface ChatMsg {
   thinking?: string;
   thinkSecs?: number;
   tokensPerSec?: number;
-  tokens?: number;
+  tokens?: number; // generated completion tokens
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  ttftSecs?: number;
+  decodeDurationSecs?: number;
+  totalDurationSecs?: number;
   durationSecs?: number;
   compactedCount?: number;
   tokensSaved?: number;
   compactedTurns?: CompactedTurn[];
+}
+
+function TokenMetricsBadge({ msg }: { msg: ChatMsg }) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const tps = msg.tokensPerSec;
+  const completionToks = msg.completionTokens ?? msg.tokens;
+  const promptToks = msg.promptTokens;
+  const totalToks = msg.totalTokens;
+  const ttft = msg.ttftSecs;
+  const decodeDuration = msg.decodeDurationSecs ?? msg.durationSecs;
+  const totalDuration = msg.totalDurationSecs;
+
+  const hasTps = typeof tps === "number" && tps > 0;
+  const hasCompletion = typeof completionToks === "number" && completionToks > 0;
+
+  if (!hasTps && !hasCompletion) return null;
+
+  return (
+    <div
+      ref={containerRef}
+      style={{ position: "relative", marginLeft: "auto" }}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label="Generation metrics details"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={(e) => {
+          if (!containerRef.current?.contains(e.relatedTarget as Node)) {
+            setOpen(false);
+          }
+        }}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          fontSize: 11,
+          color: "var(--fg-2)",
+          background: "var(--bg-2)",
+          border: "1px solid var(--line)",
+          borderRadius: 4,
+          padding: "1px 7px",
+          height: 20,
+          fontWeight: 500,
+          cursor: "pointer",
+        }}
+      >
+        <Icon name="bolt" size={10} style={{ color: "var(--accent)" }} />
+        {hasTps ? (
+          <>
+            <span style={{ fontWeight: 600, color: "var(--fg-1)" }}>{tps}</span>
+            <span style={{ opacity: 0.65, fontSize: 10 }}>tok/s</span>
+          </>
+        ) : null}
+        {hasCompletion ? (
+          <span style={{ opacity: 0.5, fontSize: 10 }}>{hasTps ? "· " : ""}{completionToks}t</span>
+        ) : null}
+      </button>
+
+      {open && (
+        <div
+          role="tooltip"
+          className="card fade-in"
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + 6px)",
+            right: 0,
+            zIndex: 9999,
+            width: 250,
+            padding: "10px 12px",
+            background: "var(--bg-1)",
+            border: "1px solid var(--line)",
+            boxShadow: "var(--sh-pop)",
+            borderRadius: 6,
+            fontSize: 11.5,
+            color: "var(--fg-1)",
+            lineHeight: 1.4,
+            pointerEvents: "auto",
+            textAlign: "left",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: "var(--fg-0)" }}>
+            LLM Generation Metrics
+          </div>
+
+          <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--fg-2)", marginBottom: 4 }}>
+            Token Usage
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 8, fontSize: 11 }}>
+            <tbody>
+              <tr>
+                <td style={{ color: "var(--fg-2)", padding: "1px 0" }}>Prompt tokens</td>
+                <td style={{ textAlign: "right", fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
+                  {typeof promptToks === "number" ? promptToks.toLocaleString() : "N/A"}
+                </td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--fg-2)", padding: "1px 0" }}>Completion tokens</td>
+                <td style={{ textAlign: "right", fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
+                  {typeof completionToks === "number" ? completionToks.toLocaleString() : "N/A"}
+                </td>
+              </tr>
+              <tr style={{ borderTop: "1px solid var(--line)" }}>
+                <td style={{ color: "var(--fg-1)", fontWeight: 500, padding: "2px 0 1px" }}>Total tokens</td>
+                <td style={{ textAlign: "right", fontWeight: 600, fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums", padding: "2px 0 1px" }}>
+                  {typeof totalToks === "number" ? totalToks.toLocaleString() : (
+                    (typeof promptToks === "number" && typeof completionToks === "number") ? (promptToks + completionToks).toLocaleString() : "N/A"
+                  )}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--fg-2)", marginBottom: 4 }}>
+            Latency
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 8, fontSize: 11 }}>
+            <tbody>
+              <tr>
+                <td style={{ color: "var(--fg-2)", padding: "1px 0" }}>Time to first token</td>
+                <td style={{ textAlign: "right", fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
+                  {typeof ttft === "number" ? `${ttft.toFixed(2)} s` : "N/A"}
+                </td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--fg-2)", padding: "1px 0" }}>Generation duration</td>
+                <td style={{ textAlign: "right", fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
+                  {typeof decodeDuration === "number" ? `${decodeDuration.toFixed(2)} s` : "N/A"}
+                </td>
+              </tr>
+              <tr style={{ borderTop: "1px solid var(--line)" }}>
+                <td style={{ color: "var(--fg-1)", fontWeight: 500, padding: "2px 0 1px" }}>Total response time</td>
+                <td style={{ textAlign: "right", fontWeight: 600, fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums", padding: "2px 0 1px" }}>
+                  {typeof totalDuration === "number" ? `${totalDuration.toFixed(2)} s` : "N/A"}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--fg-2)", marginBottom: 4 }}>
+            Performance
+          </div>
+          <div className="row spread" style={{ fontSize: 11, alignItems: "center" }}>
+            <span style={{ color: "var(--fg-2)" }}>Generation speed</span>
+            <span style={{ fontWeight: 600, color: "var(--accent)", fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
+              {hasTps ? `${tps} tok/s` : "N/A"}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface ChatStep {
@@ -254,7 +422,22 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
       const parsedMsgs: ChatMsg[] = [];
       (detail.turns || []).forEach((t) => {
         if (t.user_message) parsedMsgs.push({ role: "user", content: t.user_message });
-        if (t.ai_response) parsedMsgs.push({ role: "assistant", content: t.ai_response });
+        if (t.ai_response) {
+          const tm = (t.meta as any)?.token_metrics;
+          parsedMsgs.push({
+            role: "assistant",
+            content: t.ai_response,
+            tokensPerSec: tm?.tokens_per_sec ?? undefined,
+            tokens: tm?.completion_tokens ?? tm?.tokens ?? undefined,
+            promptTokens: tm?.prompt_tokens ?? undefined,
+            completionTokens: tm?.completion_tokens ?? undefined,
+            totalTokens: tm?.total_tokens ?? undefined,
+            ttftSecs: tm?.ttft_secs ?? undefined,
+            decodeDurationSecs: tm?.decode_duration_secs ?? undefined,
+            totalDurationSecs: tm?.total_duration_secs ?? undefined,
+            durationSecs: tm?.decode_duration_secs ?? undefined,
+          });
+        }
       });
       setMsgs(parsedMsgs);
       setLastServerTokens(null);
@@ -302,6 +485,8 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
     const done: string[] = [];
     let thinking = false;
     let serverTokens: number | null = null;
+    let serverPromptTokens: number | null = null;
+    let serverCompletionTokens: number | null = null;
 
     const render = () => {
       if (thinking) {
@@ -347,7 +532,16 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
           interruptPrompt = describeInterrupt(f.data);
         } else if (f.event === "done") {
           mutated = (f.data?.mutated || []).length > 0;
-          if (typeof f.data?.tokens === "number" && f.data.tokens > 0) {
+          if (typeof f.data?.completion_tokens === "number") {
+            serverCompletionTokens = f.data.completion_tokens;
+          }
+          if (typeof f.data?.prompt_tokens === "number") {
+            serverPromptTokens = f.data.prompt_tokens;
+          }
+          if (typeof f.data?.total_tokens === "number") {
+            serverTokens = f.data.total_tokens;
+            setLastServerTokens(f.data.total_tokens);
+          } else if (typeof f.data?.tokens === "number" && f.data.tokens > 0) {
             serverTokens = f.data.tokens;
             setLastServerTokens(f.data.tokens);
           }
@@ -372,20 +566,40 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
           thought = thought ? `${thought}\n\n${extracted}` : extracted;
         }
       }
-      const secs = Math.max(1, Math.round((Date.now() - turnStart) / 1000));
-      const firstTok = firstTokenTsRef.current || turnStart;
-      const durationSecs = Math.max(0.1, (Date.now() - firstTok) / 1000);
-      const finalToks = serverTokens || Math.max(1, Math.round(((answer || "").length + (thought || "").length) / 3.8));
-      const tps = Number((finalToks / durationSecs).toFixed(1));
+      const turnEnd = Date.now();
+      const secs = Math.max(1, Math.round((turnEnd - turnStart) / 1000));
+      const firstTok = firstTokenTsRef.current;
+      const ttftSecs = firstTok ? Number(((firstTok - turnStart) / 1000).toFixed(2)) : undefined;
+      const decodeDurationSecs = firstTok ? Number(Math.max(0.01, (turnEnd - firstTok) / 1000).toFixed(2)) : undefined;
+      const totalDurationSecs = Number(Math.max(0.01, (turnEnd - turnStart) / 1000).toFixed(2));
+
+      const finalCompletionTokens = serverCompletionTokens !== null
+        ? serverCompletionTokens
+        : Math.max(1, Math.round(((answer || "").length + (thought || "").length) / 3.8));
+
+      const promptToks = serverPromptTokens !== null ? serverPromptTokens : undefined;
+      const totalToks = serverTokens !== null
+        ? serverTokens
+        : (promptToks ? promptToks + finalCompletionTokens : undefined);
+
+      const tps = (decodeDurationSecs && decodeDurationSecs > 0)
+        ? Number((finalCompletionTokens / decodeDurationSecs).toFixed(1))
+        : undefined;
 
       if (answer || thought || acted) {
         setMsgs((m) => [...m, {
           role: "assistant",
           content: answer || (interruptPrompt ? "(paused for your approval)" : "(action completed)"),
           ...(thought ? { thinking: thought, thinkSecs: secs } : {}),
-          tokensPerSec: tps > 0 ? tps : undefined,
-          tokens: finalToks,
-          durationSecs: Number(durationSecs.toFixed(1)),
+          tokensPerSec: tps && tps > 0 ? tps : undefined,
+          tokens: finalCompletionTokens,
+          promptTokens: promptToks,
+          completionTokens: finalCompletionTokens,
+          totalTokens: totalToks,
+          ttftSecs,
+          decodeDurationSecs,
+          totalDurationSecs,
+          durationSecs: decodeDurationSecs,
         }]);
       }
       setStreaming("");
@@ -417,6 +631,8 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
     const turnStart = Date.now();
     let accumulated = "";
     let serverTokens: number | null = null;
+    let serverPromptTokens: number | null = null;
+    let serverCompletionTokens: number | null = null;
 
     try {
       const run = await api.createRun(
@@ -446,6 +662,12 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
         } else if (f.event === "interrupt") {
           setPendingRunInterrupt({ runId: run.id, wid, payload: f.data });
         } else if (f.event === "done") {
+          if (typeof f.data?.completion_tokens === "number") {
+            serverCompletionTokens = f.data.completion_tokens;
+          }
+          if (typeof f.data?.prompt_tokens === "number") {
+            serverPromptTokens = f.data.prompt_tokens;
+          }
           if (typeof f.data?.total_tokens === "number") {
             serverTokens = f.data.total_tokens;
           } else if (typeof f.data?.tokens === "number") {
@@ -465,18 +687,38 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
     } finally {
       abortRef.current = null;
       const finalMsg = accumulated.trim();
-      const firstTok = firstTokenTsRef.current || turnStart;
-      const durationSecs = Math.max(0.1, (Date.now() - firstTok) / 1000);
-      const finalToks = serverTokens || Math.max(1, Math.round(finalMsg.length / 3.8));
-      const tps = Number((finalToks / durationSecs).toFixed(1));
+      const turnEnd = Date.now();
+      const firstTok = firstTokenTsRef.current;
+      const ttftSecs = firstTok ? Number(((firstTok - turnStart) / 1000).toFixed(2)) : undefined;
+      const decodeDurationSecs = firstTok ? Number(Math.max(0.01, (turnEnd - firstTok) / 1000).toFixed(2)) : undefined;
+      const totalDurationSecs = Number(Math.max(0.01, (turnEnd - turnStart) / 1000).toFixed(2));
+
+      const finalCompletionTokens = serverCompletionTokens !== null
+        ? serverCompletionTokens
+        : Math.max(1, Math.round(finalMsg.length / 3.8));
+
+      const promptToks = serverPromptTokens !== null ? serverPromptTokens : undefined;
+      const totalToks = serverTokens !== null
+        ? serverTokens
+        : (promptToks ? promptToks + finalCompletionTokens : undefined);
+
+      const tps = (decodeDurationSecs && decodeDurationSecs > 0)
+        ? Number((finalCompletionTokens / decodeDurationSecs).toFixed(1))
+        : undefined;
 
       if (finalMsg) {
         setMsgs((m) => [...m, {
           role: "assistant",
           content: finalMsg,
-          tokensPerSec: tps > 0 ? tps : undefined,
-          tokens: finalToks,
-          durationSecs: Number(durationSecs.toFixed(1)),
+          tokensPerSec: tps && tps > 0 ? tps : undefined,
+          tokens: finalCompletionTokens,
+          promptTokens: promptToks,
+          completionTokens: finalCompletionTokens,
+          totalTokens: totalToks,
+          ttftSecs,
+          decodeDurationSecs,
+          totalDurationSecs,
+          durationSecs: decodeDurationSecs,
         }]);
       }
       setStreaming("");
@@ -1022,29 +1264,7 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
                           <Icon name={currentlySpeaking === i ? "volume-x" : "volume"} size={11} />
                           <span style={{ fontSize: 11 }}>{currentlySpeaking === i ? "Stop" : "Voice"}</span>
                         </button>
-                        {m.tokensPerSec ? (
-                          <div
-                            className="row gap1"
-                            style={{
-                              marginLeft: "auto",
-                              alignItems: "center",
-                              fontSize: 11,
-                              color: "var(--fg-2)",
-                              background: "var(--bg-2)",
-                              border: "1px solid var(--line)",
-                              borderRadius: 4,
-                              padding: "1px 7px",
-                              height: 20,
-                              fontWeight: 500,
-                            }}
-                            title={`Throughput: ${m.tokensPerSec} tokens/sec\nTotal: ${m.tokens ? `${m.tokens.toLocaleString()} tokens` : ""}${m.durationSecs ? ` in ${m.durationSecs}s` : ""}`}
-                          >
-                            <Icon name="bolt" size={10} style={{ color: "var(--accent)" }} />
-                            <span style={{ fontWeight: 600, color: "var(--fg-1)" }}>{m.tokensPerSec}</span>
-                            <span style={{ opacity: 0.65, fontSize: 10 }}>tok/s</span>
-                            {m.tokens ? <span style={{ opacity: 0.5, fontSize: 10 }}>· {m.tokens}t</span> : null}
-                          </div>
-                        ) : null}
+                        <TokenMetricsBadge msg={m} />
                       </div>
                     )}
                   </div>

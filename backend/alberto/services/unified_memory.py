@@ -696,8 +696,11 @@ class UnifiedMemoryManager:
             "file_count": len(md_files),
         }
 
+        from alberto.services.learning_coordinator import LearningCoordinator
+        learning_enabled = await LearningCoordinator.is_learning_enabled(session, tenant_id, project_id)
+
         return {
-            "memory_learning_enabled": settings.memory_learning_enabled,
+            "memory_learning_enabled": learning_enabled,
             "sqlite": {
                 "status": "active",
                 "memories_count": mem_count,
