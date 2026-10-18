@@ -757,3 +757,254 @@ async def test_graph_subgraph_and_search_inspection(adapter: LadybugGraphAdapter
     assert other_subgraph["relationships"] == []
 
 
+
+@pytest.mark.asyncio
+async def test_subgraph_search_beyond_seed_edges_direction_and_cycles(adapter: LadybugGraphAdapter):
+    """Integration review: search reaches entities outside the seed, seed keeps all in-set edges,
+    edge direction is preserved for inbound focus, cycles don't duplicate, hop depth is clamped."""
+    t, p = "tenant-rv", "proj-rv"
+
+    def ent(name: str, desc: str = "") -> GraphEntity:
+        return GraphEntity(
+            id=make_entity_id(t, p, "Thing", name), tenant_id=t, project_id=p, kind="Thing",
+            name=name, canonical_name=name.lower(), description=desc, source="manual",
+        )
+
+    ents = [await adapter.create_or_update_entity(ent(f"n{i:03d}")) for i in range(150)]
+    # chain n000 -> n001 -> ... -> n149
+    for a, b in zip(ents, ents[1:]):
+        await adapter.create_or_update_relationship(
+            GraphRelationship(
+                id=make_relationship_id(a.id, "NEXT", b.id), source_id=a.id, target_id=b.id,
+                kind="NEXT", tenant_id=t, project_id=p, provenance="chain",
+            )
+        )
+    target = await adapter.create_or_update_entity(
+        ent("Zorblax9", "Novel runner [aliases: zbx-9, zorb_runner]")
+    )
+    decoy = await adapter.create_or_update_entity(ent("Decoy", "mentions zorblax9 in text only"))
+    await adapter.create_or_update_relationship(
+        GraphRelationship(
+            id=make_relationship_id(ents[149].id, "USES", target.id), source_id=ents[149].id,
+            target_id=target.id, kind="USES", tenant_id=t, project_id=p,
+        )
+    )
+
+    # seed: every returned edge has both endpoints in nodes, and no in-set edge is missing
+    seed = await adapter.get_subgraph(t, p, limit=60)
+    ids = {n["id"] for n in seed["nodes"]}
+    assert len(ids) <= 60 and seed["truncated"] is True
+    all_edges = {
+        (a.id, b.id) for a, b in zip(ents, ents[1:])
+    } | {(ents[149].id, target.id)}
+    expected = {e for e in all_edges if e[0] in ids and e[1] in ids}
+    got = {(r["source_id"], r["target_id"]) for r in seed["relationships"]}
+    assert got == expected
+
+    # entity absent from seed is found by name and by alias (searched server-side)
+    if target.id not in ids:
+        for q in ("zorblax9", "zbx-9", "zorb_runner"):
+            res = await adapter.get_subgraph(t, p, search=q)
+            assert target.id in {n["id"] for n in res["nodes"]}
+    res = await adapter.get_subgraph(t, p, search="zorblax9")
+    assert res["focus_id"] == target.id  # exact-name match outranks description-only decoy
+    assert decoy.id in {n["id"] for n in res["nodes"]}
+    assert (await adapter.get_subgraph(t, p, search="no-such-entity"))["nodes"] == []
+
+    # inbound focus keeps true direction
+    foc = await adapter.get_subgraph(t, p, focus_id=target.id, hop_depth=1)
+    rel = next(r for r in foc["relationships"] if r["kind"] == "USES")
+    assert (rel["source_id"], rel["target_id"]) == (ents[149].id, target.id)
+
+    # hop depth clamped to 2
+    deep = await adapter.get_subgraph(t, p, focus_id=ents[75].id, hop_depth=99)
+    assert {n["name"] for n in deep["nodes"]} == {f"n{i:03d}" for i in range(73, 78)}
+
+    # cycle: no duplicate ids
+    a, b, c = [await adapter.create_or_update_entity(ent(x)) for x in ("CycA", "CycB", "CycC")]
+    for s, d in ((a, b), (b, c), (c, a)):
+        await adapter.create_or_update_relationship(
+            GraphRelationship(
+                id=make_relationship_id(s.id, "LOOP", d.id), source_id=s.id, target_id=d.id,
+                kind="LOOP", tenant_id=t, project_id=p,
+            )
+        )
+    cyc = await adapter.get_subgraph(t, p, focus_id=a.id, hop_depth=2)
+    assert len({n["id"] for n in cyc["nodes"]}) == len(cyc["nodes"]) == 3
+    assert len({r["id"] for r in cyc["relationships"]}) == len(cyc["relationships"]) == 3
+    for r in cyc["relationships"]:
+        assert (r["source_id"], r["target_id"]) in {(a.id, b.id), (b.id, c.id), (c.id, a.id)}
+
+
+@pytest.mark.asyncio
+async def test_macos_entity_kind_preservation_and_deterministic_classification(adapter: LadybugGraphAdapter):
+    """Verify entity kind preservation and deterministic classification rules.
+    - macOS classified as operating_system, NOT device.
+    - Mac Studio classified as device.
+    - OLMX classified as application.
+    - Two distinct products (OLMX and Ollama) are not merged.
+    - Explicit alias in description is ranked above general description matches.
+    """
+    from alberto.knowledge.graph import set_graph_adapter
+    from alberto.schemas.memory_curator import EntityCandidate
+    from alberto.services.graph_manager import GraphManagerService
+
+    set_graph_adapter(adapter)
+    t = "tenant-cls"
+    p = "proj-cls"
+
+    candidates = [
+        EntityCandidate(
+            temporary_id="e1",
+            name="macOS",
+            kind="device",  # intentionally misclassified input to test deterministic normalization
+            description="The operating system the user is running on.",
+            confidence=0.95,
+        ),
+        EntityCandidate(
+            temporary_id="e2",
+            name="Mac Studio",
+            kind="operating_system",  # intentionally misclassified hardware
+            description="Hardware workstation with M2 Max",
+            confidence=1.0,
+        ),
+        EntityCandidate(
+            temporary_id="e3",
+            name="OLMX",
+            kind="device",  # intentionally misclassified framework
+            description="Inference framework [aliases: fast-olmx]",
+            confidence=1.0,
+        ),
+        EntityCandidate(
+            temporary_id="e4",
+            name="Ollama",
+            kind="application",
+            description="Standard inference tool",
+            confidence=1.0,
+        ),
+    ]
+
+    res = await GraphManagerService.resolve_and_validate(t, p, candidates, [])
+    resolved = {e.name: e for e in res["resolved_entities"]}
+
+    # Verify deterministic normalization
+    assert resolved["macOS"].kind == "operating_system"
+    assert resolved["Mac Studio"].kind == "device"
+    assert resolved["OLMX"].kind == "application"
+    assert resolved["Ollama"].kind == "application"
+
+    # Persist resolved entities
+    await GraphManagerService.apply_resolved(t, p, res["resolved_entities"], [])
+
+    # Verify LadybugDB storage preserves kinds
+    macos_ent = await adapter.get_entity(t, p, resolved["macOS"].id)
+    assert macos_ent is not None
+    assert macos_ent.kind == "operating_system"
+
+    mac_studio_ent = await adapter.get_entity(t, p, resolved["Mac Studio"].id)
+    assert mac_studio_ent is not None
+    assert mac_studio_ent.kind == "device"
+
+    # Distinct products are preserved and not merged
+    assert resolved["OLMX"].id != resolved["Ollama"].id
+    all_ents = await adapter.find_entities(t, p)
+    assert len(all_ents) == 4
+
+    # Alias search finds OLMX via alias
+    subgraph_alias = await adapter.get_subgraph(t, p, search="fast-olmx")
+    assert any(n["id"] == resolved["OLMX"].id for n in subgraph_alias["nodes"])
+
+    # Unfamiliar or ambiguous entity names are not forced into categories
+    unfamiliar_candidates = [
+        EntityCandidate(
+            temporary_id="u1",
+            name="Zorblax-Engine",
+            kind="software",
+            description="Connects to the operating system",
+            confidence=0.95,
+        ),
+        EntityCandidate(
+            temporary_id="u2",
+            name="VirtualBridge",
+            kind="application",
+            description="Virtual hardware interface",
+            confidence=0.95,
+        ),
+    ]
+    unf_res = await GraphManagerService.resolve_and_validate(t, p, unfamiliar_candidates, [])
+    unf_resolved = {e.name: e for e in unf_res["resolved_entities"]}
+    assert unf_resolved["Zorblax-Engine"].kind == "software"
+    assert unf_resolved["VirtualBridge"].kind == "application"
+
+
+@pytest.mark.asyncio
+async def test_vector_fallback_migration_to_native_store(tmp_path: Path):
+    """Verify fallback vector records on disk are migrated into native Chroma store upon transition,
+    verifying all record IDs, embeddings, documents, and metadata, and retaining source on failure.
+    """
+    from unittest.mock import MagicMock
+    from alberto.knowledge.store import ChromaStore, FallbackVectorCollection, _COL_CACHE
+
+    col_name = "test_mig_kb_384"
+    fb = FallbackVectorCollection(name=col_name, persist_path=str(tmp_path))
+    fb.upsert(
+        ids=["doc-1", "doc-2"],
+        embeddings=[[0.1] * 384, [0.2] * 384],
+        documents=["Doc 1 text", "Doc 2 text"],
+        metadatas=[{"k": "v1"}, {"k": "v2"}],
+    )
+    fb_fp = fb._file_path()
+    assert fb_fp is not None and fb_fp.exists()
+
+    # Clear cache
+    _COL_CACHE.pop((str(tmp_path), col_name), None)
+
+    # Mock native Chroma collection with successful verification
+    mock_native_col = MagicMock()
+    mock_native_col.get.return_value = {"ids": ["doc-1", "doc-2"]}
+    mock_client = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_native_col
+
+    from unittest.mock import patch
+
+    with patch("alberto.knowledge.store._client_for", return_value=mock_client), \
+         patch("alberto.knowledge.store._USE_MEMORY_VECTOR_STORE", False):
+        _ = ChromaStore(path=str(tmp_path), collection=col_name)
+
+    # Verify native collection received the upserted fallback items with all properties preserved
+    mock_native_col.upsert.assert_called_once()
+    call_kwargs = mock_native_col.upsert.call_args.kwargs
+    assert set(call_kwargs["ids"]) == {"doc-1", "doc-2"}
+    assert call_kwargs["documents"] == ["Doc 1 text", "Doc 2 text"]
+    assert call_kwargs["metadatas"] == [{"k": "v1"}, {"k": "v2"}]
+    assert len(call_kwargs["embeddings"][0]) == 384
+
+    # Verify fallback file was renamed to .migrated upon successful verification
+    assert not fb_fp.exists()
+    assert fb_fp.with_suffix(".json.migrated").exists()
+
+    # Test failure retry: if verification fails, source file is retained intact for retry
+    retry_col_name = "test_retry_kb_384"
+    fb_retry = FallbackVectorCollection(name=retry_col_name, persist_path=str(tmp_path))
+    fb_retry.upsert(
+        ids=["doc-retry-1"],
+        embeddings=[[0.3] * 384],
+        documents=["Retry text"],
+        metadatas=[{"k": "retry"}],
+    )
+    fb_retry_fp = fb_retry._file_path()
+    assert fb_retry_fp is not None and fb_retry_fp.exists()
+
+    _COL_CACHE.pop((str(tmp_path), retry_col_name), None)
+    mock_failing_col = MagicMock()
+    mock_failing_col.get.return_value = {"ids": []}  # verification fails (missing IDs)
+    mock_client.get_or_create_collection.return_value = mock_failing_col
+
+    with patch("alberto.knowledge.store._client_for", return_value=mock_client), \
+         patch("alberto.knowledge.store._USE_MEMORY_VECTOR_STORE", False):
+        _ = ChromaStore(path=str(tmp_path), collection=retry_col_name)
+
+    # Source file was retained for retry
+    assert fb_retry_fp.exists()
+    assert not fb_retry_fp.with_suffix(".json.migrated").exists()
+

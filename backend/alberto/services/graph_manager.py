@@ -42,6 +42,94 @@ VALID_RELATIONSHIP_KINDS = {
 }
 
 
+VALID_ENTITY_KINDS = {
+    "device",
+    "hardware",
+    "appliance",
+    "host",
+    "operating_system",
+    "platform",
+    "application",
+    "software",
+    "framework",
+    "model",
+    "modelrunner",
+    "person",
+    "location",
+    "service",
+    "technology",
+    "topic",
+    "concept",
+    "project",
+}
+
+KNOWN_OPERATING_SYSTEMS = {
+    "macos",
+    "mac os",
+    "os x",
+    "darwin",
+    "windows",
+    "win11",
+    "win10",
+    "win8",
+    "win7",
+    "linux",
+    "ubuntu",
+    "debian",
+    "fedora",
+    "arch",
+    "arch linux",
+    "centos",
+    "redhat",
+    "rhel",
+    "alpine",
+    "ios",
+    "ipados",
+    "watchos",
+    "android",
+    "freebsd",
+    "openbsd",
+    "unix",
+}
+
+KNOWN_HARDWARE_DEVICES = {
+    "mac",
+    "mac mini",
+    "mac studio",
+    "macbook",
+    "macbook pro",
+    "macbook air",
+    "imac",
+    "mac pro",
+    "pc",
+    "laptop",
+    "desktop",
+    "server",
+    "raspberry pi",
+    "iphone",
+    "ipad",
+    "android phone",
+}
+
+KNOWN_FRAMEWORKS_AND_APPS = {
+    "olmx",
+    "ollama",
+    "lm studio",
+    "vllm",
+    "llama.cpp",
+    "tgi",
+    "pytorch",
+    "tensorflow",
+    "transformers",
+    "langchain",
+}
+
+COMPATIBLE_KIND_SETS = [
+    {"operating_system", "platform"},
+    {"application", "framework", "modelrunner", "software"},
+    {"device", "host", "hardware", "appliance"},
+]
+
 GENERIC_ENTITY_NAMES = {
     "server",
     "router",
@@ -134,6 +222,29 @@ class GraphManagerService:
                 review_reasons.append(f"Low confidence ({cand_conf:.2f}) on entity candidate '{c_name}'")
 
             c_canon = cls.canonicalize_name(c_name)
+            k = (cand.kind or "").strip().lower()
+
+            # Deterministic entity classification rules (unambiguous known types only)
+            if c_canon in KNOWN_OPERATING_SYSTEMS:
+                if k in ("device", "host", "hardware", "concept"):
+                    logger.info("Deterministic entity kind normalization: '%s' is an operating system, not %s", c_name, k)
+                    cand.kind = "operating_system"
+                    k = "operating_system"
+            elif c_canon in KNOWN_HARDWARE_DEVICES:
+                if k in ("operating_system", "platform", "application", "framework"):
+                    logger.info("Deterministic entity kind normalization: '%s' is a physical device, not %s", c_name, k)
+                    cand.kind = "device"
+                    k = "device"
+            elif c_canon in KNOWN_FRAMEWORKS_AND_APPS:
+                if k in ("device", "host"):
+                    logger.info("Deterministic entity kind normalization: '%s' is an application/framework, not %s", c_name, k)
+                    cand.kind = "application"
+                    k = "application"
+
+            if k not in VALID_ENTITY_KINDS:
+                requires_review = True
+                review_reasons.append(f"Unrecognized entity kind '{cand.kind}' for candidate '{c_name}'")
+
             matches = list(by_canonical.get(c_canon, []))
 
             # Check matching by explicit aliases
@@ -156,8 +267,24 @@ class GraphManagerService:
 
             if len(matches) == 1:
                 existing = matches[0]
-                if existing.kind.lower() == cand.kind.lower() or cand.kind.lower() in ("concept", "topic"):
+                existing_k = (existing.kind or "").strip().lower()
+
+                # Remediate/normalize existing entity kind if it was misclassified under older taxonomy
+                if c_canon in KNOWN_OPERATING_SYSTEMS and existing_k == "device":
+                    existing.kind = "operating_system"
+                    existing_k = "operating_system"
+
+                # Check kind compatibility
+                is_compatible = (
+                    existing_k == k
+                    or k in ("concept", "topic")
+                    or any(existing_k in s and k in s for s in COMPATIBLE_KIND_SETS)
+                )
+
+                if is_compatible:
                     chosen_entity = existing
+                    if k in ("operating_system", "platform") and existing_k != k:
+                        existing.kind = k
                     if cand.description and cand.description not in (existing.description or ""):
                         new_desc = f"{existing.description}; {cand.description}".strip("; ")
                         existing.description = new_desc

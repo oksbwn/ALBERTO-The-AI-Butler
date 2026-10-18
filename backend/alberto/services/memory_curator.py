@@ -64,6 +64,14 @@ Strict Negative Constraints (CRITICAL):
 - DO NOT treat speculative assistant suggestions or tool errors as confirmed facts.
 - DO NOT extract passwords, API keys, private tokens, credit cards, or financial identifiers.
 - DO NOT extract temporary conversation chatter ("ok", "thank you", intermediate math, weather queries).
+- ENTITY TYPE CLASSIFICATION: Preserve common conceptual distinctions strictly:
+  * Physical devices (e.g. Mac mini, Mac Studio, iPhone, Raspberry Pi) are 'device'.
+  * Operating systems and software platforms (e.g. macOS, Linux, Windows, iOS) are 'operating_system' or 'platform'. NEVER classify a software platform or operating system as a 'device' simply because it runs on or alongside hardware.
+  * Applications and software tools (e.g. LM Studio, Docker, VS Code) are 'application'.
+  * Frameworks and runtimes (e.g. OLMX, Ollama, LangChain, PyTorch) are 'framework' or 'application'.
+  * AI models (e.g. Qwen 7B, Llama 3) are 'model'.
+  * People are 'person'.
+  * Locations are 'location'.
 - Every memory and entity MUST include evidence_refs (exact text quotes strictly from the USER's statements).
 - If the conversation contains nothing durable to remember, set "should_learn": false and return empty lists.
 
@@ -86,7 +94,7 @@ Output strictly valid JSON matching this schema:
     {
       "temporary_id": "e1",
       "name": "Entity Name",
-      "kind": "device" | "application" | "person" | "location" | "service" | "concept",
+      "kind": "device" | "operating_system" | "platform" | "application" | "framework" | "model" | "person" | "location" | "service" | "concept",
       "confidence": 0.0 - 1.0,
       "description": "Short description",
       "aliases": [],

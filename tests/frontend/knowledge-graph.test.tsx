@@ -238,6 +238,37 @@ describe("KnowledgeGraphExplorer", () => {
 
     expect(await screen.findByText("No entities found in scope")).toBeInTheDocument();
   });
+
+  it("renders operating_system badge with formatted label distinct from device", async () => {
+    const mockMacOSEntity: GraphEntity = {
+      id: "ent-macos",
+      tenant_id: "t-default",
+      project_id: "p1",
+      kind: "operating_system",
+      name: "macOS",
+      canonical_name: "macos",
+      description: "The operating system the user is running on.",
+      source: "manual",
+      confidence: 0.9,
+      created_at: 1700000000000,
+      updated_at: 1700000000000,
+    };
+
+    apiMock.graphSubgraph.mockResolvedValueOnce({
+      nodes: [mockMacOSEntity, mockMacStudioEntity],
+      relationships: [],
+      truncated: false,
+      focus_id: null,
+      total_nodes: 2,
+      total_relationships: 0,
+    });
+
+    render(<KnowledgeGraphExplorer project={{ id: "p1" }} />);
+
+    expect(await screen.findByText("macOS")).toBeInTheDocument();
+    expect(screen.getAllByText(/operating system/i).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/device/i).length).toBeGreaterThanOrEqual(1);
+  });
 });
 
 describe("KnowledgeScreen existing page regression", () => {

@@ -383,6 +383,34 @@ class ChromaStore:
                 try:
                     c = _client_for(path)
                     col = c.get_or_create_collection(collection, metadata={"hnsw:space": "cosine"}) if c else None
+                    if col is not None:
+                        # Seamless transition: migrate any durable fallback-only records if present
+                        cls_fb = FallbackVectorCollection(name=collection, persist_path=path)
+                        fb_fp = cls_fb._file_path()
+                        if fb_fp and fb_fp.exists():
+                            try:
+                                fb_items = json.loads(fb_fp.read_text(encoding="utf-8"))
+                                if isinstance(fb_items, dict) and fb_items:
+                                    ids = list(fb_items.keys())
+                                    embs = [fb_items[i]["embedding"] for i in ids]
+                                    docs = [fb_items[i]["document"] for i in ids]
+                                    metas = [fb_items[i]["metadata"] for i in ids]
+                                    col.upsert(ids=ids, embeddings=embs, documents=docs, metadatas=metas)
+                                    # Verification: verify all migrated IDs are present in the native collection before archiving
+                                    verified = col.get(ids=ids)
+                                    verified_ids = set(verified.get("ids") or [])
+                                    if set(ids).issubset(verified_ids):
+                                        migrated_fp = fb_fp.with_suffix(".json.migrated")
+                                        fb_fp.replace(migrated_fp)
+                                    else:
+                                        missing = set(ids) - verified_ids
+                                        raise RuntimeError(f"ChromaDB migration verification failed: missing IDs {missing}")
+                            except Exception as mig_err:
+                                import logging
+
+                                logging.getLogger("alberto.knowledge.store").warning(
+                                    "Could not migrate fallback vector records from %s (retaining source for retry): %s", fb_fp, mig_err
+                                )
                 except Exception:
                     col = None
                 if col is None:

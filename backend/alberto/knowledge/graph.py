@@ -408,11 +408,22 @@ class LadybugGraphAdapter:
             )
             params["search"] = search.strip().lower()
 
+        order = ""
+        if search:
+            # Exact name matches first, then name/canonical substring, then explicit alias in description, then general description.
+            order = (
+                "ORDER BY CASE "
+                "WHEN lower(e.name) = $search OR e.canonical_name = $search THEN 0 "
+                "WHEN lower(e.name) CONTAINS $search OR lower(e.canonical_name) CONTAINS $search THEN 1 "
+                "WHEN lower(e.description) CONTAINS '[aliases:' AND lower(e.description) CONTAINS $search THEN 2 "
+                "ELSE 3 END, e.name"
+            )
         query = f"""
             MATCH (e:Entity)
             WHERE {" AND ".join(where)}
             RETURN e.id, e.tenant_id, e.project_id, e.kind, e.name, e.canonical_name,
                    e.description, e.source, e.confidence, e.created_at, e.updated_at
+            {order}
             LIMIT $limit
         """
         res: Any = self._execute(query, params)
@@ -624,10 +635,20 @@ class LadybugGraphAdapter:
                 continue
 
             nodes = [GraphEntity.from_row(n) for n in raw_nodes]
+            # Undirected patterns list rels in path order; use stored _SRC/_DST for true direction.
+            internal = {
+                (n["_ID"]["table"], n["_ID"]["offset"]): ent.id
+                for n, ent in zip(raw_nodes, nodes, strict=False)
+                if isinstance(n.get("_ID"), dict)
+            }
             rels = []
             for i, r in enumerate(raw_rels):
                 src_id = nodes[i].id if i < len(nodes) else ""
                 dst_id = nodes[i + 1].id if i + 1 < len(nodes) else ""
+                s, d = r.get("_SRC"), r.get("_DST")
+                if isinstance(s, dict) and isinstance(d, dict):
+                    src_id = internal.get((s["table"], s["offset"]), src_id)
+                    dst_id = internal.get((d["table"], d["offset"]), dst_id)
                 rels.append(GraphRelationship.from_row(r, source_id=src_id, target_id=dst_id))
 
             paths.append(GraphPath(nodes=nodes, relationships=rels, length=length))
@@ -815,12 +836,14 @@ class LadybugGraphAdapter:
             params: dict[str, Any] = {
                 "tenant_id": tenant_id,
                 "project_id": project_id,
-                "limit": safe_limit,
+                "limit": 500,
+                "ids": list(nodes_map.keys()),
             }
             where_rel = [
                 "r.tenant_id = $tenant_id", "r.project_id = $project_id",
                 "a.tenant_id = $tenant_id", "a.project_id = $project_id",
                 "b.tenant_id = $tenant_id", "b.project_id = $project_id",
+                "a.id IN $ids", "b.id IN $ids",
             ]
             if rel_kind:
                 where_rel.append("r.kind = $rel_kind")

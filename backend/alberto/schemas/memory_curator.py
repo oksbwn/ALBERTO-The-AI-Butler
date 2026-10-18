@@ -46,7 +46,7 @@ class EntityCandidate(BaseModel):
     name: str = Field(description="Entity name as explicitly stated (e.g. Mac mini, LM Studio).")
     kind: str = Field(
         default="concept",
-        description="Entity type: device, application, person, location, service, topic, concept",
+        description="Entity type: device, operating_system, platform, application, framework, model, modelrunner, person, location, service, topic, concept",
     )
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     description: str = Field(default="", description="Brief description or context.")

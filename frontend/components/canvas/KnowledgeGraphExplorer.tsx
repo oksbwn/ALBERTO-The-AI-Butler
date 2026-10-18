@@ -28,6 +28,11 @@ import {
 } from "@/lib/api";
 
 const KIND_COLORS: Record<string, { bg: string; fg: string; border: string }> = {
+  operating_system: { bg: "rgba(168, 85, 247, 0.14)", fg: "#a855f7", border: "rgba(168, 85, 247, 0.4)" },
+  platform: { bg: "rgba(168, 85, 247, 0.14)", fg: "#a855f7", border: "rgba(168, 85, 247, 0.4)" },
+  framework: { bg: "rgba(245, 158, 11, 0.14)", fg: "#f59e0b", border: "rgba(245, 158, 11, 0.4)" },
+  model: { bg: "rgba(6, 182, 212, 0.14)", fg: "#06b6d4", border: "rgba(6, 182, 212, 0.4)" },
+  location: { bg: "rgba(236, 72, 153, 0.14)", fg: "#ec4899", border: "rgba(236, 72, 153, 0.4)" },
   modelrunner: { bg: "rgba(6, 182, 212, 0.14)", fg: "#06b6d4", border: "rgba(6, 182, 212, 0.4)" },
   device: { bg: "rgba(59, 130, 246, 0.14)", fg: "#3b82f6", border: "rgba(59, 130, 246, 0.4)" },
   host: { bg: "rgba(59, 130, 246, 0.14)", fg: "#3b82f6", border: "rgba(59, 130, 246, 0.4)" },
@@ -46,9 +51,6 @@ function getKindStyle(kind?: string) {
 export function extractAliases(entity: GraphEntity | null | undefined): string[] {
   if (!entity) return [];
   const aliases: string[] = [];
-  if (entity.canonical_name && entity.canonical_name !== entity.name.toLowerCase()) {
-    aliases.push(entity.canonical_name);
-  }
   if (entity.description) {
     const match = entity.description.match(/\[aliases:\s*([^\]]+)\]/i);
     if (match && match[1]) {
@@ -111,11 +113,11 @@ function KnowledgeNodeComponent({ data }: NodeProps) {
             letterSpacing: "0.04em",
           }}
         >
-          {entity?.kind || "Entity"}
+          {entity?.kind ? entity.kind.replace(/_/g, " ") : "Entity"}
         </span>
-        {entity?.confidence !== undefined && (
-          <span className="mono" style={{ fontSize: 10, color: "var(--fg-2)" }} title="Extraction confidence">
-            {Math.round((entity.confidence || 1.0) * 100)}%
+        {typeof entity?.confidence === "number" && (
+          <span className="mono" style={{ fontSize: 10, color: "var(--fg-2)" }} title="Stored confidence (assigned at extraction, not measured)">
+            {Math.round(entity.confidence * 100)}%
           </span>
         )}
       </div>
@@ -833,7 +835,7 @@ function KnowledgeGraphExplorerInner({ project }: KnowledgeGraphExplorerProps) {
                         fontWeight: 700,
                       }}
                     >
-                      {selectedEntity.kind}
+                      {selectedEntity.kind.replace(/_/g, " ")}
                     </span>
                     <span className="mono t-caption fg-2">Entity Details</span>
                   </div>
@@ -870,9 +872,9 @@ function KnowledgeGraphExplorerInner({ project }: KnowledgeGraphExplorerProps) {
                   <button
                     className="btn btn-secondary btn-sm"
                     onClick={handleCollapseBranches}
-                    title="Collapse expanded branches"
+                    title="Remove all expanded neighbours and return to the originally loaded graph (selected node is kept)"
                   >
-                    <Icon name="minus" size={13} /> Collapse
+                    <Icon name="minus" size={13} /> Reset expansion
                   </button>
                 )}
               </div>
@@ -920,7 +922,7 @@ function KnowledgeGraphExplorerInner({ project }: KnowledgeGraphExplorerProps) {
                   </div>
                   <div className="row spread">
                     <span className="fg-2">Confidence:</span>
-                    <span className="mono-sm">{Math.round(selectedEntity.confidence * 100)}%</span>
+                    <span className="mono-sm">{typeof selectedEntity.confidence === "number" ? `${Math.round(selectedEntity.confidence * 100)}% (stored)` : "—"}</span>
                   </div>
                   <div className="row spread">
                     <span className="fg-2">Entity ID:</span>
@@ -1067,7 +1069,7 @@ function KnowledgeGraphExplorerInner({ project }: KnowledgeGraphExplorerProps) {
                 <div className="card col gap2" style={{ padding: 10, background: "var(--bg-0)", fontSize: 12 }}>
                   <div className="row spread">
                     <span className="fg-2">Confidence:</span>
-                    <span className="mono-sm">{Math.round((selectedRelationship.confidence || 1.0) * 100)}%</span>
+                    <span className="mono-sm">{typeof selectedRelationship.confidence === "number" ? `${Math.round(selectedRelationship.confidence * 100)}% (stored)` : "—"}</span>
                   </div>
                   <div className="row spread">
                     <span className="fg-2">Source:</span>
@@ -1076,7 +1078,7 @@ function KnowledgeGraphExplorerInner({ project }: KnowledgeGraphExplorerProps) {
                   <div className="col gap1">
                     <span className="fg-2">Supporting Provenance:</span>
                     <span className="mono-sm" style={{ wordBreak: "break-word", color: "var(--fg-1)" }}>
-                      {selectedRelationship.provenance || "manual"}
+                      {selectedRelationship.provenance || "(none recorded)"}
                     </span>
                   </div>
                   <div className="row spread">
