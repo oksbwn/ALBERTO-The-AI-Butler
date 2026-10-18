@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -52,6 +53,22 @@ class StorageLayerStatus:
         return asdict(self)
 
 
+STOP_WORDS = {
+    "the", "a", "an", "is", "am", "are", "was", "were", "be", "been", "being",
+    "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
+    "my", "your", "his", "their", "our", "mine", "yours", "ours", "myself",
+    "which", "what", "where", "when", "why", "how", "who", "whom",
+    "this", "that", "these", "those", "for", "with", "at", "by", "from",
+    "up", "about", "into", "over", "after", "to", "in", "on", "of", "and", "or",
+    "but", "if", "then", "else", "so", "as", "do", "does", "did", "have", "has", "had",
+}
+
+
+def _extract_keywords(text: str) -> set[str]:
+    words = re.findall(r"\b[a-zA-Z0-9_\-]+\b", (text or "").lower())
+    return {w for w in words if w not in STOP_WORDS and len(w) > 1}
+
+
 class UnifiedMemoryManager:
     """Coordinates Alberto's 4 memory storage engines."""
 
@@ -65,11 +82,15 @@ class UnifiedMemoryManager:
         top_k: int,
     ) -> list[UnifiedMemoryRecord]:
         hits: list[UnifiedMemoryRecord] = []
+        seen_texts: set[str] = set()
+
         try:
             mem_texts = await MemoryService.recall(
                 session, tenant_id, project_id, query, scope=scope, top_k=top_k
             )
             for i, text in enumerate(mem_texts):
+                norm = text.strip().lower()
+                seen_texts.add(norm)
                 hits.append(
                     UnifiedMemoryRecord(
                         source="chroma_memory",
@@ -82,28 +103,48 @@ class UnifiedMemoryManager:
         except Exception as e:
             logger.warning("MemoryService recall error: %s", e)
 
-        if not hits:
-            try:
-                all_active = await MemoryService.list(session, tenant_id, project_id, status="active")
-                query_lower = query.lower()
-                query_words = {w for w in query_lower.split() if len(w) > 2}
-                for mem in all_active:
-                    mem_lower = mem.text.lower()
-                    mem_words = set(mem_lower.split())
-                    if (query_words & mem_words) or (mem_lower in query_lower) or (query_lower in mem_lower):
-                        hits.append(
-                            UnifiedMemoryRecord(
-                                source="sqlite_memory",
-                                record_id=mem.id,
-                                content=mem.text,
-                                metadata={"scope": mem.scope, "kind": mem.kind},
-                                provenance=mem.provenance,
-                            )
-                        )
-                        if len(hits) >= top_k:
-                            break
-            except Exception as e:
-                logger.warning("SQLite memory fallback recall error: %s", e)
+        # Keyword and exact entity matching from authoritative SQLite memory
+        # Ensures exact technical terms and identifiers are never lost to vector drift or embedding outages
+        try:
+            all_active = await MemoryService.list(session, tenant_id, project_id, status="active")
+            query_lower = query.lower()
+            query_words = _extract_keywords(query_lower)
+
+            scored_candidates: list[tuple[float, Memory]] = []
+            for mem in all_active:
+                mem_lower = mem.text.lower()
+                if mem_lower in seen_texts:
+                    continue
+                mem_words = _extract_keywords(mem_lower)
+                overlap = query_words & mem_words
+                overlap_score = len(overlap) / max(1, len(query_words)) if query_words else 0.0
+
+                if mem_lower in query_lower or query_lower in mem_lower:
+                    overlap_score += 1.0
+                if any(w in mem_lower for w in query_words if len(w) >= 3):
+                    overlap_score += 0.5
+
+                if overlap_score > 0.0:
+                    scored_candidates.append((overlap_score, mem))
+
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            for score, mem in scored_candidates:
+                if len(hits) >= top_k:
+                    break
+                seen_texts.add(mem.text.strip().lower())
+                hits.append(
+                    UnifiedMemoryRecord(
+                        source="sqlite_memory",
+                        record_id=mem.id,
+                        content=mem.text,
+                        score=round(score, 3),
+                        metadata={"scope": mem.scope, "kind": mem.kind},
+                        provenance=mem.provenance,
+                    )
+                )
+        except Exception as e:
+            logger.warning("SQLite memory keyword/fallback recall error: %s", e)
+
         return hits
 
     @staticmethod
@@ -116,13 +157,18 @@ class UnifiedMemoryManager:
         hits: list[UnifiedMemoryRecord] = []
         try:
             adapter = get_graph_adapter()
-            entities = await adapter.find_entities(tenant_id, project_id, limit=top_k * 2)
+            entities = await adapter.find_entities(tenant_id, project_id, limit=top_k * 4)
             query_lower = query.lower()
+            query_words = _extract_keywords(query_lower)
             for ent in entities:
+                ent_name_lower = ent.name.lower()
+                ent_desc_lower = (ent.description or "").lower()
+                ent_words = _extract_keywords(f"{ent_name_lower} {ent_desc_lower}")
                 if (
-                    ent.name.lower() in query_lower
-                    or query_lower in ent.name.lower()
-                    or (ent.description and query_lower in ent.description.lower())
+                    ent_name_lower in query_lower
+                    or query_lower in ent_name_lower
+                    or (ent.description and query_lower in ent_desc_lower)
+                    or (query_words and (query_words & ent_words))
                 ):
                     hits.append(
                         UnifiedMemoryRecord(
@@ -678,10 +724,9 @@ class UnifiedMemoryManager:
             graph_stats["error"] = str(e)
 
         # 3. ChromaDB
-        chroma_status = {
-            "available": True,
-            "path": settings.chroma_path,
-        }
+        from alberto.knowledge.store import get_vector_store_status
+
+        chroma_status = get_vector_store_status(settings.chroma_path)
 
         # 4. Markdown memory (Active Writer in Milestone 2.1)
         from alberto.services.markdown_memory import MarkdownMemoryService

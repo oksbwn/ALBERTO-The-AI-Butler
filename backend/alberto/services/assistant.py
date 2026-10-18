@@ -929,6 +929,7 @@ class AssistantService:
         *, tenant_id: str, project_id: str, thread_id: str | None, tracer,
         user_message: str = "", ai_response: str = "",
         token_metrics: dict | None = None,
+        retrieval_meta: dict | None = None,
         error: str | None = None, status: str = "done",
     ) -> None:
         """Persist one assistant turn as a Trace (name='assistant') + spans, so SPEND and
@@ -948,6 +949,11 @@ class AssistantService:
         trace_id = None
         try:
             async with SessionLocal() as s:
+                trace_meta: dict[str, Any] = {}
+                if token_metrics:
+                    trace_meta["token_metrics"] = token_metrics
+                if retrieval_meta:
+                    trace_meta["retrieval"] = retrieval_meta
                 trace = Trace(
                     tenant_id=tenant_id, project_id=project_id, workflow_id=None,
                     run_id=f"assistant-{_uuid.uuid4()}", thread_id=thread_id,
@@ -957,7 +963,7 @@ class AssistantService:
                     source="assistant", actor="System",
                     user_message=(user_message or None), ai_response=(ai_response or None),
                     error=(error or None),
-                    meta={"token_metrics": token_metrics} if token_metrics else {},
+                    meta=trace_meta,
                 )
                 s.add(trace)
                 await s.flush()
@@ -1072,12 +1078,15 @@ class AssistantService:
             fast_sys_prompt = (
                 "You are Alberto, a helpful, intelligent AI Home Butler. "
                 "Be natural, warm, and concise (1-3 sentences). Answer questions directly. "
+                "Always preserve user-provided technical terms, product names, acronyms, and model identifiers exactly as stated. "
+                "Never substitute, normalize, or autocorrect them with more common, popular, or phonetically similar alternatives unless the user explicitly tells you to. "
                 "If the user asks for multi-step automation design or deep reasoning, "
                 "mention they can toggle Deep Thinking mode or ask you to execute it."
             )
 
             # 1. Unified Knowledge & Memory Recall
             recalled_block = ""
+            retrieval_meta: dict[str, Any] = {}
             if user_msg:
                 try:
                     from alberto.services.context_assembler import ContextAssembler
@@ -1092,6 +1101,14 @@ class AssistantService:
                     )
                     if hits:
                         recalled_block = ContextAssembler.assemble_context(hits)
+                    retrieval_meta = {
+                        "selected_sources": list(dict.fromkeys(h.source for h in hits)) if hits else [],
+                        "matched_memory_ids": [h.record_id for h in hits],
+                        "retrieved_context_items_count": len(hits),
+                        "provenance": [h.provenance for h in hits if h.provenance],
+                        "scores": [round(h.score, 3) for h in hits if h.score is not None],
+                        "evidence_included": bool(recalled_block),
+                    }
                 except Exception as me:
                     log.warning("Assistant memory recall error: %s", me)
 
@@ -1234,6 +1251,7 @@ class AssistantService:
                 tenant_id=tenant_id, project_id=project_id, thread_id=thread_id, tracer=tracer,
                 user_message=user_msg, ai_response=final_text,
                 token_metrics=metrics,
+                retrieval_meta=retrieval_meta,
                 error=err_msg, status="error" if err_msg else "done",
             )
 

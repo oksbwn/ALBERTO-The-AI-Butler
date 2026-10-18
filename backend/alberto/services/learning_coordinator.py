@@ -36,6 +36,56 @@ from alberto.services.memory_curator import SENSITIVE_PATTERNS, MemoryCuratorSer
 logger = logging.getLogger("alberto.services.learning_coordinator")
 
 
+def has_alias_equivalence_evidence(name: str, alias: str, user_message: str) -> bool:
+    """Verify that alias is explicitly stated as equivalent to name in user_message."""
+    if not name or not alias or not user_message:
+        return False
+    n = re.escape(name.strip())
+    a = re.escape(alias.strip())
+    patterns = [
+        rf"\b{n}\s*\(\s*(?:aka|a\.k\.a\.|also known as|or|short for|stands for|also called)?\s*{a}\s*\)",
+        rf"\b{a}\s*\(\s*(?:aka|a\.k\.a\.|also known as|or|short for|stands for|also called)?\s*{n}\s*\)",
+        rf"\b{n}\s+(?:aka|a\.k\.a\.|is also known as|also known as|or called|called)\s+{a}\b",
+        rf"\b{a}\s+(?:aka|a\.k\.a\.|is also known as|also known as|or called|called)\s+{n}\b",
+        rf"\bcall\s+{n}\s+{a}\b",
+        rf"\bcall\s+{a}\s+{n}\b",
+        rf"\b{n}\s*,\s*(?:also known as|aka|alias)\s+{a}\b",
+        rf"\b{a}\s*,\s*(?:also known as|aka|alias)\s+{n}\b",
+        rf"\b{n}\s+stands\s+for\s+{a}\b",
+        rf"\b{a}\s+stands\s+for\s+{n}\b",
+        rf"\b{n}\s+short\s+for\s+{a}\b",
+        rf"\b{a}\s+short\s+for\s+{n}\b",
+    ]
+    for pat in patterns:
+        if re.search(pat, user_message, re.IGNORECASE):
+            return True
+    return False
+
+
+def has_replacement_evidence(user_message: str) -> bool:
+    """Verify that user_message explicitly indicates correction, replacement, or migration."""
+    if not user_message:
+        return False
+    replace_patterns = [
+        r"\b(?:switch|switched|switching)\s+(?:from\s+\w+\s+)?to\b",
+        r"\b(?:replace|replaced|replaces|replacing)\b",
+        r"\binstead\s+of\b",
+        r"\bno\s+longer\s+(?:use|using|need|have)\b",
+        r"\bstopped\s+using\b",
+        r"\bdon't\s+use\s+\w+\s+anymore\b",
+        r"\bmigrat(?:e|ed|ing)\s+to\b",
+        r"\bnot\s+[\w\-]+,\s*(?:but|use)\b",
+        r"\bchanged\s+(?:my\s+mind|to)\b",
+        r"\bcorrect(?:ion|ed)?\s*:\s*",
+        r"\bactually\s*,\s*I\s+(?:use|switched|prefer)\b",
+        r"\bprefer\s+[\w\-]+\s+over\b",
+    ]
+    for pat in replace_patterns:
+        if re.search(pat, user_message, re.IGNORECASE):
+            return True
+    return False
+
+
 class LearningCoordinator:
     """Orchestrates durable learning lifecycle from completed conversation turns."""
 
@@ -304,13 +354,13 @@ class LearningCoordinator:
                     review_reasons.append(f"Missing evidence_refs on candidate '{cand.content[:35]}'")
                 else:
                     s_id = (source_event_id or "").lower()
+                    u_lower = user_message.lower()
                     grounded = any(
-                        ref.strip().lower() in (s_id, "user", "assistant", "turn", "msg")
+                        ref.strip().lower() in (s_id, "user", "turn", "msg")
                         or (s_id and ref.strip().lower() in s_id)
                         or (s_id and s_id in ref.strip().lower())
-                        or ref.strip().lower().startswith(("msg", "turn", "message", "run"))
-                        or ref.strip().lower() in user_message.lower()
-                        or ref.strip().lower() in ai_response.lower()
+                        or ref.strip().lower().startswith(("msg", "turn", "message", "run", "user"))
+                        or ref.strip().lower() in u_lower
                         for ref in cand.evidence_refs
                         if ref.strip()
                     )
@@ -322,10 +372,48 @@ class LearningCoordinator:
                     requires_review = True
                     review_reasons.append(f"Proposed deletion requires human confirmation: '{cand.content[:35]}'")
 
+                if cand.operation == "propose_replace" and not has_replacement_evidence(user_message):
+                    requires_review = True
+                    review_reasons.append(
+                        f"Proposed replacement by '{cand.content[:35]}' lacks explicit correction/replacement evidence in user message"
+                    )
+
                 for pat in SENSITIVE_PATTERNS:
                     if re.search(pat, cand.content) or (cand.supersedes_fact and re.search(pat, cand.supersedes_fact)):
                         requires_review = True
                         review_reasons.append("Sensitive credential pattern detected in extracted content")
+
+            # Validate candidate entities and aliases are strictly grounded in user message
+            for cand_ent in curator_output.entities:
+                c_name = cand_ent.name.strip()
+                if not c_name:
+                    continue
+                valid_aliases: list[str] = []
+                for alias in (cand_ent.aliases or []):
+                    a_clean = alias.strip().lower()
+                    if not a_clean:
+                        continue
+                    if a_clean not in user_message.lower():
+                        requires_review = True
+                        review_reasons.append(
+                            f"Ungrounded entity alias '{alias}' for '{c_name}' not stated by user"
+                        )
+                    elif not has_alias_equivalence_evidence(c_name, alias, user_message):
+                        requires_review = True
+                        review_reasons.append(
+                            f"Entity alias '{alias}' for '{c_name}' lacks explicit equivalence evidence in user message"
+                        )
+                    else:
+                        valid_aliases.append(alias)
+                cand_ent.aliases = valid_aliases
+
+                c_name_lower = c_name.lower()
+                if c_name_lower not in user_message.lower() and c_name_lower not in (source_event_id or "").lower():
+                    if c_name_lower in ai_response.lower():
+                        requires_review = True
+                        review_reasons.append(
+                            f"Entity '{c_name}' derived from assistant response rather than user assertion"
+                        )
 
             # Validate Knowledge Graph entities & relationships (purely read-only)
             graph_val = await GraphManagerService.resolve_and_validate(
@@ -378,18 +466,31 @@ class LearningCoordinator:
                     logger.debug("Skipping duplicate memory: %s", cand_text)
                     continue
 
-                superseded_target_id: str | None = None
-                if cand.operation == "propose_replace" or cand.supersedes_fact:
+                superseded_ids: list[str] = []
+                if (cand.operation == "propose_replace" or cand.supersedes_fact) and has_replacement_evidence(user_message):
+                    cand_words = set(re.findall(r"\b[a-zA-Z0-9_\-]+\b", cand_text.lower()))
+                    cand_topic_words = cand_words - {"user", "uses", "for", "the", "a", "an", "is", "using", "with", "now"}
                     for m in existing_active_mems:
-                        if m.kind == cand.kind or cand.kind in ("preference", "technology"):
+                        match_supersede = False
+                        if cand.supersedes_fact and cand.supersedes_fact.lower() in m.text.lower():
+                            match_supersede = True
+                        elif cand.operation == "propose_replace":
+                            m_words = set(re.findall(r"\b[a-zA-Z0-9_\-]+\b", m.text.lower()))
+                            m_topic_words = m_words - {"user", "uses", "for", "the", "a", "an", "is", "using", "with", "now"}
+                            if cand_topic_words & m_topic_words:
+                                for w in m_topic_words:
+                                    if len(w) > 3 and w in user_message.lower():
+                                        match_supersede = True
+                                        break
+
+                        if match_supersede:
                             await MemoryService.update(
                                 session, tenant_id, project_id, m.id, status="superseded"
                             )
                             MarkdownMemoryService.sync_memory(
                                 tenant_id, project_id, m.id, m.text, m.kind, status="superseded"
                             )
-                            superseded_target_id = m.id
-                            break
+                            superseded_ids.append(m.id)
 
                 cand_conf = float(cand.confidence) if cand.confidence is not None else 1.0
                 saved_mem = await MemoryService.remember(
@@ -402,10 +503,14 @@ class LearningCoordinator:
                     provenance="memory_curator",
                     status="active",
                     source_ref=f"turn:{source_event_id}",
-                    superseded_by=superseded_target_id,
                     meta={"evidence_refs": cand.evidence_refs},
                 )
                 applied_mem_ids.append(saved_mem.id)
+
+                for s_id in superseded_ids:
+                    await MemoryService.update(
+                        session, tenant_id, project_id, s_id, superseded_by=saved_mem.id
+                    )
 
                 MarkdownMemoryService.sync_memory(
                     tenant_id=tenant_id,

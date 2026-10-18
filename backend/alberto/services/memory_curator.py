@@ -53,15 +53,18 @@ Extraction Targets:
 1. Durable user facts & preferences (e.g. favorite tools, technical setup, habits, routines).
 2. Stable home & device descriptions (e.g. Mac mini, Linux server, smart lights).
 3. Candidate entities and typed relationships (e.g. (Mac mini)-[RUNS]->(LM Studio)).
-4. Corrections or replacements to prior facts (e.g. if the user replaced Qwen with Gemma).
+4. Corrections or replacements to prior facts (e.g. if the user explicitly switches from one tool or model to another).
 
 Strict Negative Constraints (CRITICAL):
-- DO NOT invent entities, names, dates, or values not explicitly stated in the conversation.
+- USER-ONLY FACT AUTHORITY: Extract durable facts, preferences, tools, hardware, and entities ONLY from statements, assertions, or confirmations explicitly made by the USER. The Assistant's responses represent system narration, suggestions, or potential hallucinations; NEVER extract claims, platforms, frameworks, or operating systems that were mentioned solely by the Assistant.
+- EXACT-NAME & TECHNICAL IDENTIFIER PRESERVATION: Preserve exact user-provided technical product names, model identifiers, acronyms, and novel terminology VERBATIM. NEVER autocorrect, normalize, or add aliases that conflate distinct tools or map an unfamiliar term to a familiar or popular one. Distinct spellings or terms represent distinct entities unless explicit equivalence is directly affirmed by the user.
+- NO ASSISTANT CONTAMINATION: If the assistant mistakenly suggests, misidentifies, or substitutes a different name, tool, or term during the conversation, the extracted memory must reflect ONLY what the user stated and MUST NOT adopt the assistant's incorrect term, hallucination, or unverified alias.
+- DO NOT invent entities, names, dates, or values not explicitly stated by the user.
 - DO NOT invent personal names from roles (e.g. if user says "My wife's birthday is June 4", role is "wife", DO NOT invent a first or last name).
 - DO NOT treat speculative assistant suggestions or tool errors as confirmed facts.
 - DO NOT extract passwords, API keys, private tokens, credit cards, or financial identifiers.
 - DO NOT extract temporary conversation chatter ("ok", "thank you", intermediate math, weather queries).
-- Every memory and entity MUST include evidence_refs (exact text quotes or message identifiers).
+- Every memory and entity MUST include evidence_refs (exact text quotes strictly from the USER's statements).
 - If the conversation contains nothing durable to remember, set "should_learn": false and return empty lists.
 
 Output strictly valid JSON matching this schema:
@@ -191,12 +194,16 @@ class MemoryCuratorService:
             mem_summary = "\nExisting User Knowledge:\n" + "\n".join(f"- {m}" for m in existing_memories[:10])
 
         user_prompt = f"""Analyze this conversation turn for durable knowledge to persist.
+Remember: The USER is the sole authority for user facts. The Assistant's response must NEVER be used to invent entities, platforms, or aliases. Preserve all user technical names verbatim.
 
-User: {user_message}
-Assistant: {ai_response}
+User Message (Authoritative Source):
+{user_message}
+
+Assistant Response (Advisory Context Only - DO NOT extract assistant suggestions or statements as user facts):
+{ai_response}
 {mem_summary}
 
-Remember: Output strictly valid JSON conforming to the schema."""
+Remember: Output strictly valid JSON conforming to the schema. Preserve user technical names verbatim."""
 
         # 4. Invoke LLM
         messages = [
