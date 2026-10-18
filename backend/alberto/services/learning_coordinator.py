@@ -190,7 +190,7 @@ class LearningCoordinator:
     ) -> None:
         key = f"{tenant_id}:{project_id}:{source_event_id}"
         cls._in_progress_keys.add(key)
-        timeout = getattr(settings, "memory_learning_timeout_seconds", 30.0)
+        timeout = getattr(settings, "memory_learning_timeout_seconds", 120.0)
         try:
             async with asyncio.timeout(timeout):
                 async with SessionLocal() as session:
