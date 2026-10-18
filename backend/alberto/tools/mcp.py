@@ -28,6 +28,7 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 import httpx
@@ -545,6 +546,277 @@ def _wrap_with_timeout(tool, timeout_seconds: float | None = None):
     )
 
 
+class McpExecutionOutcome(StrEnum):
+    """Structured outcomes for MCP tool execution and authorization verification."""
+
+    SUCCESS = "SUCCESS"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
+    APPROVAL_REJECTED = "APPROVAL_REJECTED"
+    TOOL_ERROR = "TOOL_ERROR"
+    TIMEOUT = "TIMEOUT"
+    CANCELLED = "CANCELLED"
+    UNKNOWN = "UNKNOWN"
+
+
+def _is_denied_or_error(res: Any) -> bool:
+    """Check if tool execution output represents a permission denial, unapproved HITL, or error."""
+    if res is None:
+        return True
+    if isinstance(res, str):
+        lower = res.strip().lower()
+        if (
+            lower.startswith("error:")
+            or lower.startswith("not permitted")
+            or lower.startswith("permission denied")
+            or lower.startswith("access denied")
+            or lower.startswith("unauthorized")
+            or lower.startswith("[human decision] reject")
+            or lower == "reject"
+            or "timed out after" in lower
+            or "not permitted:" in lower
+        ):
+            return True
+    elif isinstance(res, dict):
+        if res.get("isError") or res.get("is_error") or "error" in res:
+            return True
+        if str(res.get("decision", "")).lower() == "reject":
+            return True
+        if str(res.get("status", "")).lower() in ("denied", "rejected", "error"):
+            return True
+    return False
+
+
+def get_mcp_tool_last_outcome(tool: Any) -> McpExecutionOutcome | None:
+    """Retrieve the authoritative structured outcome of the most recent execution of wrapped MCP tool."""
+    st_dict = getattr(tool, "__dict__", {})
+    state = st_dict.get("_execution_state")
+    if isinstance(state, dict):
+        return state.get("last_outcome")
+    return None
+
+
+def _wrap_with_learning_hook(
+    tool,
+    client_row: McpClient,
+    tenant_id: str,
+    project_id: str,
+    cfg: dict | None = None,
+    ctx: Any = None,
+):
+    """Milestone 2.2: Wrap MCP tool to enforce structured authorization, error handling, and opportunistic execution-based learning."""
+    from langchain_core.tools import StructuredTool
+
+    from alberto.tools.materialize import entitlement_denial
+
+    underlying = tool
+    _state: dict[str, Any] = {"last_outcome": None}
+
+    async def _call(**kwargs):
+        outcome = McpExecutionOutcome.UNKNOWN
+
+        # 1. Tenant / Client Authorization Check
+        if client_row and getattr(client_row, "tenant_id", None) and client_row.tenant_id != tenant_id:
+            outcome = McpExecutionOutcome.PERMISSION_DENIED
+            _state["last_outcome"] = outcome
+            return f"Not permitted: tenant mismatch for MCP client {getattr(client_row, 'id', '')}"
+
+        if client_row and not getattr(client_row, "enabled", True):
+            outcome = McpExecutionOutcome.PERMISSION_DENIED
+            _state["last_outcome"] = outcome
+            return f"Not permitted: MCP client {getattr(client_row, 'name', '')} is disabled"
+
+        # 2. Entitlement / Permission Check
+        if cfg and cfg.get("required_entitlements"):
+            denial = entitlement_denial(cfg, ctx)
+            if denial:
+                outcome = McpExecutionOutcome.PERMISSION_DENIED
+                _state["last_outcome"] = outcome
+                return denial
+
+        # 3. HITL Approval Check (if required by tool config, client row, or runtime context)
+        requires_approval = bool(
+            (cfg and cfg.get("requires_approval"))
+            or (getattr(client_row, "requires_approval", None) is True)
+            or (getattr(ctx, "requires_approval", None) is True)
+        )
+        if requires_approval:
+            if ctx and getattr(ctx, "approval_decision", None) == "reject":
+                outcome = McpExecutionOutcome.APPROVAL_REJECTED
+                _state["last_outcome"] = outcome
+                return "[human decision] reject: tool execution rejected by reviewer"
+            approved = False
+            if ctx and getattr(ctx, "approval_granted", None) is True:
+                approved = True
+            elif ctx and callable(getattr(ctx, "is_approved", None)) and ctx.is_approved(underlying.name, kwargs) is True:
+                approved = True
+
+            if not approved:
+                outcome = McpExecutionOutcome.APPROVAL_REJECTED
+                _state["last_outcome"] = outcome
+                return "[human decision] reject: tool approval required but absent"
+
+        # 4. Actual Tool Execution
+        try:
+            res = await underlying.ainvoke(kwargs)
+        except TimeoutError:
+            outcome = McpExecutionOutcome.TIMEOUT
+            _state["last_outcome"] = outcome
+            log.warning("MCP tool %r timed out", getattr(underlying, "name", "mcp_tool"))
+            return f"Error: MCP tool {getattr(underlying, 'name', 'mcp_tool')!r} timed out"
+        except asyncio.CancelledError:
+            outcome = McpExecutionOutcome.CANCELLED
+            _state["last_outcome"] = outcome
+            log.warning("MCP tool %r cancelled", getattr(underlying, "name", "mcp_tool"))
+            raise
+        except Exception as e:
+            outcome = McpExecutionOutcome.TOOL_ERROR
+            _state["last_outcome"] = outcome
+            log.warning("MCP tool %r failed with exception: %s", getattr(underlying, "name", "mcp_tool"), e)
+            raise
+
+        # 5. MCP Protocol / Execution Status Inspection
+        if isinstance(res, dict) and (res.get("isError") or res.get("is_error")):
+            outcome = McpExecutionOutcome.TOOL_ERROR
+        elif isinstance(res, str) and res.startswith("Error: MCP tool") and "timed out after" in res:
+            outcome = McpExecutionOutcome.TIMEOUT
+        elif isinstance(res, str) and (res.startswith("Error executing MCP tool:") or res.startswith("Error:")):
+            outcome = McpExecutionOutcome.TOOL_ERROR
+        elif isinstance(res, str) and res.startswith("Not permitted:") and cfg and cfg.get("required_entitlements"):
+            outcome = McpExecutionOutcome.PERMISSION_DENIED
+        else:
+            outcome = McpExecutionOutcome.SUCCESS
+
+        _state["last_outcome"] = outcome
+
+        # 6. Schedule learning ONLY on authoritative SUCCESS
+        if outcome == McpExecutionOutcome.SUCCESS:
+            try:
+                from alberto.services.mcp_learning import McpLearningService
+
+                asyncio.create_task(
+                    McpLearningService.schedule_tool_learning(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        client_id=client_row.id if client_row else "unknown",
+                        client_name=client_row.name if client_row else "unknown",
+                        tool_name=underlying.name,
+                        tool_input=kwargs,
+                        tool_output=res,
+                        execution_outcome=outcome,
+                    )
+                )
+            except Exception as e:
+                log.debug("Tool learning hook skipped: %s", e)
+
+        return res
+
+    def _sync(**kwargs):
+        outcome = McpExecutionOutcome.UNKNOWN
+
+        # 1. Tenant / Client Authorization Check
+        if client_row and getattr(client_row, "tenant_id", None) and client_row.tenant_id != tenant_id:
+            outcome = McpExecutionOutcome.PERMISSION_DENIED
+            _state["last_outcome"] = outcome
+            return f"Not permitted: tenant mismatch for MCP client {getattr(client_row, 'id', '')}"
+
+        if client_row and not getattr(client_row, "enabled", True):
+            outcome = McpExecutionOutcome.PERMISSION_DENIED
+            _state["last_outcome"] = outcome
+            return f"Not permitted: MCP client {getattr(client_row, 'name', '')} is disabled"
+
+        # 2. Entitlement / Permission Check
+        if cfg and cfg.get("required_entitlements"):
+            denial = entitlement_denial(cfg, ctx)
+            if denial:
+                outcome = McpExecutionOutcome.PERMISSION_DENIED
+                _state["last_outcome"] = outcome
+                return denial
+
+        # 3. HITL Approval Check
+        requires_approval = bool(
+            (cfg and cfg.get("requires_approval"))
+            or (getattr(client_row, "requires_approval", None) is True)
+            or (getattr(ctx, "requires_approval", None) is True)
+        )
+        if requires_approval:
+            if ctx and getattr(ctx, "approval_decision", None) == "reject":
+                outcome = McpExecutionOutcome.APPROVAL_REJECTED
+                _state["last_outcome"] = outcome
+                return "[human decision] reject: tool execution rejected by reviewer"
+            approved = False
+            if ctx and getattr(ctx, "approval_granted", None) is True:
+                approved = True
+            elif ctx and callable(getattr(ctx, "is_approved", None)) and ctx.is_approved(underlying.name, kwargs) is True:
+                approved = True
+
+            if not approved:
+                outcome = McpExecutionOutcome.APPROVAL_REJECTED
+                _state["last_outcome"] = outcome
+                return "[human decision] reject: tool approval required but absent"
+
+        # 4. Actual Tool Execution
+        try:
+            res = underlying.invoke(kwargs)
+        except TimeoutError:
+            outcome = McpExecutionOutcome.TIMEOUT
+            _state["last_outcome"] = outcome
+            log.warning("MCP tool %r timed out", getattr(underlying, "name", "mcp_tool"))
+            return f"Error: MCP tool {getattr(underlying, 'name', 'mcp_tool')!r} timed out"
+        except Exception as e:
+            outcome = McpExecutionOutcome.TOOL_ERROR
+            _state["last_outcome"] = outcome
+            log.warning("MCP tool %r failed with exception: %s", getattr(underlying, "name", "mcp_tool"), e)
+            raise
+
+        # 5. MCP Protocol / Status Inspection
+        if isinstance(res, dict) and (res.get("isError") or res.get("is_error")):
+            outcome = McpExecutionOutcome.TOOL_ERROR
+        elif isinstance(res, str) and res.startswith("Error: MCP tool") and "timed out after" in res:
+            outcome = McpExecutionOutcome.TIMEOUT
+        elif isinstance(res, str) and (res.startswith("Error executing MCP tool:") or res.startswith("Error:")):
+            outcome = McpExecutionOutcome.TOOL_ERROR
+        elif isinstance(res, str) and res.startswith("Not permitted:") and cfg and cfg.get("required_entitlements"):
+            outcome = McpExecutionOutcome.PERMISSION_DENIED
+        else:
+            outcome = McpExecutionOutcome.SUCCESS
+
+        _state["last_outcome"] = outcome
+
+        # 6. Schedule learning ONLY on authoritative SUCCESS
+        if outcome == McpExecutionOutcome.SUCCESS:
+            try:
+                from alberto.services.mcp_learning import McpLearningService
+
+                asyncio.create_task(
+                    McpLearningService.schedule_tool_learning(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        client_id=client_row.id if client_row else "unknown",
+                        client_name=client_row.name if client_row else "unknown",
+                        tool_name=underlying.name,
+                        tool_input=kwargs,
+                        tool_output=res,
+                        execution_outcome=outcome,
+                    )
+                )
+            except Exception as e:
+                log.debug("Tool learning hook skipped: %s", e)
+
+        return res
+
+    st = StructuredTool.from_function(
+        func=_sync,
+        coroutine=_call,
+        name=underlying.name,
+        description=underlying.description,
+        args_schema=underlying.args_schema,
+    )
+    st_dict = getattr(st, "__dict__", None)
+    if st_dict is not None:
+        st_dict["_execution_state"] = _state
+    return st
+
+
 async def server_tools(client_row: McpClient, tenant_id: str, project_id: str,
                        context: dict | None = None) -> list:
     """Native LangChain tools a server exposes, minus the ones toggled off (disabled_tools).
@@ -553,7 +825,8 @@ async def server_tools(client_row: McpClient, tenant_id: str, project_id: str,
     _client, tools = await _client_and_tools(client_row, tenant_id, project_id, context)
     disabled = set(getattr(client_row, "disabled_tools", None) or [])
     active = [t for t in tools if t.name not in disabled]
-    return [_wrap_with_timeout(t) for t in active]
+    wrapped = [_wrap_with_timeout(t) for t in active]
+    return [_wrap_with_learning_hook(t, client_row, tenant_id, project_id) for t in wrapped]
 
 
 def auth_context_from(ctx) -> dict:
@@ -611,32 +884,7 @@ async def load_mcp_tool(cfg: dict, ctx) -> Any:
     inject = cfg.get("inject_context") or []
     tool = _wrap_with_context_injection(match, inject) if inject else match
     tool = _wrap_with_timeout(tool, cfg.get("timeout_seconds"))
-    from alberto.tools.materialize import entitlement_denial
-
-    if cfg.get("required_entitlements"):
-        from langchain_core.tools import StructuredTool
-        underlying = tool
-
-        async def _gated_call(**kwargs):
-            denial = entitlement_denial(cfg, ctx)
-            if denial:
-                return denial
-            return await underlying.ainvoke(kwargs)
-
-        def _gated_sync(**kwargs):
-            denial = entitlement_denial(cfg, ctx)
-            if denial:
-                return denial
-            return underlying.invoke(kwargs)
-
-        return StructuredTool.from_function(
-            func=_gated_sync,
-            coroutine=_gated_call,
-            name=underlying.name,
-            description=underlying.description,
-            args_schema=underlying.args_schema,
-        )
-    return tool
+    return _wrap_with_learning_hook(tool, row, ctx.tenant_id, ctx.project_id, cfg=cfg, ctx=ctx)
 
 
 def build_mcp_tool(cfg: dict, ctx):

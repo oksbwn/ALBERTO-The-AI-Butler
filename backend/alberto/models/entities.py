@@ -257,6 +257,11 @@ class McpClient(PkTimestamp, Base):
     # that accept a static header secret. Nullable: existing rows and open servers are
     # unaffected, and `headers_ref` still works (both are merged, provider wins on conflict).
     auth_provider_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Milestone 2.2: MCP capability discovery and execution learning metadata
+    capabilities: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_discovered_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    schema_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    learning_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Thread(PkTimestamp, Base):

@@ -266,6 +266,8 @@ async def get_learning_settings(
     else:
         learning_enabled = getattr(settings, "memory_learning_enabled", False)
 
+    tool_learning_enabled = bool(proj.config.get("tool_execution_learning_enabled", False)) if proj and proj.config else False
+
     curator = (
         await session.execute(
             select(Agent).where(
@@ -289,10 +291,11 @@ async def get_learning_settings(
     curator_model = (curator.config.get("model") if curator and curator.config else "") or ""
     graph_model = (graph_mgr.config.get("model") if graph_mgr and graph_mgr.config else "") or ""
 
-    operational_state = "active" if learning_enabled else "disabled"
+    operational_state = "active" if learning_enabled or tool_learning_enabled else "disabled"
 
     return MemoryLearningSettingsOut(
         memory_learning_enabled=learning_enabled,
+        tool_execution_learning_enabled=tool_learning_enabled,
         memory_curator_model=curator_model,
         memory_curator_effective_model=curator_model or settings.default_model,
         graph_manager_model=graph_model,
@@ -321,9 +324,18 @@ async def update_learning_settings(
     if not proj:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    pcfg = dict(proj.config or {})
+    modified = False
+
     if body.memory_learning_enabled is not None:
-        pcfg = dict(proj.config or {})
         pcfg["memory_learning_enabled"] = body.memory_learning_enabled
+        modified = True
+
+    if body.tool_execution_learning_enabled is not None:
+        pcfg["tool_execution_learning_enabled"] = body.tool_execution_learning_enabled
+        modified = True
+
+    if modified:
         proj.config = pcfg
         await session.commit()
 

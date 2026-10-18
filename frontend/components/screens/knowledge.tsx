@@ -779,6 +779,22 @@ function KnowledgeGraphView({ project }: { project: any }) {
     }
   };
 
+  const toggleToolLearning = async () => {
+    if (!project?.id || !learningSettings) return;
+    setTogglingLearning(true);
+    try {
+      const updated = await api.updateMemoryLearningSettings(project.id, {
+        tool_execution_learning_enabled: !learningSettings.tool_execution_learning_enabled,
+      });
+      setLearningSettings(updated);
+      reload();
+    } catch (e: any) {
+      alert(`Failed to update tool learning settings: ${e?.message || e}`);
+    } finally {
+      setTogglingLearning(false);
+    }
+  };
+
   const handleApprove = async (eventId: string) => {
     if (!project?.id) return;
     try {
@@ -994,6 +1010,36 @@ function KnowledgeGraphView({ project }: { project: any }) {
             disabled={togglingLearning}
           >
             {learningSettings?.memory_learning_enabled ? "Disable Learning" : "Enable Learning"}
+          </button>
+        </div>
+      </div>
+
+      {/* 3b. MCP Tool Execution Learning Control (Milestone 2.2) */}
+      <div className="card" style={{ padding: 20 }}>
+        <div className="row spread" style={{ alignItems: "flex-start" }}>
+          <div>
+            <div className="row gap2" style={{ alignItems: "center" }}>
+              <span className="t-h2">MCP Tool Execution Learning</span>
+              <span
+                className="badge"
+                style={{
+                  background: learningSettings?.tool_execution_learning_enabled ? "rgba(34, 197, 94, 0.15)" : "rgba(107, 114, 128, 0.2)",
+                  color: learningSettings?.tool_execution_learning_enabled ? "var(--ok, #22c55e)" : "var(--fg-2)",
+                }}
+              >
+                {learningSettings?.tool_execution_learning_enabled ? "Enabled" : "Disabled (Default)"}
+              </span>
+            </div>
+            <div className="fg-2 t-caption" style={{ marginTop: 4, maxWidth: 640 }}>
+              Milestone 2.2: Opportunistic learning from authorized MCP tool executions. When enabled for project and integration, Alberto extracts durable inventory and environment knowledge from successful tool observations without background polling.
+            </div>
+          </div>
+          <button
+            className={`btn btn-sm ${learningSettings?.tool_execution_learning_enabled ? "btn-secondary" : "btn-primary"}`}
+            onClick={toggleToolLearning}
+            disabled={togglingLearning}
+          >
+            {learningSettings?.tool_execution_learning_enabled ? "Disable Tool Learning" : "Enable Tool Learning"}
           </button>
         </div>
       </div>

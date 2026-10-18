@@ -61,11 +61,14 @@ class MemoryService:
                     embeddings=[emb],
                     documents=[text],
                     metadatas=[{
+                        "record_id": m.id,
                         "tenant_id": tenant_id,
                         "project_id": project_id,
                         "scope": m.scope,
                         "kind": m.kind,
                         "status": m.status,
+                        "provenance": m.provenance,
+                        "source_ref": m.source_ref or "",
                     }],
                 )
             except Exception:  # noqa: BLE001 - store unavailable; row still persists
@@ -86,15 +89,29 @@ class MemoryService:
 
         embedder = await KnowledgeService.embedder_for_project(session, tenant_id, project_id)
         emb = await embedder.aembed_query(query)
+        # Push tenant_id, project_id, scope, and status=active directly to vector store query
         where = {"$and": [
             {"tenant_id": {"$eq": tenant_id}},
             {"project_id": {"$eq": project_id}},
             {"scope": {"$eq": scope or "default"}},
+            {"status": {"$eq": "active"}},
         ]}
         try:
             hits = MemoryService._store(embedder).query_where(embedding=emb, where=where, top_k=top_k * 2)
         except Exception:  # noqa: BLE001
-            return []
+            hits = []
+
+        # Backward compatibility for legacy collections indexed without status metadata
+        if not hits:
+            legacy_where = {"$and": [
+                {"tenant_id": {"$eq": tenant_id}},
+                {"project_id": {"$eq": project_id}},
+                {"scope": {"$eq": scope or "default"}},
+            ]}
+            try:
+                hits = MemoryService._store(embedder).query_where(embedding=emb, where=legacy_where, top_k=top_k * 2)
+            except Exception:  # noqa: BLE001
+                hits = []
 
         # Filter by active status from authoritative SQLite database
         hit_ids = [h.id for h in hits if h.id]

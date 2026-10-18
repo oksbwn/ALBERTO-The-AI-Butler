@@ -129,6 +129,7 @@ class MemoryLearningSettingsIn(BaseModel):
     """Update memory learning configuration and model overrides."""
 
     memory_learning_enabled: bool | None = None
+    tool_execution_learning_enabled: bool | None = None
     memory_curator_model: str | None = None
     graph_manager_model: str | None = None
 
@@ -137,6 +138,7 @@ class MemoryLearningSettingsOut(BaseModel):
     """Current memory learning configuration and status."""
 
     memory_learning_enabled: bool
+    tool_execution_learning_enabled: bool = False
     memory_curator_model: str
     memory_curator_effective_model: str
     graph_manager_model: str

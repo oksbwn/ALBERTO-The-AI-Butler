@@ -9,7 +9,9 @@ Responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -21,6 +23,7 @@ from alberto.knowledge.graph import GraphEntity, get_graph_adapter, make_entity_
 from alberto.models import Memory, QaPair
 from alberto.services.knowledge import KnowledgeService
 from alberto.services.memory import MemoryService
+from alberto.services.retrieval_policy import RetrievalPolicy
 
 logger = logging.getLogger("alberto.services.unified_memory")
 
@@ -53,6 +56,193 @@ class UnifiedMemoryManager:
     """Coordinates Alberto's 4 memory storage engines."""
 
     @staticmethod
+    async def _fetch_memory(
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        query: str,
+        scope: str,
+        top_k: int,
+    ) -> list[UnifiedMemoryRecord]:
+        hits: list[UnifiedMemoryRecord] = []
+        try:
+            mem_texts = await MemoryService.recall(
+                session, tenant_id, project_id, query, scope=scope, top_k=top_k
+            )
+            for i, text in enumerate(mem_texts):
+                hits.append(
+                    UnifiedMemoryRecord(
+                        source="chroma_memory",
+                        record_id=f"mem_hit_{i}",
+                        content=text,
+                        metadata={"scope": scope},
+                        provenance="semantic_recall",
+                    )
+                )
+        except Exception as e:
+            logger.warning("MemoryService recall error: %s", e)
+
+        if not hits:
+            try:
+                all_active = await MemoryService.list(session, tenant_id, project_id, status="active")
+                query_lower = query.lower()
+                query_words = {w for w in query_lower.split() if len(w) > 2}
+                for mem in all_active:
+                    mem_lower = mem.text.lower()
+                    mem_words = set(mem_lower.split())
+                    if (query_words & mem_words) or (mem_lower in query_lower) or (query_lower in mem_lower):
+                        hits.append(
+                            UnifiedMemoryRecord(
+                                source="sqlite_memory",
+                                record_id=mem.id,
+                                content=mem.text,
+                                metadata={"scope": mem.scope, "kind": mem.kind},
+                                provenance=mem.provenance,
+                            )
+                        )
+                        if len(hits) >= top_k:
+                            break
+            except Exception as e:
+                logger.warning("SQLite memory fallback recall error: %s", e)
+        return hits
+
+    @staticmethod
+    async def _fetch_graph(
+        tenant_id: str,
+        project_id: str,
+        query: str,
+        top_k: int,
+    ) -> list[UnifiedMemoryRecord]:
+        hits: list[UnifiedMemoryRecord] = []
+        try:
+            adapter = get_graph_adapter()
+            entities = await adapter.find_entities(tenant_id, project_id, limit=top_k * 2)
+            query_lower = query.lower()
+            for ent in entities:
+                if (
+                    ent.name.lower() in query_lower
+                    or query_lower in ent.name.lower()
+                    or (ent.description and query_lower in ent.description.lower())
+                ):
+                    hits.append(
+                        UnifiedMemoryRecord(
+                            source="ladybug_graph",
+                            record_id=ent.id,
+                            content=f"Entity [{ent.kind}] {ent.name}: {ent.description}".strip(),
+                            score=ent.confidence,
+                            metadata={
+                                "kind": ent.kind,
+                                "name": ent.name,
+                                "canonical_name": ent.canonical_name,
+                            },
+                            provenance=ent.source,
+                        )
+                    )
+                    if len(hits) >= top_k * 2:
+                        break
+        except Exception as e:
+            logger.warning("LadybugGraphAdapter recall error: %s", e)
+        return hits
+
+    @staticmethod
+    async def _fetch_qa(
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        query: str,
+        top_k: int,
+    ) -> list[UnifiedMemoryRecord]:
+        hits: list[UnifiedMemoryRecord] = []
+        try:
+            qa_hits = await KnowledgeService.top_qa(
+                session, tenant_id, project_id, query, top_k=top_k
+            )
+            for i, qa in enumerate(qa_hits):
+                hits.append(
+                    UnifiedMemoryRecord(
+                        source="qa_pairs",
+                        record_id=f"qa_hit_{i}",
+                        content=f"Q: {qa.get('question', '')}\nA: {qa.get('answer', '')}",
+                        score=qa.get("score"),
+                        metadata={
+                            "kind": qa.get("kind"),
+                            "question": qa.get("question"),
+                            "answer": qa.get("answer"),
+                        },
+                        provenance="curated_qa",
+                    )
+                )
+        except Exception as e:
+            logger.warning("KnowledgeService top_qa error: %s", e)
+        return hits
+
+    @staticmethod
+    async def _fetch_knowledge(
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        query: str,
+        top_k: int,
+    ) -> list[UnifiedMemoryRecord]:
+        hits: list[UnifiedMemoryRecord] = []
+        try:
+            doc_hits = await KnowledgeService.search(
+                session, tenant_id, project_id, query, top_k=top_k
+            )
+            for hit in doc_hits:
+                meta = hit.metadata or {}
+                source_id = meta.get("source_id", "unknown")
+                hits.append(
+                    UnifiedMemoryRecord(
+                        source="knowledge_docs",
+                        record_id=hit.id,
+                        content=hit.text,
+                        score=hit.score,
+                        metadata=meta,
+                        provenance=f"document_rag:{source_id}",
+                    )
+                )
+        except Exception as e:
+            logger.warning("KnowledgeService search error: %s", e)
+        return hits
+
+    @staticmethod
+    async def _fetch_markdown(
+        tenant_id: str,
+        project_id: str,
+        query: str,
+        top_k: int,
+    ) -> list[UnifiedMemoryRecord]:
+        hits: list[UnifiedMemoryRecord] = []
+        try:
+            from alberto.services.markdown_memory import MarkdownMemoryService
+
+            files = MarkdownMemoryService.list_files(tenant_id, project_id)
+            q_lower = query.lower()
+            for f_info in files:
+                content = MarkdownMemoryService.read_file(tenant_id, project_id, f_info["filename"])
+                if not content:
+                    continue
+                for line in content.splitlines():
+                    if line.startswith("- [mem:") and (q_lower in line.lower() or any(w in line.lower() for w in q_lower.split() if len(w) > 3)):
+                        clean_text = line.lstrip("- ").strip()
+                        hits.append(
+                            UnifiedMemoryRecord(
+                                source="markdown_memory",
+                                record_id=f"md_{f_info['filename']}",
+                                content=clean_text,
+                                score=0.9,
+                                metadata={"filename": f_info["filename"], "category": f_info["category"]},
+                                provenance=f"markdown:{f_info['filename']}",
+                            )
+                        )
+                        if len(hits) >= top_k * 2:
+                            break
+        except Exception as e:
+            logger.warning("Markdown memory recall error: %s", e)
+        return hits
+
+    @staticmethod
     async def recall(
         session: AsyncSession,
         tenant_id: str,
@@ -62,170 +252,133 @@ class UnifiedMemoryManager:
         sources: list[str] | None = None,
         scope: str = "default",
         top_k: int = 5,
+        per_source_timeout: float = 4.0,
+        overall_timeout: float = 8.0,
     ) -> list[UnifiedMemoryRecord]:
         """Unified memory retrieval across active stores (SQLite, Chroma, LadybugDB).
-        Scores are source-specific and kept distinct with source attribution."""
-        enabled_sources = set(sources or ["memory", "graph"])
-        results: list[UnifiedMemoryRecord] = []
+        Executes independent sources concurrently with per-source timeouts, bounded concurrency,
+        staged dependency lookups, and bounded fallback."""
+        start_time = time.monotonic()
 
-        # 1. SQLite + Chroma persistent long-term memories
-        if "memory" in enabled_sources or "sqlite" in enabled_sources:
+        # 1. Source selection: respect explicit sources if provided, else apply RetrievalPolicy
+        if sources is not None:
+            enabled_sources = set(sources)
+        else:
+            selected = RetrievalPolicy.select_sources(query)
+            # If policy returns empty (e.g. general question), return immediately with zero store queries
+            if not selected:
+                logger.info("Retrieval policy selected 0 sources for query %r (general question)", query[:50])
+                return []
+            enabled_sources = set(selected)
+
+        logger.info("Executing retrieval for query %r with selected sources: %s", query[:50], list(enabled_sources))
+
+        async def _run_with_timeout(coro, source_name: str) -> list[UnifiedMemoryRecord]:
             try:
-                # Semantic recall via Chroma-backed MemoryService
-                mem_texts = await MemoryService.recall(
-                    session, tenant_id, project_id, query, scope=scope, top_k=top_k
-                )
-                for i, text in enumerate(mem_texts):
-                    results.append(
-                        UnifiedMemoryRecord(
-                            source="chroma_memory",
-                            record_id=f"mem_hit_{i}",
-                            content=text,
-                            metadata={"scope": scope},
-                            provenance="semantic_recall",
-                        )
+                async with asyncio.timeout(per_source_timeout):
+                    return await coro
+            except TimeoutError:
+                logger.warning("Retrieval source %s timed out after %.1fs", source_name, per_source_timeout)
+                return []
+            except Exception as e:
+                logger.warning("Retrieval source %s failed: %s", source_name, e)
+                return []
+
+        async def _query_sources(target_sources: set[str]) -> list[UnifiedMemoryRecord]:
+            tasks = []
+            if "memory" in target_sources or "sqlite" in target_sources:
+                tasks.append(_run_with_timeout(
+                    UnifiedMemoryManager._fetch_memory(session, tenant_id, project_id, query, scope, top_k),
+                    "memory",
+                ))
+            if "graph" in target_sources or "ladybug" in target_sources:
+                tasks.append(_run_with_timeout(
+                    UnifiedMemoryManager._fetch_graph(tenant_id, project_id, query, top_k),
+                    "graph",
+                ))
+            if "qa" in target_sources or "faq" in target_sources or "qa_pairs" in target_sources:
+                tasks.append(_run_with_timeout(
+                    UnifiedMemoryManager._fetch_qa(session, tenant_id, project_id, query, top_k),
+                    "qa",
+                ))
+            if any(s in target_sources for s in ("knowledge", "documents", "document", "rag")):
+                tasks.append(_run_with_timeout(
+                    UnifiedMemoryManager._fetch_knowledge(session, tenant_id, project_id, query, top_k),
+                    "knowledge",
+                ))
+            if "markdown" in target_sources or "notes" in target_sources:
+                tasks.append(_run_with_timeout(
+                    UnifiedMemoryManager._fetch_markdown(tenant_id, project_id, query, top_k),
+                    "markdown",
+                ))
+
+            if not tasks:
+                return []
+
+            collected: list[UnifiedMemoryRecord] = []
+            try:
+                async with asyncio.timeout(overall_timeout):
+                    sub_results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for res in sub_results:
+                        if isinstance(res, list):
+                            collected.extend(res)
+                        elif isinstance(res, Exception):
+                            logger.warning("Error in concurrent source retrieval: %s", res)
+            except TimeoutError:
+                logger.warning("Overall retrieval timed out after %.1fs; returning partial results", overall_timeout)
+            return collected
+
+        # 2. Execute independent sources concurrently
+        results = await _query_sources(enabled_sources)
+
+        # 3. Staged dependency check:
+        # If graph was queried or query implies entity relations, and memory recall returned entities
+        # that graph didn't find directly from the user query text, do a targeted graph lookup.
+        if ("graph" in enabled_sources or "ladybug" in enabled_sources) and results:
+            graph_hits = [r for r in results if r.source == "ladybug_graph"]
+            if not graph_hits:
+                # Look for named devices/servers/entities in memory results
+                entity_candidates: set[str] = set()
+                for r in results:
+                    if r.source in ("chroma_memory", "sqlite_memory"):
+                        import re
+                        words = re.findall(r"\b[A-Z][a-zA-Z0-9_\-\.]{2,}\b", r.content)
+                        entity_candidates.update(words)
+                for cand in list(entity_candidates)[:3]:
+                    staged_hits = await _run_with_timeout(
+                        UnifiedMemoryManager._fetch_graph(tenant_id, project_id, cand, top_k=2),
+                        f"staged_graph:{cand}",
                     )
-            except Exception as e:
-                logger.warning("MemoryService recall error: %s", e)
+                    if staged_hits:
+                        results.extend(staged_hits)
+                        break
 
-            # Direct SQLite fallback if vector store yields no hits or is unavailable
-            if not any(r.source == "chroma_memory" for r in results):
-                try:
-                    all_active = await MemoryService.list(session, tenant_id, project_id, status="active")
-                    query_lower = query.lower()
-                    query_words = {w for w in query_lower.split() if len(w) > 2}
-                    for mem in all_active:
-                        mem_lower = mem.text.lower()
-                        mem_words = set(mem_lower.split())
-                        if (query_words & mem_words) or (mem_lower in query_lower) or (query_lower in mem_lower):
-                            results.append(
-                                UnifiedMemoryRecord(
-                                    source="sqlite_memory",
-                                    record_id=mem.id,
-                                    content=mem.text,
-                                    metadata={"scope": mem.scope, "kind": mem.kind},
-                                    provenance=mem.provenance,
-                                )
-                            )
-                            if len(results) >= top_k:
-                                break
-                except Exception as e:
-                    logger.warning("SQLite memory fallback recall error: %s", e)
+        # 4. Bounded Fallback:
+        # If selected sources returned zero results, broaden retrieval using bounded fallback rules
+        if not results:
+            fallback_sources = set(RetrievalPolicy.get_fallback_sources(list(enabled_sources), 0)) - enabled_sources
+            if fallback_sources:
+                logger.info("Selected sources returned 0 results; running bounded fallback to: %s", list(fallback_sources))
+                fallback_results = await _query_sources(fallback_sources)
+                results.extend(fallback_results)
 
-        # 2. LadybugDB Knowledge Graph
-        if "graph" in enabled_sources or "ladybug" in enabled_sources:
-            try:
-                adapter = get_graph_adapter()
-                # Find entities whose name or description matches query terms
-                entities = await adapter.find_entities(tenant_id, project_id, limit=top_k * 2)
-                query_lower = query.lower()
-                for ent in entities:
-                    if (
-                        ent.name.lower() in query_lower
-                        or query_lower in ent.name.lower()
-                        or (ent.description and query_lower in ent.description.lower())
-                    ):
-                        results.append(
-                            UnifiedMemoryRecord(
-                                source="ladybug_graph",
-                                record_id=ent.id,
-                                content=f"Entity [{ent.kind}] {ent.name}: {ent.description}".strip(),
-                                score=ent.confidence,
-                                metadata={
-                                    "kind": ent.kind,
-                                    "name": ent.name,
-                                    "canonical_name": ent.canonical_name,
-                                },
-                                provenance=ent.source,
-                            )
-                        )
-                        if len(results) >= top_k * 2:
-                            break
-            except Exception as e:
-                logger.warning("LadybugGraphAdapter recall error: %s", e)
+        # 5. Deduplicate results across sources based on content
+        deduped: list[UnifiedMemoryRecord] = []
+        seen_contents: set[str] = set()
+        for r in results:
+            clean = r.content.strip().lower()
+            if clean and clean not in seen_contents:
+                seen_contents.add(clean)
+                deduped.append(r)
 
-        # 3. Curated Q&A pairs
-        if "qa" in enabled_sources or "faq" in enabled_sources or "qa_pairs" in enabled_sources:
-            try:
-                qa_hits = await KnowledgeService.top_qa(
-                    session, tenant_id, project_id, query, top_k=top_k
-                )
-                for i, qa in enumerate(qa_hits):
-                    results.append(
-                        UnifiedMemoryRecord(
-                            source="qa_pairs",
-                            record_id=f"qa_hit_{i}",
-                            content=f"Q: {qa.get('question', '')}\nA: {qa.get('answer', '')}",
-                            score=qa.get("score"),
-                            metadata={
-                                "kind": qa.get("kind"),
-                                "question": qa.get("question"),
-                                "answer": qa.get("answer"),
-                            },
-                            provenance="curated_qa",
-                        )
-                    )
-            except Exception as e:
-                logger.warning("KnowledgeService top_qa error: %s", e)
-
-        # 4. Existing document / RAG retrieval
-        if (
-            "knowledge" in enabled_sources
-            or "documents" in enabled_sources
-            or "document" in enabled_sources
-            or "rag" in enabled_sources
-        ):
-            try:
-                doc_hits = await KnowledgeService.search(
-                    session, tenant_id, project_id, query, top_k=top_k
-                )
-                for hit in doc_hits:
-                    meta = hit.metadata or {}
-                    source_id = meta.get("source_id", "unknown")
-                    results.append(
-                        UnifiedMemoryRecord(
-                            source="knowledge_docs",
-                            record_id=hit.id,
-                            content=hit.text,
-                            score=hit.score,
-                            metadata=meta,
-                            provenance=f"document_rag:{source_id}",
-                        )
-                    )
-            except Exception as e:
-                logger.warning("KnowledgeService search error: %s", e)
-
-        # 5. Markdown memory retrieval
-        if "markdown" in enabled_sources or "notes" in enabled_sources:
-            try:
-                from alberto.services.markdown_memory import MarkdownMemoryService
-
-                files = MarkdownMemoryService.list_files(tenant_id, project_id)
-                q_lower = query.lower()
-                for f_info in files:
-                    content = MarkdownMemoryService.read_file(tenant_id, project_id, f_info["filename"])
-                    if not content:
-                        continue
-                    for line in content.splitlines():
-                        if line.startswith("- [mem:") and (q_lower in line.lower() or any(w in line.lower() for w in q_lower.split() if len(w) > 3)):
-                            clean_text = line.lstrip("- ").strip()
-                            results.append(
-                                UnifiedMemoryRecord(
-                                    source="markdown_memory",
-                                    record_id=f"md_{f_info['filename']}",
-                                    content=clean_text,
-                                    score=0.9,
-                                    metadata={"filename": f_info["filename"], "category": f_info["category"]},
-                                    provenance=f"markdown:{f_info['filename']}",
-                                )
-                            )
-                            if len(results) >= top_k * 2:
-                                break
-            except Exception as e:
-                logger.warning("Markdown memory recall error: %s", e)
-
-        max_allowed = top_k if len(enabled_sources) == 1 else top_k * len(enabled_sources)
-        return results[:max_allowed]
+        elapsed = time.monotonic() - start_time
+        max_allowed = top_k if len(enabled_sources) == 1 else top_k * max(1, len(enabled_sources))
+        final_results = deduped[:max_allowed]
+        logger.info(
+            "UnifiedMemoryManager recall completed in %.3fs: %d results (max %d)",
+            elapsed, len(final_results), max_allowed,
+        )
+        return final_results
 
     @staticmethod
     async def remember(
@@ -291,6 +444,13 @@ class UnifiedMemoryManager:
         except Exception as e:
             logger.warning("Markdown memory sync warning: %s", e)
 
+        # Invalidate active per-turn retrieval cache on new memory
+        try:
+            from alberto.nodes.agent_node import MemoryRecallMiddleware
+            MemoryRecallMiddleware.invalidate_cache(tenant_id=tenant_id, project_id=project_id)
+        except Exception as e:
+            logger.debug("MemoryRecallMiddleware cache invalidation note: %s", e)
+
         return {"target": "memory", "id": m.id, "scope": m.scope, "text": m.text, "status": m.status}
 
     @staticmethod
@@ -353,6 +513,13 @@ class UnifiedMemoryManager:
                 )
             except Exception as e:
                 logger.warning("Markdown memory sync warning on update: %s", e)
+
+            # Invalidate active per-turn retrieval cache on memory update
+            try:
+                from alberto.nodes.agent_node import MemoryRecallMiddleware
+                MemoryRecallMiddleware.invalidate_cache(tenant_id=tenant_id, project_id=project_id)
+            except Exception as e:
+                logger.debug("MemoryRecallMiddleware cache invalidation note: %s", e)
         return m
 
     @staticmethod
@@ -408,6 +575,13 @@ class UnifiedMemoryManager:
                 except Exception as e:
                     logger.warning("Graph relationship cleanup warning on delete: %s", e)
 
+            # Invalidate active per-turn retrieval cache
+            try:
+                from alberto.nodes.agent_node import MemoryRecallMiddleware
+                MemoryRecallMiddleware.invalidate_cache(tenant_id=tenant_id, project_id=project_id)
+            except Exception as e:
+                logger.debug("MemoryRecallMiddleware cache invalidation note: %s", e)
+
         return deleted
 
     @staticmethod
@@ -437,7 +611,13 @@ class UnifiedMemoryManager:
         """Approve pending learning candidates in a review_required event."""
         from alberto.services.learning_coordinator import LearningCoordinator
 
-        return await LearningCoordinator.approve_event(session, tenant_id, project_id, event_id)
+        res = await LearningCoordinator.approve_event(session, tenant_id, project_id, event_id)
+        try:
+            from alberto.nodes.agent_node import MemoryRecallMiddleware
+            MemoryRecallMiddleware.invalidate_cache(tenant_id=tenant_id, project_id=project_id)
+        except Exception as e:
+            logger.debug("MemoryRecallMiddleware cache invalidation note: %s", e)
+        return res
 
     @staticmethod
     async def reject_learning_event(

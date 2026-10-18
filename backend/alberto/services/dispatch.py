@@ -253,3 +253,13 @@ async def _poll_app_event(run_service: RunService, trig) -> int:
             )
             count += 1
     return count
+
+
+async def run_due_source_syncs() -> int:
+    """Run due MCP source synchronization jobs across projects.
+    Executes configured sync workflows using existing scheduler loop."""
+    from alberto.services.source_sync import SourceSyncCoordinator
+
+    async with SessionLocal() as s:
+        results = await SourceSyncCoordinator.execute_due_sync_jobs(s)
+    return len([r for r in results if r.get("ok")])

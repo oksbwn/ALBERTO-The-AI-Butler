@@ -284,6 +284,7 @@ export interface MemoryRecordDetail {
 
 export interface MemoryLearningSettings {
   memory_learning_enabled: boolean;
+  tool_execution_learning_enabled?: boolean;
   memory_curator_model: string;
   memory_curator_effective_model: string;
   graph_manager_model: string;
@@ -613,6 +614,12 @@ export const api = {
     json<{ ok: boolean }>(`/v1/projects/${pid}/mcp-clients/${cid}`, { method: "DELETE" }),
   discoverMcpTools: (pid: string, cid: string) =>
     json<{ ok: boolean; tools?: { name: string; description?: string }[]; error?: string }>(`/v1/projects/${pid}/mcp-clients/${cid}/tools`),
+  refreshMcpCapabilities: (pid: string, cid: string) =>
+    json<{ ok: boolean; discovery?: any; client?: McpClientT; error?: string }>(`/v1/projects/${pid}/mcp-clients/${cid}/refresh`, { method: "POST" }),
+  updateMcpLearning: (pid: string, cid: string, learning_enabled: boolean) =>
+    json<{ ok: boolean; learning_enabled: boolean }>(`/v1/projects/${pid}/mcp-clients/${cid}/learning`, { method: "PATCH", body: JSON.stringify({ learning_enabled }) }),
+  getMcpCapabilities: (pid: string, cid: string) =>
+    json<{ ok: boolean; capabilities: Record<string, any>; schema_fingerprint?: string; last_discovered_at?: string; learning_enabled: boolean }>(`/v1/projects/${pid}/mcp-clients/${cid}/capabilities`),
 
   // --- Connectors ---------------------------------------------------------------------
   connectorCatalog: (pid: string) =>
@@ -718,7 +725,7 @@ export const api = {
     fetch(`${BASE}/v1/projects/${pid}/memory/records/${id}`, { method: "DELETE", headers: authHeader() }),
   getMemoryLearningSettings: (pid: string) =>
     json<MemoryLearningSettings>(`/v1/projects/${pid}/memory/learning/settings`),
-  updateMemoryLearningSettings: (pid: string, body: { memory_learning_enabled?: boolean; memory_curator_model?: string; graph_manager_model?: string }) =>
+  updateMemoryLearningSettings: (pid: string, body: { memory_learning_enabled?: boolean; tool_execution_learning_enabled?: boolean; memory_curator_model?: string; graph_manager_model?: string }) =>
     json<MemoryLearningSettings>(`/v1/projects/${pid}/memory/learning/settings`, { method: "PATCH", body: JSON.stringify(body) }),
   listLearningEvents: (pid: string, status?: string) =>
     json<LearningEventItem[]>(`/v1/projects/${pid}/memory/learning/events${status ? `?status=${status}` : ""}`),
@@ -924,6 +931,10 @@ export interface McpClientT {
   id: string; name: string; transport: string; url?: string | null; command?: string | null;
   args?: any; headers_ref?: string | null; enabled: boolean; disabled_tools?: string[];
   auth_provider_id?: string | null;
+  capabilities?: Record<string, any>;
+  last_discovered_at?: string | null;
+  schema_fingerprint?: string | null;
+  learning_enabled?: boolean;
   /** Set when a connector owns this server. Its actions are already offered as that connector's
    *  tool set, so tool pickers skip it rather than showing one integration as two choices. */
   connector_slug?: string | null;
