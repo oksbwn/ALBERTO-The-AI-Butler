@@ -185,13 +185,40 @@ def tool_call_factory(cfg: dict, ctx: CompileContext):
         # code/sql/mcp all go through one path with one error contract.
         tool = ctx.tool_registry.get(tool_id)
         if tool is None:
-            return {output_key: {"error": f"tool {tool_id} not available"}}
+            return {output_key: {"error": f"tool {tool_id} not available or inactive"}}
+
         args: dict[str, Any] = {}
         for k, expr in input_mapping.items():
             try:
                 args[k] = jmespath.search(expr, dict(state)) if isinstance(expr, str) else expr
             except jmespath.exceptions.JMESPathError:
                 args[k] = expr
+
+        # Enforce central execution policy (default-deny, activation, explicit association, and approval)
+        from alberto.services.tool_policy import ToolPolicyService
+
+        decision = await ToolPolicyService.evaluate_execution(
+            tenant_id=ctx.tenant_id,
+            project_id=ctx.project_id,
+            tool_id=tool_id,
+            caller_type="workflow",
+            user_context=ctx.end_user or {},
+            workflow_def={"nodes": [{"type": "tool_call", "config": {"tool_id": tool_id}}]},
+            execution_context={
+                "approved": state.get("approved") or state.get("human_approved"),
+                "approval_id": state.get("approval_id"),
+                "arguments": args,
+            },
+        )
+        if not decision.allowed:
+            return {
+                output_key: {
+                    "error": f"Tool execution policy violation: {decision.reason}",
+                    "requires_approval": decision.requires_approval,
+                    "tool_id": tool_id,
+                }
+            }
+
         try:
             out = await tool.ainvoke(args, config)
         except Exception as e:  # noqa: BLE001 - surface tool failure as a structured result
