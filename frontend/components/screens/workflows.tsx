@@ -1060,6 +1060,18 @@ function ToolPicker({ tools, toolSets, value, onChange }: {
           <span>from <strong style={{ color: "var(--fg-1)" }}>{selectedGroup.label}</strong></span>
         </div>
       )}
+      {selected && !selected.enabled && (
+        <div className="row gap1" style={{ fontSize: 11.5, color: "#ef4444", marginTop: 2 }}>
+          <Icon name="alert" size={12} />
+          <span>This tool is disabled or inactive. Enable it in Integrations to execute.</span>
+        </div>
+      )}
+      {selected && selected.enabled && Boolean((selected as any).config?.requires_approval) && (
+        <div className="row gap1" style={{ fontSize: 11.5, color: "#f59e0b", marginTop: 2 }}>
+          <Icon name="shield" size={12} />
+          <span>Execution requires human-in-the-loop approval.</span>
+        </div>
+      )}
     </div>
   );
 }

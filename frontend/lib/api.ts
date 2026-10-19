@@ -382,6 +382,39 @@ export interface CuratorAdvisorySuggestion {
   requires_new_ontology_definition: boolean;
 }
 
+export interface ToolAnalysisResult {
+  tool_id: string;
+  category: string;
+  capabilities: string[];
+  effect: "read" | "write" | "delete" | "unknown";
+  risk: "low" | "medium" | "high" | "critical";
+  description: string;
+  similar_tool_ids: string[];
+  recommended_activation: "auto" | "manual_review" | "restricted";
+  confidence: number;
+  warnings: string[];
+}
+
+export interface ToolMatchSuggestion {
+  tool_id: string;
+  tool_name: string;
+  score: number;
+  reason: string;
+  capabilities: string[];
+  effect: "read" | "write" | "delete" | "unknown";
+  risk: "low" | "medium" | "high" | "critical";
+}
+
+export interface ToolDiagnosticReport {
+  tool_id: string;
+  tool_name: string;
+  health_status: "healthy" | "degraded" | "error" | "unknown";
+  failure_count: number;
+  root_cause_category: "none" | "auth" | "schema_mismatch" | "timeout" | "rate_limit" | "internal_error" | "network";
+  summary: string;
+  recommendations: string[];
+}
+
 export interface NodeApprovalEdit {
   temporary_id: string;
   name?: string;
@@ -785,6 +818,20 @@ export const api = {
     }),
   clearMyConnection: (pid: string, aid: string) =>
     fetch(`${BASE}/v1/projects/${pid}/connections/${aid}`, { method: "DELETE", headers: authHeader() }),
+
+  // Tool Manager system subagent
+  toolManagerAnalyze: (pid: string, body: { tool_id?: string; name?: string; description?: string; input_schema?: any; use_llm?: boolean }) =>
+    json<ToolAnalysisResult>(`/v1/projects/${pid}/tool-manager/analyze`, { method: "POST", body: JSON.stringify(body) }),
+  toolManagerSuggest: (pid: string, body: { intent: string; top_k?: number }) =>
+    json<ToolMatchSuggestion[]>(`/v1/projects/${pid}/tool-manager/suggest`, { method: "POST", body: JSON.stringify(body) }),
+  toolManagerDiagnose: (pid: string, body: { tool_id: string; recent_errors?: string[] }) =>
+    json<ToolDiagnosticReport>(`/v1/projects/${pid}/tool-manager/diagnose`, { method: "POST", body: JSON.stringify(body) }),
+  updateToolActivation: (pid: string, toolId: string, body: { enabled: boolean; requires_approval?: boolean }) =>
+    json<{ id: string; name: string; enabled: boolean; effect: string; risk: string; requires_approval: boolean }>(
+      `/v1/projects/${pid}/tool-manager/tools/${toolId}/activation`,
+      { method: "PATCH", body: JSON.stringify(body) }
+    ),
+
   // knowledge
   listSources: (pid: string) => json<KbSource[]>(`/v1/projects/${pid}/knowledge/sources`),
   listFolders: (pid: string) => json<string[]>(`/v1/projects/${pid}/knowledge/folders`),
@@ -1009,12 +1056,34 @@ export const api = {
     json<{ ok: boolean }>(`/v1/team/members/${uid}`, { method: "DELETE" }),
   // channels
   listChannels: (pid: string) => json<Channel[]>(`/v1/projects/${pid}/channels`),
-  createChannel: (pid: string, body: { type: string; name: string; workflow_id?: string; config?: Record<string, any> }) =>
+  createChannel: (pid: string, body: { type: string; name: string; workflow_id?: string; target_type?: string; target_id?: string; config?: Record<string, any> }) =>
     json<Channel>(`/v1/projects/${pid}/channels`, { method: "POST", body: JSON.stringify(body) }),
-  updateChannel: (pid: string, cid: string, body: { name?: string; workflow_id?: string; config?: Record<string, any>; enabled?: boolean }) =>
+  updateChannel: (pid: string, cid: string, body: { name?: string; workflow_id?: string; target_type?: string; target_id?: string; config?: Record<string, any>; enabled?: boolean }) =>
     json<Channel>(`/v1/projects/${pid}/channels/${cid}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteChannel: (pid: string, cid: string) =>
     json<{ ok: boolean }>(`/v1/projects/${pid}/channels/${cid}`, { method: "DELETE" }),
+  setChannelRouting: (pid: string, cid: string, body: { target_type: string; target_id?: string | null; routes?: any[] }) =>
+    json<Channel>(`/v1/projects/${pid}/channels/${cid}/routing`, { method: "PUT", body: JSON.stringify(body) }),
+  diagnoseChannel: (pid: string, cid: string) =>
+    json<ChannelDiagnostics>(`/v1/projects/${pid}/channels/${cid}/diagnostics`),
+  createChannelPairing: (pid: string, cid: string) =>
+    json<ChannelPairingOut>(`/v1/projects/${pid}/channels/${cid}/pairings`, { method: "POST" }),
+  confirmChannelPairing: (pid: string, body: { channel_id: string; code: string; external_user_id: string; display_label?: string }) =>
+    json<{ ok: boolean; identity_id: string }>(`/v1/projects/${pid}/channels/pairings/confirm`, { method: "POST", body: JSON.stringify(body) }),
+  listChannelIdentities: (pid: string, cid: string) =>
+    json<ChannelIdentityOut[]>(`/v1/projects/${pid}/channels/${cid}/identities`),
+  revokeChannelIdentity: (pid: string, cid: string, iid: string) =>
+    json<{ ok: boolean }>(`/v1/projects/${pid}/channels/${cid}/identities/${iid}`, { method: "DELETE" }),
+  sendChannelMessage: (pid: string, cid: string, body: { text: string; recipient: string; subject?: string; reply_to_message_id?: string }) =>
+    json<{ ok: boolean; delivery_id: string }>(`/v1/projects/${pid}/channels/${cid}/send`, { method: "POST", body: JSON.stringify(body) }),
+
+  // tool execution & HITL approvals
+  testToolSecured: (pid: string, tid: string, body: { args?: Record<string, any>; context?: Record<string, any>; approval_id?: string }) =>
+    json<any>(`/v1/projects/${pid}/tools/${tid}/test`, { method: "POST", body: JSON.stringify(body) }),
+  getApproval: (pid: string, aid: string) =>
+    json<any>(`/v1/projects/${pid}/integration-manager/approvals/${aid}`),
+  decideApproval: (pid: string, aid: string, body: { decision: "approve" | "reject" | "cancel"; notes?: string }) =>
+    json<{ ok: boolean; message: string; approval_id: string; status: string }>(`/v1/projects/${pid}/integration-manager/approvals/${aid}/decide`, { method: "POST", body: JSON.stringify(body) }),
   // triggers
   listTriggers: (pid: string) => json<Trigger[]>(`/v1/projects/${pid}/triggers`),
   /** Point a trigger at a person's connected accounts. Omit `userId` to claim it for yourself. */
@@ -1046,7 +1115,61 @@ export const api = {
 };
 
 export interface InviteResult extends TeamMember { email_sent: boolean; invite_url?: string; }
-export interface Channel { id: string; type: string; name: string; workflow_id?: string | null; enabled: boolean; config: Record<string, any>; key?: string | null; inbound_url?: string; }
+
+export interface ChannelRouteRule {
+  command?: string;
+  prefix?: string;
+  target_type: "master_agent" | "subagent" | "workflow";
+  target_id?: string | null;
+}
+
+export interface ChannelIdentityOut {
+  id: string;
+  channel_id: string;
+  external_user_id: string;
+  display_label?: string | null;
+  user_id: string;
+  paired_at: string;
+}
+
+export interface ChannelPairingOut {
+  channel_id: string;
+  code: string;
+  expires_at: string;
+  ttl_seconds: number;
+}
+
+export interface ChannelDiagnostics {
+  status: "ok" | "degraded" | "needs_review" | "error";
+  channel_id: string;
+  type: string;
+  routing_state: string;
+  effective_transport: string;
+  connected: boolean;
+  issues: string[];
+  recommendations: string[];
+  metrics: {
+    total_events: number;
+    failed_deliveries: number;
+    paired_identities: number;
+  };
+}
+
+export interface Channel {
+  id: string;
+  type: string;
+  name: string;
+  workflow_id?: string | null;
+  target_type?: "master_agent" | "subagent" | "workflow" | string;
+  target_id?: string | null;
+  routing_state?: "ok" | "needs_review" | string;
+  routes?: ChannelRouteRule[];
+  state?: Record<string, any>;
+  enabled: boolean;
+  config: Record<string, any>;
+  key?: string | null;
+  inbound_url?: string;
+}
 export interface Trigger {
   id: string; workflow_id: string; node_id: string; kind: string; enabled: boolean;
   config: Record<string, any>; webhook_url?: string; last_fired_at?: string | null;

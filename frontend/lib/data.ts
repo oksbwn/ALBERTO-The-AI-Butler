@@ -394,11 +394,10 @@ export const PROJECT_NAV: NavEntry[] = [
     icon: "plug",
     help: "Connectors, tools, and auth.",
     items: [
-      { id: "connectors", label: "Connectors", icon: "plug", countKey: "connectors", help: "Integrations (Slack, Gmail, IoT, etc.)." },
+      { id: "integrations", label: "Integrations", icon: "plug", countKey: "connectors", help: "Unified Integrations (Connectors, MCP, Channels, Custom API)." },
+      { id: "integrations-playground", label: "Playground", icon: "playground", help: "Interactive test bench for REST, MCP tools and channels with HITL approval." },
       { id: "tools", label: "Tools", icon: "tools", countKey: "tools", help: "REST, Code, SQL, and custom tools." },
-      { id: "auth", label: "Auth Providers", icon: "shield-check", countKey: "auth", help: "Credentials, OAuth, and API tokens." },
       { id: "triggers", label: "Triggers", icon: "bolt", help: "Webhooks, pollers, and scheduled routines." },
-      { id: "channels", label: "Channels", icon: "mail", help: "Email and communication channels." },
     ],
   },
   {
