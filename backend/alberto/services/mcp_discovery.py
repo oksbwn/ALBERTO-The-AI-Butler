@@ -142,17 +142,19 @@ class McpDiscoveryService:
         await session.commit()
         await session.refresh(client_row)
 
-        # Project capabilities into LadybugDB Knowledge Graph
+        # Project capabilities into LadybugDB Knowledge Graph via GraphManagerService
         try:
             from alberto.knowledge.graph import (
                 GraphEntity,
                 GraphRelationship,
-                get_graph_adapter,
                 make_entity_id,
                 make_relationship_id,
             )
+            from alberto.services.graph_manager import GraphManagerService
 
-            adapter = get_graph_adapter()
+            entities: list[GraphEntity] = []
+            relationships: list[GraphRelationship] = []
+
             # 1. Integration entity node
             integration_ent = GraphEntity(
                 id=make_entity_id(tenant_id, project_id, client_row.name),
@@ -165,7 +167,7 @@ class McpDiscoveryService:
                 source=f"mcp:{client_row.id}",
                 confidence=1.0,
             )
-            await adapter.create_or_update_entity(integration_ent)
+            entities.append(integration_ent)
 
             # 2. Capability entity nodes and PROVIDES relationships
             for t in discovered_tools:
@@ -181,7 +183,7 @@ class McpDiscoveryService:
                     source=f"mcp:{client_row.id}:{t['name']}",
                     confidence=1.0,
                 )
-                await adapter.create_or_update_entity(cap_ent)
+                entities.append(cap_ent)
 
                 rel = GraphRelationship(
                     id=make_relationship_id(tenant_id, project_id, integration_ent.id, cap_ent.id, "PROVIDES"),
@@ -193,9 +195,44 @@ class McpDiscoveryService:
                     source=f"mcp:{client_row.id}",
                     confidence=1.0,
                 )
-                await adapter.create_or_update_relationship(rel)
+                relationships.append(rel)
+
+            await GraphManagerService.apply_resolved(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                resolved_entities=entities,
+                resolved_relationships=relationships,
+            )
         except Exception as e:
-            logger.warning("Failed to project MCP capabilities to LadybugDB: %s", e)
+            logger.warning("Failed to project MCP capabilities to LadybugDB via GraphManagerService: %s", e)
+
+        # Trigger event-driven tool analysis in background if tools are present
+        try:
+            import asyncio
+
+            from sqlalchemy import select
+
+            from alberto.models import Tool
+            from alberto.services.tool_manager import ToolManagerService
+
+            t_rows = (await session.execute(
+                select(Tool.id).where(
+                    Tool.tenant_id == tenant_id,
+                    Tool.project_id == project_id,
+                    Tool.kind == "mcp",
+                )
+            )).scalars().all()
+            if t_rows:
+                asyncio.create_task(
+                    ToolManagerService.analyze_discovered_tools(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        tool_ids=list(t_rows),
+                        integration_name=client_row.name,
+                    )
+                )
+        except Exception as e:
+            logger.debug("Could not schedule MCP Tool Manager analysis: %s", e)
 
         return {
             "client_id": client_row.id,

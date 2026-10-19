@@ -82,10 +82,43 @@ async def list_clients(project_id: str, session: AsyncSession = Depends(get_sess
     return [{**_out(m), "connector_slug": owned.get(m.id)} for m in rows]
 
 
+def _validate_stdio_security(transport: str | None, command: str | None, user: CurrentUser) -> None:
+    if transport == "stdio":
+        from alberto.config import settings
+
+        if not settings.enable_mcp_stdio:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "MCP stdio transport is disabled by deployment policy (FORGE_ENABLE_MCP_STDIO=false).",
+            )
+        if getattr(user, "role", None) != "admin":
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Configuring MCP stdio executable commands requires administrator privileges.",
+            )
+        cmd = (command or "").strip()
+        if not cmd or any(c in cmd for c in (";", "&", "|", "`", "$", ">", "<", "\n")):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Invalid or unsafe executable command for MCP stdio. Shell metacharacters are forbidden.",
+            )
+        if not settings.mcp_stdio_allowed_commands:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "MCP stdio configuration is blocked: mcp_stdio_allowed_commands is empty or unconfigured. A nonempty command allowlist is required.",
+            )
+        if cmd not in settings.mcp_stdio_allowed_commands:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"MCP stdio command {cmd!r} is not in the allowed commands list.",
+            )
+
+
 @router.post("", status_code=201)
 async def create_client(project_id: str, body: McpClientIn, session: AsyncSession = Depends(get_session),
                         tenant_id: str = Depends(current_tenant_id),
-                        _: CurrentUser = Depends(require_role("editor"))):
+                        user: CurrentUser = Depends(require_role("editor"))):
+    _validate_stdio_security(body.transport, body.command, user)
     m = McpClient(tenant_id=tenant_id, project_id=project_id, name=body.name, transport=body.transport,
                   url=body.url, command=body.command, args=body.args, headers_ref=body.headers_ref,
                   enabled=body.enabled, auth_provider_id=body.auth_provider_id)
@@ -98,12 +131,14 @@ async def create_client(project_id: str, body: McpClientIn, session: AsyncSessio
 @router.patch("/{client_id}")
 async def update_client(project_id: str, client_id: str, body: McpClientPatch, session: AsyncSession = Depends(get_session),
                         tenant_id: str = Depends(current_tenant_id),
-                        _: CurrentUser = Depends(require_role("editor"))):
+                        user: CurrentUser = Depends(require_role("editor"))):
     m = (await session.execute(
         select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
     )).scalar_one_or_none()
     if m is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
+    if m.transport == "stdio":
+        _validate_stdio_security(m.transport, m.command, user)
     if body.name is not None:
         m.name = body.name
     if body.enabled is not None:
