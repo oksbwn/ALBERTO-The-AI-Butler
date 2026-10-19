@@ -16,6 +16,7 @@ export function HomeScreen({
 }) {
   // Draggable split percentage: defaults to 50% (half half)
   const [splitPct, setSplitPct] = useState(50);
+  const [chatTarget, setChatTarget] = useState<string>("assistant");
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
 
@@ -111,7 +112,12 @@ export function HomeScreen({
           overflow: "hidden",
         }}
       >
-        <ChatScreen project={project} onMutate={onMutate} />
+        <ChatScreen
+          project={project}
+          onMutate={onMutate}
+          target={chatTarget}
+          onTargetChange={setChatTarget}
+        />
       </div>
     </div>
   );

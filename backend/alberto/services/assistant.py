@@ -931,6 +931,7 @@ class AssistantService:
         token_metrics: dict | None = None,
         retrieval_meta: dict | None = None,
         error: str | None = None, status: str = "done",
+        persona: str | None = None,
     ) -> None:
         """Persist one assistant turn as a Trace (name='assistant') + spans, so SPEND and
         the per-project reports include assistant usage like any workflow run. The turn is
@@ -954,13 +955,15 @@ class AssistantService:
                     trace_meta["token_metrics"] = token_metrics
                 if retrieval_meta:
                     trace_meta["retrieval"] = retrieval_meta
+                is_curator = persona == "memory_curator"
                 trace = Trace(
                     tenant_id=tenant_id, project_id=project_id, workflow_id=None,
                     run_id=f"assistant-{_uuid.uuid4()}", thread_id=thread_id,
-                    name="assistant", status=status,
+                    name="memory_curator" if is_curator else "assistant", status=status,
                     started_at=datetime.utcnow(), ended_at=datetime.utcnow(),
                     latency_ms=latency_ms, total_tokens=tokens, total_cost_usd=cost,
-                    source="assistant", actor="System",
+                    source="memory_curator" if is_curator else "assistant",
+                    actor="Memory Curator" if is_curator else "System",
                     user_message=(user_message or None), ai_response=(ai_response or None),
                     error=(error or None),
                     meta=trace_meta,
@@ -1047,6 +1050,7 @@ class AssistantService:
     async def _fast_stream(
         *, tenant_id: str, project_id: str, messages: list[dict],
         thread_id: str | None = None, model: str | None = None,
+        persona: str | None = None,
     ) -> AsyncIterator[dict]:
         import time
 
@@ -1075,14 +1079,42 @@ class AssistantService:
 
             runnable = model_inst.bind_tools(tools_to_bind) if tools_to_bind else model_inst
 
-            fast_sys_prompt = (
-                "You are Alberto, a helpful, intelligent AI Home Butler. "
-                "Be natural, warm, and concise (1-3 sentences). Answer questions directly. "
-                "Always preserve user-provided technical terms, product names, acronyms, and model identifiers exactly as stated. "
-                "Never substitute, normalize, or autocorrect them with more common, popular, or phonetically similar alternatives unless the user explicitly tells you to. "
-                "If the user asks for multi-step automation design or deep reasoning, "
-                "mention they can toggle Deep Thinking mode or ask you to execute it."
-            )
+            if persona == "memory_curator":
+                fast_sys_prompt = (
+                    "You are Alberto's Memory Curator Sub-Agent. "
+                    "Your duty is to curate, audit, explain, and organize durable memory records, user preferences, and knowledge graph entities. "
+                    "You answer questions directly about stored facts, user details, hardware configurations, and system capabilities based on recalled memory. "
+                    "Be clear, precise, and helpful. Always preserve technical terms, product names, acronyms, and specs verbatim. "
+                    "When the user shares new durable facts, acknowledge them accurately so they can be persisted to long-term memory."
+                )
+            elif persona == "graph_manager":
+                fast_sys_prompt = (
+                    "You are Alberto's Knowledge Graph Manager Sub-Agent. "
+                    "Your duty is to manage, inspect, and explain graph entities and relationships in Alberto's Knowledge Graph. "
+                    "You answer questions directly about stored entities, relationship types, ontology classifications, and connected nodes based on recalled graph context. "
+                    "Be clear, precise, and helpful. Always preserve node names, labels, and entity identifiers verbatim."
+                )
+            elif persona == "intent_router":
+                fast_sys_prompt = (
+                    "You are Alberto's Intent Router Sub-Agent. "
+                    "Your duty is to classify user queries, analyze user requests, and explain how intents are routed across Alberto's tools and workflows. "
+                    "Be clear, precise, and concise."
+                )
+            elif persona and persona != "assistant":
+                clean_name = persona.replace("_", " ").title()
+                fast_sys_prompt = (
+                    f"You are Alberto's {clean_name} Sub-Agent. "
+                    "Be natural, helpful, and concise. Answer questions directly using recalled context."
+                )
+            else:
+                fast_sys_prompt = (
+                    "You are Alberto, a helpful, intelligent AI Home Butler. "
+                    "Be natural, warm, and concise (1-3 sentences). Answer questions directly. "
+                    "Always preserve user-provided technical terms, product names, acronyms, and model identifiers exactly as stated. "
+                    "Never substitute, normalize, or autocorrect them with more common, popular, or phonetically similar alternatives unless the user explicitly tells you to. "
+                    "If the user asks for multi-step automation design or deep reasoning, "
+                    "mention they can toggle Deep Thinking mode or ask you to execute it."
+                )
 
             # 1. Unified Knowledge & Memory Recall
             recalled_block = ""
@@ -1097,7 +1129,7 @@ class AssistantService:
                         tenant_id=tenant_id,
                         project_id=project_id,
                         query=user_msg.strip(),
-                        top_k=5,
+                        top_k=8 if persona == "memory_curator" else 5,
                     )
                     if hits:
                         recalled_block = ContextAssembler.assemble_context(hits)
@@ -1264,13 +1296,14 @@ class AssistantService:
                 token_metrics=metrics,
                 retrieval_meta=retrieval_meta,
                 error=err_msg, status="error" if err_msg else "done",
+                persona=persona,
             )
 
     @staticmethod
     async def stream(
         *, tenant_id: str, project_id: str, messages: list[dict],
         thread_id: str | None = None, checkpointer=None, model: str | None = None,
-        thinking: bool = False,
+        thinking: bool = False, persona: str | None = None,
     ) -> AsyncIterator[dict]:
         import time
 
@@ -1278,7 +1311,7 @@ class AssistantService:
         if not thinking:
             async for frame in AssistantService._fast_stream(
                 tenant_id=tenant_id, project_id=project_id, messages=messages,
-                thread_id=thread_id, model=model,
+                thread_id=thread_id, model=model, persona=persona,
             ):
                 yield frame
             return
@@ -1335,6 +1368,7 @@ class AssistantService:
                 user_message=user_msg, ai_response=final_text,
                 token_metrics=metrics,
                 error=err_msg, status="error" if err_msg else "done",
+                persona=persona,
             )
 
     @staticmethod

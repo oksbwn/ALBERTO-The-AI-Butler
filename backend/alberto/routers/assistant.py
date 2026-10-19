@@ -35,6 +35,7 @@ class AssistantIn(BaseModel):
     messages: list[AssistantMessage] = []
     model: str | None = None
     thinking: bool = False
+    persona: str | None = None
 
 
 class AssistantResumeIn(BaseModel):
@@ -69,7 +70,7 @@ async def assistant_stream(
         async for frame in AssistantService.stream(
             tenant_id=tenant_id, project_id=project_id, messages=messages,
             thread_id=body.thread_id, checkpointer=checkpointer, model=body.model,
-            thinking=body.thinking,
+            thinking=body.thinking, persona=body.persona,
         ):
             yield {"event": frame["event"], "data": json.dumps(frame["data"], default=str)}
 

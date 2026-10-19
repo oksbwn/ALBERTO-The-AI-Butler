@@ -217,11 +217,156 @@ interface ChatTodo {
   done: boolean;
 }
 
-export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () => void }) {
-  // Target agent/workflow selector: "assistant" (default) or workflow.id
-  const [target, setTarget] = useState<string>("assistant");
+export const SYSTEM_SUB_AGENTS: Agent[] = [
+  {
+    id: "memory_curator",
+    project_id: "",
+    name: "Memory Curator",
+    system_key: "memory_curator",
+    is_system: true,
+    config: { description: "Curates, audits, and organizes long-term memories and knowledge graph." },
+  },
+  {
+    id: "graph_manager",
+    project_id: "",
+    name: "Graph Manager",
+    system_key: "graph_manager",
+    is_system: true,
+    config: { description: "Inspects and explains entities, relationships, and ontology mappings in Alberto's graph." },
+  },
+  {
+    id: "intent_router",
+    project_id: "",
+    name: "Intent Router",
+    system_key: "intent_router",
+    is_system: true,
+    config: { description: "Analyzes user requests, classifies intents, and determines automation routing." },
+  },
+];
+
+export function ChatScreen({
+  project,
+  onMutate,
+  externalInput,
+  onExternalInputConsumed,
+  persona = "assistant",
+  target: controlledTarget,
+  onTargetChange,
+}: {
+  project: any;
+  onMutate?: () => void;
+  externalInput?: string;
+  onExternalInputConsumed?: () => void;
+  persona?: "assistant" | "memory_curator";
+  target?: string;
+  onTargetChange?: (t: string) => void;
+}) {
+  // Target agent/workflow selector: "assistant" (default master agent), "agent:<system_key|id>", or "workflow:<id>"
+  const [internalTarget, setInternalTarget] = useState<string>("assistant");
+  const target = controlledTarget !== undefined ? controlledTarget : internalTarget;
+  const setTarget = useCallback(
+    (newTarget: string) => {
+      setInternalTarget(newTarget);
+      onTargetChange?.(newTarget);
+    },
+    [onTargetChange]
+  );
+
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+
+  // Always guarantee system sub-agents exist
+  const effectiveAgents = agents.length > 0 ? agents : SYSTEM_SUB_AGENTS;
+
+  // Target agent/workflow selector resolution: "assistant" (default master agent), "agent:<system_key|id>", or "workflow:<id>"
+  const isWorkflow = target.startsWith("workflow:") || (!target.startsWith("agent:") && target !== "assistant" && workflows.some((w) => w.id === target));
+  const targetWorkflowId = target.startsWith("workflow:") ? target.slice("workflow:".length) : target;
+  const isAgent = target.startsWith("agent:");
+  const targetAgentKey = target.startsWith("agent:") ? target.slice("agent:".length) : null;
+  const selectedAgent = effectiveAgents.find((a) => a.id === targetAgentKey || a.system_key === targetAgentKey);
+  const selectedWf = workflows.find((w) => w.id === targetWorkflowId);
+
+  // Custom agents not in the core 3 system keys
+  const coreKeys = new Set(["memory_curator", "graph_manager", "intent_router"]);
+  const customAgents = effectiveAgents.filter((a) => !coreKeys.has(a.system_key || a.id));
+  const isCustomAgent = isAgent && !coreKeys.has(targetAgentKey || "");
+
+  // Active persona resolution
+  const activePersona = persona === "memory_curator"
+    ? "memory_curator"
+    : isAgent
+    ? (selectedAgent?.system_key || selectedAgent?.name?.toLowerCase().replace(/\s+/g, "_") || "agent")
+    : "assistant";
+
+  const isCurator = activePersona === "memory_curator";
+  const isGraphManager = activePersona === "graph_manager";
+  const isIntentRouter = activePersona === "intent_router";
+
+  const [agentDropdownOpen, setAgentDropdownOpen] = useState(false);
+  const agentDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (agentDropdownRef.current && !agentDropdownRef.current.contains(e.target as Node)) {
+        setAgentDropdownOpen(false);
+      }
+    }
+    if (agentDropdownOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+      return () => document.removeEventListener("mousedown", handleClickOutside);
+    }
+  }, [agentDropdownOpen]);
+
+  // Current active entity display info for dropdown button
+  const activeTargetInfo = useMemo(() => {
+    if (isWorkflow) {
+      return {
+        name: selectedWf?.name || "Workflow",
+        badge: "WORKFLOW",
+        icon: "workflow",
+        color: "var(--accent)",
+      };
+    }
+    if (isCurator) {
+      return {
+        name: "Memory Curator",
+        badge: "SUB-AGENT",
+        icon: "brain",
+        color: "#a855f7",
+      };
+    }
+    if (isGraphManager) {
+      return {
+        name: "Graph Manager",
+        badge: "SUB-AGENT",
+        icon: "workflows",
+        color: "#06b6d4",
+      };
+    }
+    if (isIntentRouter) {
+      return {
+        name: "Intent Router",
+        badge: "SUB-AGENT",
+        icon: "tools",
+        color: "#f59e0b",
+      };
+    }
+    if (isAgent) {
+      return {
+        name: selectedAgent?.name || "Sub-Agent",
+        badge: "SUB-AGENT",
+        icon: "bot",
+        color: "var(--io-control)",
+      };
+    }
+    return {
+      name: "Alberto",
+      badge: "MASTER AGENT",
+      icon: "sparkles",
+      color: "var(--accent)",
+    };
+  }, [isWorkflow, isCurator, isGraphManager, isIntentRouter, isAgent, selectedWf, selectedAgent]);
+
   const models = useModels();
   const [selectedModel, setSelectedModel] = useState<string>("");
 
@@ -237,6 +382,13 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
   // Messages & Stream State
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
+
+  useEffect(() => {
+    if (externalInput) {
+      setInput(externalInput);
+      onExternalInputConsumed?.();
+    }
+  }, [externalInput, onExternalInputConsumed]);
   const [streaming, setStreaming] = useState("");
   const [liveThink, setLiveThink] = useState<string | null>(null);
   const [openThought, setOpenThought] = useState<number | null>(null);
@@ -737,15 +889,16 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
     setMsgs((m) => [...m, { role: "user", content: q }]);
     setInput("");
 
-    if (target === "assistant") {
+    if (!isWorkflow) {
       await streamAssistantTurn({
         message: q,
         thread_id: threadRef.current,
         model: selectedModel || undefined,
         thinking: thinkingMode,
+        persona: activePersona,
       }, api.assistantStreamUrl(project.id));
     } else {
-      await streamWorkflowRun(target, q);
+      await streamWorkflowRun(targetWorkflowId, q);
     }
   }
 
@@ -785,9 +938,40 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
     setLastServerTokens(null);
   }
 
-  const selectedWf = workflows.find((w) => w.id === target);
+  const handleTargetSelect = useCallback(
+    (newTarget: string) => {
+      if (newTarget === target) return;
+      setTarget(newTarget);
+      resetChat();
+    },
+    [target, setTarget]
+  );
 
-  const starters = target === "assistant" ? [
+  const prevTargetRef = useRef(target);
+  useEffect(() => {
+    if (prevTargetRef.current !== target) {
+      prevTargetRef.current = target;
+      resetChat();
+    }
+  }, [target]);
+
+  const starters = isCurator ? [
+    { label: "Audit facts", prompt: "Audit all durable facts you have stored about me and this system." },
+    { label: "Check hardware", prompt: "What hardware specifications, RAM, and models do you have registered?" },
+    { label: "Graph entities", prompt: "What entities and relationships are stored in the knowledge graph?" },
+    { label: "Audit conflicts", prompt: "Audit conflicting or outdated facts across vector and relational stores." },
+  ] : isGraphManager ? [
+    { label: "List entities", prompt: "What entities are registered in the knowledge graph?" },
+    { label: "Check relations", prompt: "Explain the relationships and ontology connections in the graph." },
+    { label: "Graph stats", prompt: "Summarize the size and density of the knowledge graph." },
+    { label: "Recent nodes", prompt: "What new graph nodes were learned recently?" },
+  ] : isIntentRouter ? [
+    { label: "Test routing", prompt: "How would you route a request to control room lights?" },
+    { label: "Explain intents", prompt: "What capabilities and tool sets can you route to?" },
+  ] : isAgent ? [
+    { label: "Agent Overview", prompt: `Explain your role and how you assist as ${selectedAgent?.name || "this sub-agent"}.` },
+    { label: "System prompt", prompt: "What are your core directives and tools?" },
+  ] : target === "assistant" ? [
     { label: "Build a Workflow", prompt: "Create a customer feedback triaging workflow." },
     { label: "Review Capabilities", prompt: "What tools and connectors are currently installed in Alberto?" },
     { label: "System Health", prompt: "Run a system health check and summarize memory items." },
@@ -796,6 +980,99 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
     { label: `Run ${selectedWf?.name || "Workflow"}`, prompt: "Run this workflow with default inputs." },
     { label: "Test Edge Cases", prompt: "Provide edge case inputs to test this automation graph." },
   ];
+
+  const heroBg = isCurator
+    ? "linear-gradient(135deg, #a855f7, #6366f1)"
+    : isGraphManager
+    ? "linear-gradient(135deg, #06b6d4, #3b82f6)"
+    : isIntentRouter
+    ? "linear-gradient(135deg, #f59e0b, #ef4444)"
+    : isAgent
+    ? "linear-gradient(135deg, #8b5cf6, #ec4899)"
+    : isWorkflow
+    ? "linear-gradient(135deg, #10b981, #06b6d4)"
+    : "linear-gradient(135deg, var(--accent), #4f46e5)";
+
+  const heroShadow = isCurator
+    ? "0 6px 20px rgba(168, 85, 247, 0.25)"
+    : isGraphManager
+    ? "0 6px 20px rgba(6, 182, 212, 0.25)"
+    : isIntentRouter
+    ? "0 6px 20px rgba(245, 158, 11, 0.25)"
+    : isAgent
+    ? "0 6px 20px rgba(139, 92, 246, 0.25)"
+    : isWorkflow
+    ? "0 6px 20px rgba(16, 185, 129, 0.25)"
+    : "0 6px 20px rgba(99, 102, 241, 0.25)";
+
+  const heroIcon = isCurator
+    ? "brain"
+    : isGraphManager
+    ? "workflows"
+    : isIntentRouter
+    ? "tools"
+    : isAgent
+    ? "bot"
+    : isWorkflow
+    ? "workflow"
+    : "sparkles";
+
+  const heroTitle = isCurator
+    ? "Memory Curator Sub-Agent"
+    : isGraphManager
+    ? "Knowledge Graph Manager Sub-Agent"
+    : isIntentRouter
+    ? "Intent Router Sub-Agent"
+    : isAgent
+    ? `${selectedAgent?.name || "Custom"} Sub-Agent`
+    : isWorkflow
+    ? `Ready to run ${selectedWf?.name || "workflow"}`
+    : "How can I help you today?";
+
+  const heroDesc = isCurator
+    ? "Curates, audits, and organizes your long-term memories and knowledge graph. Chats here also train Alberto's background memory."
+    : isGraphManager
+    ? "Inspects and explains entities, relationships, and ontology mappings in Alberto's graph."
+    : isIntentRouter
+    ? "Analyzes user requests, classifies intents, and determines automation routing."
+    : isAgent
+    ? (selectedAgent?.config?.description || "Sub-agent configured in this project.")
+    : isWorkflow
+    ? (selectedWf?.description || "Send inputs to execute this automation workflow live.")
+    : `Alberto is your local AI Butler powered by ${activeModel?.name || "local LLM"}. Ask questions, build automations, or query system tools.`;
+
+  const agentAvatarIcon = heroIcon;
+  const agentAvatarColor = isCurator
+    ? "#a855f7"
+    : isGraphManager
+    ? "#06b6d4"
+    : isIntentRouter
+    ? "#f59e0b"
+    : isAgent
+    ? "#8b5cf6"
+    : isWorkflow
+    ? "#10b981"
+    : "var(--accent)";
+
+  const agentAvatarBg = isCurator
+    ? "rgba(168, 85, 247, 0.12)"
+    : isGraphManager
+    ? "rgba(6, 182, 212, 0.12)"
+    : isIntentRouter
+    ? "rgba(245, 158, 11, 0.12)"
+    : isAgent
+    ? "rgba(139, 92, 246, 0.12)"
+    : "var(--bg-2)";
+
+  const agentAvatarBorder = isCurator
+    ? "1px solid rgba(168, 85, 247, 0.3)"
+    : isGraphManager
+    ? "1px solid rgba(6, 182, 212, 0.3)"
+    : isIntentRouter
+    ? "1px solid rgba(245, 158, 11, 0.3)"
+    : isAgent
+    ? "1px solid rgba(139, 92, 246, 0.3)"
+    : "1px solid var(--line)";
 
   const filteredConvos = convos.filter((c) => {
     if (!convoSearch.trim()) return true;
@@ -866,42 +1143,320 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
         
         {/* Left: Target & Model */}
         <div className="row gap2" style={{ alignItems: "center", minWidth: 0 }}>
-          {/* Target Selector */}
-          <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
-            <select
-              value={target}
-              onChange={(e) => {
-                setTarget(e.target.value);
-                resetChat();
-              }}
+          {/* Target Selector / Persona Badge */}
+          {persona === "memory_curator" ? (
+            <div
               style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
                 height: 26,
-                padding: "0 22px 0 8px",
+                padding: "0 10px",
                 fontSize: 12,
                 fontWeight: 600,
-                background: "var(--bg-2)",
-                border: "1px solid var(--line)",
+                background: "rgba(168, 85, 247, 0.1)",
+                border: "1px solid rgba(168, 85, 247, 0.3)",
                 borderRadius: 5,
-                color: "var(--fg-0)",
-                cursor: "pointer",
-                appearance: "none",
-                outline: "none",
+                color: "#c084fc",
               }}
+              title="Memory Curator Sub-Agent: inspects and curates durable facts"
             >
-              <option value="assistant">Alberto</option>
-              {workflows.length > 0 && (
-                <optgroup label="Workflows">
-                  {workflows.map((w) => (
-                    <option key={w.id} value={w.id}>{w.name}</option>
-                  ))}
-                </optgroup>
+              <Icon name="brain" size={13} style={{ color: "#a855f7" }} />
+              <span>Memory Curator</span>
+              <span
+                style={{
+                  fontSize: 9.5,
+                  fontWeight: 700,
+                  padding: "1px 5px",
+                  borderRadius: 4,
+                  background: "rgba(168, 85, 247, 0.2)",
+                  color: "#d8b4fe",
+                  letterSpacing: "0.04em",
+                }}
+              >
+                SUB-AGENT
+              </span>
+            </div>
+          ) : (
+            <div ref={agentDropdownRef} style={{ position: "relative", display: "inline-block" }}>
+              <button
+                type="button"
+                onClick={() => setAgentDropdownOpen((o) => !o)}
+                style={{
+                  height: 28,
+                  padding: "0 10px 0 8px",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  background: agentDropdownOpen ? "var(--bg-0)" : "var(--bg-2)",
+                  border: agentDropdownOpen ? "1px solid var(--accent)" : "1px solid var(--line)",
+                  borderRadius: 6,
+                  color: "var(--fg-0)",
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 7,
+                  boxShadow: agentDropdownOpen ? "0 0 0 2px rgba(99, 102, 241, 0.15)" : "none",
+                  transition: "all 0.15s ease",
+                }}
+              >
+                <div
+                  style={{
+                    width: 18,
+                    height: 18,
+                    borderRadius: 4,
+                    background: `${activeTargetInfo.color}20`,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                  }}
+                >
+                  <Icon name={activeTargetInfo.icon} size={11} style={{ color: activeTargetInfo.color }} />
+                </div>
+                <span style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {activeTargetInfo.name}
+                </span>
+                <span
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 700,
+                    padding: "1px 5px",
+                    borderRadius: 3,
+                    background: `${activeTargetInfo.color}18`,
+                    color: activeTargetInfo.color,
+                    letterSpacing: "0.03em",
+                  }}
+                >
+                  {activeTargetInfo.badge}
+                </span>
+                <Icon
+                  name="chevdown"
+                  size={11}
+                  style={{
+                    color: "var(--fg-2)",
+                    transform: agentDropdownOpen ? "rotate(180deg)" : "none",
+                    transition: "transform 0.15s ease",
+                    marginLeft: 2,
+                  }}
+                />
+              </button>
+
+              {agentDropdownOpen && (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "calc(100% + 4px)",
+                    left: 0,
+                    width: 290,
+                    background: "var(--bg-1)",
+                    border: "1px solid var(--line-strong)",
+                    borderRadius: 8,
+                    boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                    zIndex: 100,
+                    padding: "6px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 2,
+                  }}
+                >
+                  {/* SECTION 1: MAIN AGENT */}
+                  <div style={{ padding: "4px 8px 2px", fontSize: 10, fontWeight: 700, color: "var(--fg-2)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                    Main Agent
+                  </div>
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      handleTargetSelect("assistant");
+                      setAgentDropdownOpen(false);
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "7px 8px",
+                      borderRadius: 6,
+                      cursor: "pointer",
+                      background: target === "assistant" ? "var(--bg-2)" : "transparent",
+                      transition: "background 0.1s ease",
+                    }}
+                    onMouseEnter={(e) => {
+                      if (target !== "assistant") e.currentTarget.style.background = "var(--bg-2)";
+                    }}
+                    onMouseLeave={(e) => {
+                      if (target !== "assistant") e.currentTarget.style.background = "transparent";
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                      <div
+                        style={{
+                          width: 24,
+                          height: 24,
+                          borderRadius: 5,
+                          background: "linear-gradient(135deg, var(--accent), #4f46e5)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          color: "#fff",
+                          flexShrink: 0,
+                        }}
+                      >
+                        <Icon name="sparkles" size={13} />
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 12 }}>Alberto (Master Agent)</div>
+                        <div className="fg-2" style={{ fontSize: 10.5, lineHeight: "13px" }}>
+                          Primary coordinator · tools & reasoning
+                        </div>
+                      </div>
+                    </div>
+                    {target === "assistant" && (
+                      <Icon name="check" size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                    )}
+                  </div>
+
+                  <div style={{ height: 1, background: "var(--line)", margin: "4px 0" }} />
+
+                  {/* SECTION 2: SUB-AGENTS */}
+                  <div style={{ padding: "4px 8px 2px", fontSize: 10, fontWeight: 700, color: "var(--fg-2)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                    Sub-Agents ({effectiveAgents.length})
+                  </div>
+                  {effectiveAgents.map((a) => {
+                    const aKey = a.system_key || a.id;
+                    const targetVal = `agent:${aKey}`;
+                    const isSelected = target === targetVal || (aKey === "memory_curator" && isCurator) || (aKey === "graph_manager" && isGraphManager) || (aKey === "intent_router" && isIntentRouter);
+                    const iconName = aKey === "memory_curator" ? "brain" : aKey === "graph_manager" ? "workflows" : aKey === "intent_router" ? "tools" : "bot";
+                    const iconColor = aKey === "memory_curator" ? "#a855f7" : aKey === "graph_manager" ? "#06b6d4" : aKey === "intent_router" ? "#f59e0b" : "var(--io-control)";
+                    const desc = a.config?.description || (aKey === "memory_curator" ? "Curates durable facts & audits conflicts" : aKey === "graph_manager" ? "Knowledge graph ontology & relations" : aKey === "intent_router" ? "Query classification & intent routing" : "Custom project sub-agent");
+
+                    return (
+                      <div
+                        key={a.id || aKey}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => {
+                          handleTargetSelect(targetVal);
+                          setAgentDropdownOpen(false);
+                        }}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "7px 8px",
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          background: isSelected ? "var(--bg-2)" : "transparent",
+                          transition: "background 0.1s ease",
+                        }}
+                        onMouseEnter={(e) => {
+                          if (!isSelected) e.currentTarget.style.background = "var(--bg-2)";
+                        }}
+                        onMouseLeave={(e) => {
+                          if (!isSelected) e.currentTarget.style.background = "transparent";
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                          <div
+                            style={{
+                              width: 24,
+                              height: 24,
+                              borderRadius: 5,
+                              background: `${iconColor}18`,
+                              border: `1px solid ${iconColor}33`,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              color: iconColor,
+                              flexShrink: 0,
+                            }}
+                          >
+                            <Icon name={iconName} size={13} />
+                          </div>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 600, fontSize: 12 }}>{a.name}</div>
+                            <div className="fg-2" style={{ fontSize: 10.5, lineHeight: "13px" }}>
+                              {desc}
+                            </div>
+                          </div>
+                        </div>
+                        {isSelected && (
+                          <Icon name="check" size={13} style={{ color: iconColor, flexShrink: 0 }} />
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {/* SECTION 3: WORKFLOWS */}
+                  {workflows.length > 0 && (
+                    <>
+                      <div style={{ height: 1, background: "var(--line)", margin: "4px 0" }} />
+                      <div style={{ padding: "4px 8px 2px", fontSize: 10, fontWeight: 700, color: "var(--fg-2)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                        Workflows ({workflows.length})
+                      </div>
+                      {workflows.map((w) => {
+                        const targetVal = `workflow:${w.id}`;
+                        const isSelected = target === targetVal || target === w.id;
+                        return (
+                          <div
+                            key={w.id}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => {
+                              handleTargetSelect(targetVal);
+                              setAgentDropdownOpen(false);
+                            }}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              padding: "6px 8px",
+                              borderRadius: 6,
+                              cursor: "pointer",
+                              background: isSelected ? "var(--bg-2)" : "transparent",
+                              transition: "background 0.1s ease",
+                            }}
+                            onMouseEnter={(e) => {
+                              if (!isSelected) e.currentTarget.style.background = "var(--bg-2)";
+                            }}
+                            onMouseLeave={(e) => {
+                              if (!isSelected) e.currentTarget.style.background = "transparent";
+                            }}
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                              <div
+                                style={{
+                                  width: 22,
+                                  height: 22,
+                                  borderRadius: 4,
+                                  background: "rgba(16, 185, 129, 0.15)",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  color: "#10b981",
+                                  flexShrink: 0,
+                                }}
+                              >
+                                <Icon name="workflow" size={12} />
+                              </div>
+                              <span style={{ fontWeight: 500, fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {w.name}
+                              </span>
+                            </div>
+                            {isSelected && (
+                              <Icon name="check" size={12} style={{ color: "#10b981", flexShrink: 0 }} />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
               )}
-            </select>
-            <Icon name="chevdown" size={11} style={{ position: "absolute", right: 7, pointerEvents: "none", color: "var(--fg-2)" }} />
-          </div>
+            </div>
+          )}
 
           {/* Model Selector Pill */}
-          {target === "assistant" && (
+          {!isWorkflow && (
             <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
               <div
                 style={{
@@ -1051,24 +1606,22 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
                   width: 44,
                   height: 44,
                   borderRadius: 12,
-                  background: "linear-gradient(135deg, var(--accent), #4f46e5)",
+                  background: heroBg,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
                   color: "#fff",
-                  boxShadow: "0 6px 20px rgba(99, 102, 241, 0.25)",
+                  boxShadow: heroShadow,
                 }}
               >
-                <Icon name={target === "assistant" ? "sparkles" : "workflow"} size={22} />
+                <Icon name={heroIcon} size={22} />
               </div>
               <div>
                 <h1 style={{ fontSize: 19, fontWeight: 700, margin: "0 0 5px", letterSpacing: "-0.02em" }}>
-                  {target === "assistant" ? "How can I help you today?" : `Ready to run ${selectedWf?.name || "workflow"}`}
+                  {heroTitle}
                 </h1>
                 <p className="fg-2" style={{ margin: 0, maxWidth: 440, fontSize: 13, lineHeight: "19px" }}>
-                  {target === "assistant"
-                    ? `Alberto is your local AI Butler powered by ${activeModel?.name || "local LLM"}. Ask questions, build automations, or query system tools.`
-                    : selectedWf?.description || "Send inputs to execute this automation workflow live."}
+                  {heroDesc}
                 </p>
               </div>
 
@@ -1102,7 +1655,7 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
                       e.currentTarget.style.background = "var(--bg-2)";
                     }}
                   >
-                    <Icon name="sparkles" size={11} style={{ color: "var(--accent)" }} />
+                    <Icon name={heroIcon} size={11} style={{ color: agentAvatarColor }} />
                     <span style={{ fontWeight: 600 }}>{s.label}</span>
                   </button>
                 ))}
@@ -1224,8 +1777,8 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
 
                 <div className="row" style={{ gap: 10, alignItems: "flex-start", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
                   {m.role === "assistant" && (
-                    <div style={{ width: 26, height: 26, borderRadius: "50%", background: "var(--bg-2)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--accent)", flex: "none", marginTop: 2 }}>
-                      <Icon name={target === "assistant" ? "sparkles" : "workflow"} size={13} />
+                    <div style={{ width: 26, height: 26, borderRadius: "50%", background: agentAvatarBg, border: agentAvatarBorder, display: "flex", alignItems: "center", justifyContent: "center", color: agentAvatarColor, flex: "none", marginTop: 2 }}>
+                      <Icon name={agentAvatarIcon} size={13} />
                     </div>
                   )}
                   <div
@@ -1281,16 +1834,16 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
                   width: 26,
                   height: 26,
                   borderRadius: "50%",
-                  background: "var(--bg-2)",
-                  border: "1px solid var(--line)",
+                  background: agentAvatarBg,
+                  border: agentAvatarBorder,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  color: "var(--accent)",
+                  color: agentAvatarColor,
                   flex: "none",
                 }}
               >
-                <Icon name={target === "assistant" ? "sparkles" : "workflow"} size={13} />
+                <Icon name={agentAvatarIcon} size={13} />
               </div>
               <div
                 className="row gap2"
@@ -1308,7 +1861,7 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
                   <span className="typing-dot" />
                 </div>
                 <span className="fg-2" style={{ fontSize: 12, fontWeight: 500 }}>
-                  {currentTool ? `Running ${currentTool}…` : target === "assistant" ? "Thinking…" : "Executing automation…"}
+                  {currentTool ? `Running ${currentTool}…` : isCurator ? "Auditing memory…" : isGraphManager ? "Traversing graph…" : isIntentRouter ? "Routing intent…" : !isWorkflow ? "Thinking…" : "Executing automation…"}
                   {busySecs > 1 && <span style={{ opacity: 0.65, marginLeft: 6 }}>({busySecs}s)</span>}
                 </span>
               </div>
@@ -1336,8 +1889,8 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
           {/* Streaming response bubble */}
           {streaming && (
             <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
-              <div style={{ width: 26, height: 26, borderRadius: "50%", background: "var(--bg-2)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--accent)", flex: "none", marginTop: 2 }}>
-                <Icon name={target === "assistant" ? "sparkles" : "workflow"} size={13} />
+              <div style={{ width: 26, height: 26, borderRadius: "50%", background: agentAvatarBg, border: agentAvatarBorder, display: "flex", alignItems: "center", justifyContent: "center", color: agentAvatarColor, flex: "none", marginTop: 2 }}>
+                <Icon name={agentAvatarIcon} size={13} />
               </div>
               <div style={{ maxWidth: "92%", padding: "2px 0", fontSize: 13.8, lineHeight: "22px" }}>
                 <Markdown>{streaming}</Markdown>
@@ -1642,7 +2195,7 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
             <div className="row spread" style={{ alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.04)", paddingTop: 6 }}>
               {/* Left tray tools */}
               <div className="row gap2" style={{ alignItems: "center" }}>
-                {target === "assistant" && (
+                {!isWorkflow && (
                   <>
                     {/* Thinking Mode Toggle */}
                     <button
@@ -1738,29 +2291,29 @@ export function ChatScreen({ project, onMutate }: { project: any; onMutate?: () 
                     )}
 
                     {/* Manual Compact Button */}
-                    {msgs.filter((m) => m.role !== "compaction").length >= 2 && (
-                      <button
-                        type="button"
-                        onClick={compactConversation}
-                        style={{
-                          height: 24,
-                          fontSize: 11,
-                          borderRadius: 4,
-                          padding: "0 7px",
-                          gap: 4,
-                          border: "1px solid var(--line)",
-                          background: "var(--bg-1)",
-                          color: "var(--fg-2)",
-                          cursor: "pointer",
-                          display: "flex",
-                          alignItems: "center",
-                        }}
-                        title="Compact conversation context"
-                      >
-                        <Icon name="archive" size={11} style={{ color: "var(--accent)" }} />
-                        <span>Compact</span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={compactConversation}
+                      disabled={msgs.filter((m) => m.role !== "compaction").length < 2}
+                      style={{
+                        height: 24,
+                        fontSize: 11,
+                        borderRadius: 4,
+                        padding: "0 7px",
+                        gap: 4,
+                        border: "1px solid var(--line)",
+                        background: "var(--bg-1)",
+                        color: msgs.filter((m) => m.role !== "compaction").length >= 2 ? "var(--fg-1)" : "var(--fg-2)",
+                        opacity: msgs.filter((m) => m.role !== "compaction").length >= 2 ? 1 : 0.45,
+                        cursor: msgs.filter((m) => m.role !== "compaction").length >= 2 ? "pointer" : "not-allowed",
+                        display: "flex",
+                        alignItems: "center",
+                      }}
+                      title={msgs.filter((m) => m.role !== "compaction").length >= 2 ? "Compact conversation context" : "Compact requires at least 2 conversation turns"}
+                    >
+                      <Icon name="archive" size={11} style={{ color: "var(--accent)" }} />
+                      <span>Compact</span>
+                    </button>
                   </>
                 )}
               </div>
