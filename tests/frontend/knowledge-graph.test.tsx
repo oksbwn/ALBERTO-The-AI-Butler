@@ -109,6 +109,8 @@ beforeEach(() => {
     total_relationships: 1,
   });
 
+  apiMock.graphEntities.mockResolvedValue([mockOLMXEntity, mockMacStudioEntity]);
+
   apiMock.memoryStatus.mockResolvedValue({
     memory_learning_enabled: true,
     sqlite: { memory_count: 2, qa_count: 0 },
@@ -273,17 +275,12 @@ describe("KnowledgeGraphExplorer", () => {
 
 describe("KnowledgeScreen existing page regression", () => {
   it("preserves vertical tabs and renders KnowledgeGraphExplorer in Knowledge Graph tab", async () => {
-    const user = userEvent.setup();
-    render(<KnowledgeScreen project={{ id: "p1", name: "Alberto Test" }} />);
-
-    // Click the "Knowledge Graph" vertical tab
-    const graphTabBtn = screen.getByRole("button", { name: /knowledge graph/i });
-    await user.click(graphTabBtn);
+    render(<KnowledgeScreen project={{ id: "p1", name: "Alberto Test" }} subNav="graph" />);
 
     // Verify existing Header Card items
-    expect(await screen.findByText("Online (Embedded)")).toBeInTheDocument();
-    expect(screen.getByText("Scoped Entities")).toBeInTheDocument();
-    expect(screen.getByText("Unified Memory Architecture")).toBeInTheDocument();
+    expect(await screen.findByText("LadybugDB Interactive Graph Explorer")).toBeInTheDocument();
+    expect(screen.getByText("Graph Visualizer")).toBeInTheDocument();
+    expect(screen.getByText("Entities & Relations")).toBeInTheDocument();
 
     // Verify KnowledgeGraphExplorer is rendered inside the page
     expect(screen.getByPlaceholderText(/search entity/i)).toBeInTheDocument();

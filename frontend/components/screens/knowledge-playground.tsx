@@ -77,7 +77,7 @@ export function KnowledgePlaygroundScreen({ project }: { project: any }) {
   };
 
   // --- Explorer State (Left Panel) ---
-  const [query, setQuery] = useState("Mac hardware specs and Gemma 12B model setup");
+  const [query, setQuery] = useState("");
   const [sources, setSources] = useState<string[]>([
     "sqlite_memory",
     "chroma_memory",
@@ -95,21 +95,24 @@ export function KnowledgePlaygroundScreen({ project }: { project: any }) {
   const [externalChatInput, setExternalChatInput] = useState<string>("");
 
   const toggleSource = (s: string) => {
-    setSources((prev) =>
-      prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]
-    );
+    setSources((prev) => {
+      const next = prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s];
+      runProbe(undefined, next);
+      return next;
+    });
   };
 
-  const runProbe = async (searchQuery?: string) => {
+  const runProbe = async (searchQuery?: string, activeSources?: string[]) => {
     const q = (searchQuery !== undefined ? searchQuery : query).trim();
-    if (!project?.id || !q || probing) return;
+    const srcList = activeSources !== undefined ? activeSources : sources;
+    if (!project?.id || probing) return;
     setProbing(true);
     setErr(null);
     try {
       const res = await api.recallMemory(project.id, {
         query: q,
-        sources: sources.length > 0 ? sources : undefined,
-        top_k: 12,
+        sources: srcList.length > 0 ? srcList : undefined,
+        top_k: 24,
       });
       setResults(res?.results || []);
     } catch (e: any) {
@@ -121,8 +124,8 @@ export function KnowledgePlaygroundScreen({ project }: { project: any }) {
   };
 
   useEffect(() => {
-    if (project?.id && results.length === 0) {
-      runProbe();
+    if (project?.id) {
+      runProbe("", sources);
     }
   }, [project?.id]);
 
@@ -214,7 +217,7 @@ export function KnowledgePlaygroundScreen({ project }: { project: any }) {
                   paddingRight: 28,
                   fontSize: 13,
                 }}
-                placeholder="Search memories across all stores or test recall…"
+                placeholder="Search memories across stores (leave empty to show all)…"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && runProbe()}
@@ -232,7 +235,10 @@ export function KnowledgePlaygroundScreen({ project }: { project: any }) {
               </span>
               {query && (
                 <button
-                  onClick={() => setQuery("")}
+                  onClick={() => {
+                    setQuery("");
+                    runProbe("");
+                  }}
                   style={{
                     position: "absolute",
                     right: 8,
@@ -243,6 +249,7 @@ export function KnowledgePlaygroundScreen({ project }: { project: any }) {
                     cursor: "pointer",
                     padding: 2,
                   }}
+                  title="Clear search"
                 >
                   <Icon name="x" size={13} />
                 </button>
@@ -252,16 +259,16 @@ export function KnowledgePlaygroundScreen({ project }: { project: any }) {
             <button
               className="btn btn-primary"
               style={{ height: 36, padding: "0 16px", flex: "none" }}
-              disabled={probing || !query.trim()}
+              disabled={probing}
               onClick={() => runProbe()}
             >
               {probing ? (
                 <>
-                  <Icon name="clock" size={13} /> Probing…
+                  <Icon name="clock" size={13} /> Searching…
                 </>
               ) : (
                 <>
-                  <Icon name="play" size={13} /> Probe
+                  <Icon name="search" size={13} /> Search
                 </>
               )}
             </button>

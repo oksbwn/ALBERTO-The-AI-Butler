@@ -749,3 +749,55 @@ async def test_scenario_12_generic_technical_identifier_preservation(sample_proj
             # Verify system prompt has no hardcoded OLMX/Ollama special casing
             assert "e.g. OLMX" not in prompt_str
             assert "such as Ollama" not in prompt_str
+
+
+# ============================================================================
+# SCENARIO 13: Empty or blank query shows all knowledge records by default
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_scenario_13_empty_query_recalls_all_knowledges(sample_proj):
+    """Empty or whitespace query in recall retrieves all active memories and graph entities."""
+    async with SessionLocal() as session:
+        await MemoryService.remember(
+            session=session,
+            tenant_id=sample_proj.tenant_id,
+            project_id=sample_proj.id,
+            text="User prefers dark mode UI.",
+            kind="preference",
+            confidence=1.0,
+            status="active",
+        )
+        await MemoryService.remember(
+            session=session,
+            tenant_id=sample_proj.tenant_id,
+            project_id=sample_proj.id,
+            text="MacStudio has 192GB unified RAM.",
+            kind="hardware",
+            confidence=1.0,
+            status="active",
+        )
+
+        hits_empty = await UnifiedMemoryManager.recall(
+            session=session,
+            tenant_id=sample_proj.tenant_id,
+            project_id=sample_proj.id,
+            query="",
+            sources=["sqlite_memory"],
+            top_k=10,
+        )
+        contents = [h.content for h in hits_empty]
+        assert "User prefers dark mode UI." in contents
+        assert "MacStudio has 192GB unified RAM." in contents
+
+        # Whitespace query also retrieves all
+        hits_ws = await UnifiedMemoryManager.recall(
+            session=session,
+            tenant_id=sample_proj.tenant_id,
+            project_id=sample_proj.id,
+            query="   ",
+            sources=["sqlite_memory"],
+            top_k=10,
+        )
+        contents_ws = [h.content for h in hits_ws]
+        assert "User prefers dark mode UI." in contents_ws

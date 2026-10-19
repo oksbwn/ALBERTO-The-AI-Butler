@@ -579,7 +579,7 @@ class GraphSubgraphOut(BaseModel):
 
 # --- unified memory ---
 class MemoryRecallIn(BaseModel):
-    query: str
+    query: str = ""
     sources: list[str] | None = None
     scope: str = "default"
     top_k: int = 5

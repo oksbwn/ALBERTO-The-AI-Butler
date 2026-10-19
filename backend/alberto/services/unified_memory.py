@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from alberto.config import settings
 from alberto.knowledge.graph import GraphEntity, get_graph_adapter, make_entity_id
-from alberto.models import Memory, QaPair
+from alberto.models import KbSource, Memory, QaPair
 from alberto.services.knowledge import KnowledgeService
 from alberto.services.memory import MemoryService
 from alberto.services.retrieval_policy import RetrievalPolicy
@@ -83,6 +83,28 @@ class UnifiedMemoryManager:
     ) -> list[UnifiedMemoryRecord]:
         hits: list[UnifiedMemoryRecord] = []
         seen_texts: set[str] = set()
+
+        if not query or not query.strip():
+            try:
+                all_active = await MemoryService.list(session, tenant_id, project_id, status="active")
+                for mem in all_active[:top_k * 2]:
+                    hits.append(
+                        UnifiedMemoryRecord(
+                            source="sqlite_memory",
+                            record_id=mem.id,
+                            content=mem.text,
+                            score=1.0,
+                            metadata={"scope": mem.scope, "kind": mem.kind},
+                            provenance=mem.provenance,
+                        )
+                    )
+            except Exception as e:
+                logger.warning("SQLite memory list error: %s", e)
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
+            return hits
 
         try:
             mem_texts = await MemoryService.recall(
@@ -166,6 +188,23 @@ class UnifiedMemoryManager:
         try:
             adapter = get_graph_adapter()
             entities = await adapter.find_entities(tenant_id, project_id, limit=top_k * 4)
+            if not query or not query.strip():
+                for ent in entities[:top_k * 2]:
+                    hits.append(
+                        UnifiedMemoryRecord(
+                            source="ladybug_graph",
+                            record_id=ent.id,
+                            content=f"Entity [{ent.kind}] {ent.name}: {ent.description}".strip(),
+                            score=ent.confidence,
+                            metadata={
+                                "kind": ent.kind,
+                                "name": ent.name,
+                                "canonical_name": ent.canonical_name,
+                            },
+                            provenance=ent.source,
+                        )
+                    )
+                return hits
             query_lower = query.lower()
             query_words = _extract_keywords(query_lower)
             for ent in entities:
@@ -207,6 +246,34 @@ class UnifiedMemoryManager:
         top_k: int,
     ) -> list[UnifiedMemoryRecord]:
         hits: list[UnifiedMemoryRecord] = []
+        if not query or not query.strip():
+            try:
+                rows = (await session.execute(
+                    select(QaPair).where(
+                        QaPair.tenant_id == tenant_id,
+                        QaPair.project_id == project_id,
+                    ).limit(top_k * 2)
+                )).scalars().all()
+                for qa in rows:
+                    hits.append(
+                        UnifiedMemoryRecord(
+                            source="qa_pairs",
+                            record_id=f"qa_{qa.id}",
+                            content=f"Q: {qa.question}\nA: {qa.answer}",
+                            score=1.0,
+                            metadata={"kind": qa.kind, "question": qa.question, "answer": qa.answer},
+                            provenance="curated_qa",
+                        )
+                    )
+                return hits
+            except Exception as e:
+                logger.warning("Error fetching all QA pairs: %s", e)
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
+            return hits
+
         try:
             qa_hits = await KnowledgeService.top_qa(
                 session, tenant_id, project_id, query, top_k=top_k
@@ -243,6 +310,34 @@ class UnifiedMemoryManager:
         top_k: int,
     ) -> list[UnifiedMemoryRecord]:
         hits: list[UnifiedMemoryRecord] = []
+        if not query or not query.strip():
+            try:
+                sources = (await session.execute(
+                    select(KbSource).where(
+                        KbSource.tenant_id == tenant_id,
+                        KbSource.project_id == project_id,
+                    ).limit(top_k * 2)
+                )).scalars().all()
+                for src in sources:
+                    hits.append(
+                        UnifiedMemoryRecord(
+                            source="knowledge_docs",
+                            record_id=src.id,
+                            content=f"Document [{src.kind}] {src.name} ({src.chunks} chunks, status: {src.status})".strip(),
+                            score=1.0,
+                            metadata={"source_id": src.id, "name": src.name, "kind": src.kind, "chunks": src.chunks},
+                            provenance=f"document_rag:{src.id}",
+                        )
+                    )
+                return hits
+            except Exception as e:
+                logger.warning("Error listing knowledge sources: %s", e)
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
+            return hits
+
         try:
             doc_hits = await KnowledgeService.search(
                 session, tenant_id, project_id, query, top_k=top_k
@@ -280,6 +375,27 @@ class UnifiedMemoryManager:
             from alberto.services.markdown_memory import MarkdownMemoryService
 
             files = MarkdownMemoryService.list_files(tenant_id, project_id)
+            if not query or not query.strip():
+                for f_info in files:
+                    content = MarkdownMemoryService.read_file(tenant_id, project_id, f_info["filename"])
+                    if not content:
+                        continue
+                    for line in content.splitlines():
+                        if line.startswith("- [mem:"):
+                            clean_text = line.lstrip("- ").strip()
+                            hits.append(
+                                UnifiedMemoryRecord(
+                                    source="markdown_memory",
+                                    record_id=f"md_{f_info['filename']}",
+                                    content=clean_text,
+                                    score=0.9,
+                                    metadata={"filename": f_info["filename"], "category": f_info["category"]},
+                                    provenance=f"markdown:{f_info['filename']}",
+                                )
+                            )
+                            if len(hits) >= top_k * 2:
+                                break
+                return hits
             q_lower = query.lower()
             for f_info in files:
                 content = MarkdownMemoryService.read_file(tenant_id, project_id, f_info["filename"])
@@ -326,12 +442,15 @@ class UnifiedMemoryManager:
         if sources is not None:
             enabled_sources = set(sources)
         else:
-            selected = RetrievalPolicy.select_sources(query)
-            # If policy returns empty (e.g. general question), return immediately with zero store queries
-            if not selected:
-                logger.info("Retrieval policy selected 0 sources for query %r (general question)", query[:50])
-                return []
-            enabled_sources = set(selected)
+            if not query or not query.strip():
+                enabled_sources = {"memory", "graph", "markdown", "qa"}
+            else:
+                selected = RetrievalPolicy.select_sources(query)
+                # If policy returns empty (e.g. general question), return immediately with zero store queries
+                if not selected:
+                    logger.info("Retrieval policy selected 0 sources for query %r (general question)", query[:50])
+                    return []
+                enabled_sources = set(selected)
 
         logger.info("Executing retrieval for query %r with selected sources: %s", query[:50], list(enabled_sources))
 
@@ -356,12 +475,12 @@ class UnifiedMemoryManager:
 
         async def _query_sources(target_sources: set[str]) -> list[UnifiedMemoryRecord]:
             tasks = []
-            if "graph" in target_sources or "ladybug" in target_sources:
+            if any(s in target_sources for s in ("graph", "ladybug", "ladybug_graph")):
                 tasks.append(_run_with_timeout(
                     UnifiedMemoryManager._fetch_graph(tenant_id, project_id, query, top_k),
                     "graph",
                 ))
-            if "markdown" in target_sources or "notes" in target_sources:
+            if any(s in target_sources for s in ("markdown", "notes", "markdown_memory")):
                 tasks.append(_run_with_timeout(
                     UnifiedMemoryManager._fetch_markdown(tenant_id, project_id, query, top_k),
                     "markdown",
@@ -370,17 +489,17 @@ class UnifiedMemoryManager:
             # Database sources share `session`, so run sequentially to avoid SQLAlchemy concurrent-execution errors
             async def _run_db_sources() -> list[UnifiedMemoryRecord]:
                 db_hits: list[UnifiedMemoryRecord] = []
-                if "memory" in target_sources or "sqlite" in target_sources:
+                if any(s in target_sources for s in ("memory", "sqlite", "sqlite_memory", "chroma", "chroma_memory")):
                     db_hits.extend(await _run_with_timeout(
                         UnifiedMemoryManager._fetch_memory(session, tenant_id, project_id, query, scope, top_k),
                         "memory",
                     ))
-                if "qa" in target_sources or "faq" in target_sources or "qa_pairs" in target_sources:
+                if any(s in target_sources for s in ("qa", "faq", "qa_pairs")):
                     db_hits.extend(await _run_with_timeout(
                         UnifiedMemoryManager._fetch_qa(session, tenant_id, project_id, query, top_k),
                         "qa",
                     ))
-                if any(s in target_sources for s in ("knowledge", "documents", "document", "rag")):
+                if any(s in target_sources for s in ("knowledge", "documents", "document", "rag", "knowledge_docs")):
                     db_hits.extend(await _run_with_timeout(
                         UnifiedMemoryManager._fetch_knowledge(session, tenant_id, project_id, query, top_k),
                         "knowledge",
@@ -389,7 +508,7 @@ class UnifiedMemoryManager:
 
             has_db_sources = any(
                 s in target_sources
-                for s in ("memory", "sqlite", "qa", "faq", "qa_pairs", "knowledge", "documents", "document", "rag")
+                for s in ("memory", "sqlite", "sqlite_memory", "chroma", "chroma_memory", "qa", "faq", "qa_pairs", "knowledge", "documents", "document", "rag", "knowledge_docs")
             )
             if has_db_sources:
                 tasks.append(_run_db_sources())
