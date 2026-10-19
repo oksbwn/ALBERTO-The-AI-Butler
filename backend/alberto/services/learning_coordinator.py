@@ -1,0 +1,873 @@
+"""Learning Coordinator: Durable, observable, and bounded conversation learning execution.
+
+Coordinates:
+- Durable SQLite event persistence BEFORE background dispatch
+- Restart recovery sweep for interrupted turns
+- Deterministic candidate validation (evidence, confidence, ambiguity, sensitivity)
+- Strict acceptance policy: NO mutations to graph or memory before full approval
+- Coordinated storage updates across SQLite, ChromaDB, LadybugDB, and Markdown
+- Idempotency and bounded retry / dead-letter handling
+- Lifecycle tracking: pending -> extracted -> validated -> applying -> completed / review_required / failed / rejected
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from alberto.config import settings
+from alberto.db import SessionLocal
+from alberto.models import MemoryLearningEvent
+from alberto.schemas.memory_curator import (
+    EntityCandidate,
+    LearningEventApprovalIn,
+    MemoryCuratorOutput,
+    RelationshipCandidate,
+)
+from alberto.services.audit import AuditService
+from alberto.services.graph_manager import GraphManagerService
+from alberto.services.markdown_memory import MarkdownMemoryService
+from alberto.services.memory import MemoryService
+from alberto.services.memory_curator import SENSITIVE_PATTERNS, MemoryCuratorService
+
+logger = logging.getLogger("alberto.services.learning_coordinator")
+
+
+def has_alias_equivalence_evidence(name: str, alias: str, user_message: str) -> bool:
+    """Verify that alias is explicitly stated as equivalent to name in user_message."""
+    if not name or not alias or not user_message:
+        return False
+    n = re.escape(name.strip())
+    a = re.escape(alias.strip())
+    patterns = [
+        rf"\b{n}\s*\(\s*(?:aka|a\.k\.a\.|also known as|or|short for|stands for|also called)?\s*{a}\s*\)",
+        rf"\b{a}\s*\(\s*(?:aka|a\.k\.a\.|also known as|or|short for|stands for|also called)?\s*{n}\s*\)",
+        rf"\b{n}\s+(?:aka|a\.k\.a\.|is also known as|also known as|or called|called)\s+{a}\b",
+        rf"\b{a}\s+(?:aka|a\.k\.a\.|is also known as|also known as|or called|called)\s+{n}\b",
+        rf"\bcall\s+{n}\s+{a}\b",
+        rf"\bcall\s+{a}\s+{n}\b",
+        rf"\b{n}\s*,\s*(?:also known as|aka|alias)\s+{a}\b",
+        rf"\b{a}\s*,\s*(?:also known as|aka|alias)\s+{n}\b",
+        rf"\b{n}\s+stands\s+for\s+{a}\b",
+        rf"\b{a}\s+stands\s+for\s+{n}\b",
+        rf"\b{n}\s+short\s+for\s+{a}\b",
+        rf"\b{a}\s+short\s+for\s+{n}\b",
+    ]
+    for pat in patterns:
+        if re.search(pat, user_message, re.IGNORECASE):
+            return True
+    return False
+
+
+def has_replacement_evidence(user_message: str) -> bool:
+    """Verify that user_message explicitly indicates correction, replacement, or migration."""
+    if not user_message:
+        return False
+    replace_patterns = [
+        r"\b(?:switch|switched|switching)\s+(?:from\s+\w+\s+)?to\b",
+        r"\b(?:replace|replaced|replaces|replacing)\b",
+        r"\binstead\s+of\b",
+        r"\bno\s+longer\s+(?:use|using|need|have)\b",
+        r"\bstopped\s+using\b",
+        r"\bdon't\s+use\s+\w+\s+anymore\b",
+        r"\bmigrat(?:e|ed|ing)\s+to\b",
+        r"\bnot\s+[\w\-]+,\s*(?:but|use)\b",
+        r"\bchanged\s+(?:my\s+mind|to)\b",
+        r"\bcorrect(?:ion|ed)?\s*:\s*",
+        r"\bactually\s*,\s*I\s+(?:use|switched|prefer)\b",
+        r"\bprefer\s+[\w\-]+\s+over\b",
+    ]
+    for pat in replace_patterns:
+        if re.search(pat, user_message, re.IGNORECASE):
+            return True
+    return False
+
+
+class LearningCoordinator:
+    """Orchestrates durable learning lifecycle from completed conversation turns."""
+
+    _active_tasks: set[asyncio.Task] = set()
+    _in_progress_keys: set[str] = set()
+
+    @classmethod
+    async def is_learning_enabled(
+        cls, session: AsyncSession, tenant_id: str, project_id: str
+    ) -> bool:
+        """Inspect persisted Project config or fallback to global default."""
+        from alberto.models import Project
+
+        proj = (
+            await session.execute(
+                select(Project).where(
+                    Project.tenant_id == tenant_id,
+                    Project.id == project_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if proj and proj.config and "memory_learning_enabled" in proj.config:
+            return bool(proj.config["memory_learning_enabled"])
+        return getattr(settings, "memory_learning_enabled", False)
+
+    @classmethod
+    async def schedule_turn_learning(
+        cls,
+        tenant_id: str,
+        project_id: str,
+        source_event_id: str,
+        user_message: str,
+        ai_response: str,
+    ) -> MemoryLearningEvent | None:
+        """Durable non-blocking dispatch of conversation turn learning.
+        Persists the event in SQLite before dispatching background processing."""
+        eligible, _ = MemoryCuratorService.is_eligible_turn(user_message, ai_response)
+        if not eligible:
+            return None
+
+        # 1. Synchronously persist or locate the durable learning event row in SQLite
+        async with SessionLocal() as session:
+            if not await cls.is_learning_enabled(session, tenant_id, project_id):
+                return None
+
+            existing_event = (
+                await session.execute(
+                    select(MemoryLearningEvent).where(
+                        MemoryLearningEvent.tenant_id == tenant_id,
+                        MemoryLearningEvent.project_id == project_id,
+                        MemoryLearningEvent.source_event_id == source_event_id,
+                    )
+                )
+            ).scalar_one_or_none()
+
+            if existing_event:
+                if existing_event.status in ("completed", "review_required", "rejected"):
+                    return existing_event
+                event = existing_event
+            else:
+                event = MemoryLearningEvent(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    source_event_id=source_event_id,
+                    source_type="conversation_turn",
+                    status="pending",
+                    extraction_payload={"turn": {"user_message": user_message, "ai_response": ai_response}},
+                    applied_memory_ids=[],
+                    applied_graph_entity_ids=[],
+                    applied_graph_rel_ids=[],
+                )
+                session.add(event)
+                await session.commit()
+                await session.refresh(event)
+
+        # 2. Dispatch managed in-process background worker if not already running
+        key = f"{tenant_id}:{project_id}:{source_event_id}"
+        if key in cls._in_progress_keys:
+            return event
+
+        cls._in_progress_keys.add(key)
+        task = asyncio.create_task(
+            cls._safe_run_turn_learning(
+                tenant_id, project_id, source_event_id, user_message, ai_response
+            )
+        )
+        cls._active_tasks.add(task)
+        task.add_done_callback(cls._active_tasks.discard)
+        return event
+
+    @classmethod
+    async def _safe_run_turn_learning(
+        cls,
+        tenant_id: str,
+        project_id: str,
+        source_event_id: str,
+        user_message: str,
+        ai_response: str,
+    ) -> None:
+        key = f"{tenant_id}:{project_id}:{source_event_id}"
+        cls._in_progress_keys.add(key)
+        timeout = getattr(settings, "memory_learning_timeout_seconds", 120.0)
+        try:
+            async with asyncio.timeout(timeout):
+                async with SessionLocal() as session:
+                    await cls.process_learning_turn(
+                        session=session,
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        source_event_id=source_event_id,
+                        user_message=user_message,
+                        ai_response=ai_response,
+                    )
+        except TimeoutError:
+            logger.warning("Turn learning timed out for event %s", source_event_id)
+            async with SessionLocal() as session:
+                ev = (
+                    await session.execute(
+                        select(MemoryLearningEvent).where(
+                            MemoryLearningEvent.tenant_id == tenant_id,
+                            MemoryLearningEvent.project_id == project_id,
+                            MemoryLearningEvent.source_event_id == source_event_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if ev and ev.status not in ("completed", "review_required"):
+                    ev.status = "failed"
+                    ev.error = "Turn learning execution timed out"
+                    ev.retry_count += 1
+                    await session.commit()
+        except Exception as e:
+            logger.exception("Turn learning failed for event %s: %s", source_event_id, e)
+            async with SessionLocal() as session:
+                ev = (
+                    await session.execute(
+                        select(MemoryLearningEvent).where(
+                            MemoryLearningEvent.tenant_id == tenant_id,
+                            MemoryLearningEvent.project_id == project_id,
+                            MemoryLearningEvent.source_event_id == source_event_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if ev and ev.status not in ("completed", "review_required"):
+                    ev.status = "failed"
+                    ev.error = str(e)[:200]
+                    ev.retry_count += 1
+                    await session.commit()
+        finally:
+            cls._in_progress_keys.discard(key)
+
+    @classmethod
+    async def process_learning_turn(
+        cls,
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        source_event_id: str,
+        user_message: str,
+        ai_response: str,
+        override_enabled_check: bool = False,
+    ) -> MemoryLearningEvent | None:
+        """Process turn learning with idempotency, coordination, and state transitions."""
+        if not override_enabled_check and not await cls.is_learning_enabled(session, tenant_id, project_id):
+            existing = (
+                await session.execute(
+                    select(MemoryLearningEvent).where(
+                        MemoryLearningEvent.tenant_id == tenant_id,
+                        MemoryLearningEvent.project_id == project_id,
+                        MemoryLearningEvent.source_event_id == source_event_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing and existing.status in ("pending", "applying"):
+                existing.status = "cancelled"
+                existing.error = "Learning scope disabled for project"
+                await session.commit()
+            return None
+
+        # 1. Locate or create event
+        existing_event = (
+            await session.execute(
+                select(MemoryLearningEvent).where(
+                    MemoryLearningEvent.tenant_id == tenant_id,
+                    MemoryLearningEvent.project_id == project_id,
+                    MemoryLearningEvent.source_event_id == source_event_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if existing_event:
+            if existing_event.status in ("completed", "review_required", "rejected"):
+                return existing_event
+            event = existing_event
+        else:
+            event = MemoryLearningEvent(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                source_event_id=source_event_id,
+                source_type="conversation_turn",
+                status="pending",
+                extraction_payload={"turn": {"user_message": user_message, "ai_response": ai_response}},
+                applied_memory_ids=[],
+                applied_graph_entity_ids=[],
+                applied_graph_rel_ids=[],
+            )
+            session.add(event)
+            await session.commit()
+            await session.refresh(event)
+
+        # Check bounded retry policy
+        max_retries = getattr(settings, "memory_learning_max_retries", 3)
+        if event.retry_count >= max_retries:
+            event.status = "failed"
+            event.error = f"Exceeded maximum retry attempts ({max_retries}) (dead-lettered)"
+            await session.commit()
+            return event
+
+        try:
+            # 2. Extract durable candidates (or reuse saved extraction if retrying after extraction)
+            payload = dict(event.extraction_payload or {})
+            saved_output = payload.get("curator_output")
+            if event.status == "extracted" and saved_output:
+                logger.info("Reusing saved extraction payload for event %s on retry", source_event_id)
+                curator_output = MemoryCuratorOutput.model_validate(saved_output)
+            else:
+                event.status = "extracted"
+                existing_active_mems = await MemoryService.list(session, tenant_id, project_id, status="active")
+                mem_texts = [m.text for m in existing_active_mems]
+                await session.commit()
+
+                curator_output = await MemoryCuratorService.extract(
+                    session=session,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    user_message=user_message,
+                    ai_response=ai_response,
+                    existing_memories=mem_texts,
+                )
+
+                if curator_output.extraction_error:
+                    event.status = "failed"
+                    err_str = curator_output.extraction_error
+                    event.error = err_str
+                    event.retry_count += 1
+                    payload["error"] = err_str
+                    event.extraction_payload = payload
+                    await session.commit()
+                    return event
+
+                payload["curator_output"] = curator_output.model_dump()
+                event.extraction_payload = payload
+                await session.commit()
+
+            if not curator_output.should_learn:
+                event.status = "completed"
+                await session.commit()
+                return event
+
+            # 3. Deterministic Validation Stage (NO MUTATIONS YET!)
+            event.status = "validated"
+            review_reasons: list[str] = []
+            requires_review = curator_output.requires_review
+            if curator_output.review_reason:
+                review_reasons.append(curator_output.review_reason)
+
+            # Evidence & Confidence validation on candidate memories
+            for cand in curator_output.memories:
+                conf = float(cand.confidence) if cand.confidence is not None else 0.5
+                if conf < 0.75:
+                    requires_review = True
+                    review_reasons.append(f"Low confidence ({conf:.2f}) on candidate '{cand.content[:35]}'")
+
+                if not cand.evidence_refs:
+                    requires_review = True
+                    review_reasons.append(f"Missing evidence_refs on candidate '{cand.content[:35]}'")
+                else:
+                    s_id = (source_event_id or "").lower()
+                    u_lower = user_message.lower()
+                    grounded = any(
+                        ref.strip().lower() in (s_id, "user", "turn", "msg")
+                        or (s_id and ref.strip().lower() in s_id)
+                        or (s_id and s_id in ref.strip().lower())
+                        or ref.strip().lower().startswith(("msg", "turn", "message", "run", "user"))
+                        or ref.strip().lower() in u_lower
+                        for ref in cand.evidence_refs
+                        if ref.strip()
+                    )
+                    if not grounded:
+                        requires_review = True
+                        review_reasons.append(f"Ungrounded evidence_refs on candidate '{cand.content[:35]}'")
+
+                if cand.operation == "propose_delete":
+                    requires_review = True
+                    review_reasons.append(f"Proposed deletion requires human confirmation: '{cand.content[:35]}'")
+
+                if cand.operation == "propose_replace" and not has_replacement_evidence(user_message):
+                    requires_review = True
+                    review_reasons.append(
+                        f"Proposed replacement by '{cand.content[:35]}' lacks explicit correction/replacement evidence in user message"
+                    )
+
+                for pat in SENSITIVE_PATTERNS:
+                    if re.search(pat, cand.content) or (cand.supersedes_fact and re.search(pat, cand.supersedes_fact)):
+                        requires_review = True
+                        review_reasons.append("Sensitive credential pattern detected in extracted content")
+
+            # Validate candidate entities and aliases are strictly grounded in user message
+            for cand_ent in curator_output.entities:
+                c_name = cand_ent.name.strip()
+                if not c_name:
+                    continue
+                valid_aliases: list[str] = []
+                for alias in (cand_ent.aliases or []):
+                    a_clean = alias.strip().lower()
+                    if not a_clean:
+                        continue
+                    if a_clean not in user_message.lower():
+                        requires_review = True
+                        review_reasons.append(
+                            f"Ungrounded entity alias '{alias}' for '{c_name}' not stated by user"
+                        )
+                    elif not has_alias_equivalence_evidence(c_name, alias, user_message):
+                        requires_review = True
+                        review_reasons.append(
+                            f"Entity alias '{alias}' for '{c_name}' lacks explicit equivalence evidence in user message"
+                        )
+                    else:
+                        valid_aliases.append(alias)
+                cand_ent.aliases = valid_aliases
+
+                c_name_lower = c_name.lower()
+                if c_name_lower not in user_message.lower() and c_name_lower not in (source_event_id or "").lower():
+                    if c_name_lower in ai_response.lower():
+                        requires_review = True
+                        review_reasons.append(
+                            f"Entity '{c_name}' derived from assistant response rather than user assertion"
+                        )
+
+            # Validate Knowledge Graph entities & relationships (purely read-only)
+            graph_val = await GraphManagerService.resolve_and_validate(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                candidate_entities=curator_output.entities,
+                candidate_relationships=curator_output.relationships,
+                source_ref=f"turn:{source_event_id}",
+            )
+            if graph_val["requires_review"]:
+                requires_review = True
+                review_reasons.extend(graph_val["review_reasons"])
+
+            event.requires_review = requires_review
+            if review_reasons:
+                event.error = "; ".join(review_reasons)
+            await session.commit()
+
+            # STRICT INVARIANT: If review required, PAUSE! DO NOT MUTATE ANY STORE!
+            if event.requires_review:
+                event.status = "review_required"
+                await session.commit()
+                return event
+
+            # 4. Applying Coordinated Storage Updates (ACCEPTANCE POLICY SUCCEEDED)
+            event.status = "applying"
+            await session.commit()
+
+            # Apply Knowledge Graph mutations
+            graph_app = await GraphManagerService.apply_resolved(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                resolved_entities=graph_val["resolved_entities"],
+                resolved_relationships=graph_val["resolved_relationships"],
+            )
+            event.applied_graph_entity_ids = graph_app["applied_entities"]
+            event.applied_graph_rel_ids = graph_app["applied_relationships"]
+
+            # Apply Memories (SQLite, ChromaDB, Markdown)
+            existing_active_mems = await MemoryService.list(session, tenant_id, project_id, status="active")
+            applied_mem_ids: list[str] = []
+
+            for cand in curator_output.memories:
+                cand_text = cand.content.strip()
+                if not cand_text:
+                    continue
+
+                duplicate = any(m.text.strip().lower() == cand_text.lower() for m in existing_active_mems)
+                if duplicate and cand.operation != "propose_replace":
+                    logger.debug("Skipping duplicate memory: %s", cand_text)
+                    continue
+
+                superseded_ids: list[str] = []
+                if (cand.operation == "propose_replace" or cand.supersedes_fact) and has_replacement_evidence(user_message):
+                    cand_words = set(re.findall(r"\b[a-zA-Z0-9_\-]+\b", cand_text.lower()))
+                    cand_topic_words = cand_words - {"user", "uses", "for", "the", "a", "an", "is", "using", "with", "now"}
+                    for m in existing_active_mems:
+                        match_supersede = False
+                        if cand.supersedes_fact and cand.supersedes_fact.lower() in m.text.lower():
+                            match_supersede = True
+                        elif cand.operation == "propose_replace":
+                            m_words = set(re.findall(r"\b[a-zA-Z0-9_\-]+\b", m.text.lower()))
+                            m_topic_words = m_words - {"user", "uses", "for", "the", "a", "an", "is", "using", "with", "now"}
+                            if cand_topic_words & m_topic_words:
+                                for w in m_topic_words:
+                                    if len(w) > 3 and w in user_message.lower():
+                                        match_supersede = True
+                                        break
+
+                        if match_supersede:
+                            await MemoryService.update(
+                                session, tenant_id, project_id, m.id, status="superseded"
+                            )
+                            MarkdownMemoryService.sync_memory(
+                                tenant_id, project_id, m.id, m.text, m.kind, status="superseded"
+                            )
+                            superseded_ids.append(m.id)
+
+                cand_conf = float(cand.confidence) if cand.confidence is not None else 1.0
+                saved_mem = await MemoryService.remember(
+                    session=session,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    text=cand_text,
+                    kind=cand.kind,
+                    confidence=cand_conf,
+                    provenance="memory_curator",
+                    status="active",
+                    source_ref=f"turn:{source_event_id}",
+                    meta={"evidence_refs": cand.evidence_refs},
+                )
+                applied_mem_ids.append(saved_mem.id)
+
+                for s_id in superseded_ids:
+                    await MemoryService.update(
+                        session, tenant_id, project_id, s_id, superseded_by=saved_mem.id
+                    )
+
+                MarkdownMemoryService.sync_memory(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    memory_id=saved_mem.id,
+                    text=saved_mem.text,
+                    kind=saved_mem.kind,
+                    confidence=saved_mem.confidence,
+                    status="active",
+                )
+
+            event.applied_memory_ids = applied_mem_ids
+            event.status = "completed"
+            await session.commit()
+
+            await AuditService.log(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                action="memory.learned_from_conversation",
+                resource_type="memory_learning_event",
+                resource_id=event.id,
+                meta={
+                    "source_event_id": source_event_id,
+                    "applied_memories_count": len(applied_mem_ids),
+                    "applied_entities_count": len(event.applied_graph_entity_ids),
+                    "applied_relationships_count": len(event.applied_graph_rel_ids),
+                },
+            )
+            return event
+
+        except Exception as e:
+            logger.exception("Error executing learning turn %s: %s", source_event_id, e)
+            event.status = "failed"
+            event.error = str(e)[:200]
+            event.retry_count += 1
+            await session.commit()
+            return event
+
+    @classmethod
+    async def approve_event(
+        cls,
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        event_id: str,
+        edits: LearningEventApprovalIn | None = None,
+    ) -> MemoryLearningEvent | None:
+        """Human approval of pending candidates in a review_required learning event.
+        Applies candidate memories and graph entities/relationships with reviewer corrections."""
+        event = (
+            await session.execute(
+                select(MemoryLearningEvent).where(
+                    MemoryLearningEvent.id == event_id,
+                    MemoryLearningEvent.tenant_id == tenant_id,
+                    MemoryLearningEvent.project_id == project_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if not event or event.status != "review_required":
+            return event
+
+        payload = dict(event.extraction_payload or {})
+        output_data = payload.get("curator_output") or payload
+        memories = output_data.get("memories", [])
+        entities_data = [EntityCandidate.model_validate(e) for e in output_data.get("entities", [])]
+        rels_data = [RelationshipCandidate.model_validate(r) for r in output_data.get("relationships", [])]
+
+        from alberto.services.ontology_registry import OntologyRegistryService
+
+        applied_edits_audit: dict[str, Any] = {"node_edits": [], "edge_edits": []}
+
+        if edits:
+            # 1. Apply reviewer node edits
+            for n_edit in edits.node_edits:
+                for e in entities_data:
+                    if e.temporary_id == n_edit.temporary_id or e.name.strip().lower() == (n_edit.name or "").strip().lower():
+                        old_k = e.kind
+                        if n_edit.kind and n_edit.kind.strip():
+                            new_k = n_edit.kind.strip().lower()
+                            if new_k != old_k:
+                                e.kind = new_k
+                                # Learn from human correction: persist entity name -> kind mapping
+                                await OntologyRegistryService.record_entity_mapping(
+                                    session=session,
+                                    tenant_id=tenant_id,
+                                    project_id=project_id,
+                                    entity_name=e.name,
+                                    target_type=new_k,
+                                    provenance="human_correction",
+                                )
+                        if n_edit.is_new_ontology_type and n_edit.kind:
+                            # Register approved novel ontology entity type
+                            await OntologyRegistryService.register_entity_type(
+                                session=session,
+                                tenant_id=tenant_id,
+                                project_id=project_id,
+                                canonical_key=n_edit.kind,
+                                description=n_edit.ontology_type_description or f"Approved entity type: {n_edit.kind}",
+                                status="approved",
+                                provenance="human_approved",
+                            )
+                        if n_edit.description:
+                            e.description = n_edit.description
+                        applied_edits_audit["node_edits"].append({
+                            "temporary_id": e.temporary_id,
+                            "name": e.name,
+                            "original_kind": old_k,
+                            "approved_kind": e.kind,
+                            "action": n_edit.action,
+                        })
+
+            rejected_temp_ids = {ne.temporary_id for ne in edits.node_edits if ne.action == "reject"}
+            entities_data = [e for e in entities_data if e.temporary_id not in rejected_temp_ids]
+
+            # 2. Apply reviewer edge edits
+            for idx, r_edit in enumerate(edits.edge_edits):
+                target_rel: RelationshipCandidate | None = None
+                if idx < len(rels_data):
+                    target_rel = rels_data[idx]
+                elif r_edit.source_ref and r_edit.target_ref:
+                    target_rel = next(
+                        (r for r in rels_data if r.source_ref == r_edit.source_ref and r.target_ref == r_edit.target_ref),
+                        None,
+                    )
+
+                if target_rel:
+                    old_rel_k = target_rel.kind
+                    if r_edit.direction == "reverse":
+                        target_rel.source_ref, target_rel.target_ref = target_rel.target_ref, target_rel.source_ref
+                    if r_edit.kind and r_edit.kind.strip():
+                        target_rel.kind = r_edit.kind.strip().upper()
+                    if r_edit.is_new_ontology_type and r_edit.kind:
+                        # Register approved novel ontology relationship type
+                        await OntologyRegistryService.register_relationship_type(
+                            session=session,
+                            tenant_id=tenant_id,
+                            project_id=project_id,
+                            canonical_key=target_rel.kind,
+                            description=r_edit.ontology_type_description or f"Approved relationship type: {target_rel.kind}",
+                            status="approved",
+                            provenance="human_approved",
+                        )
+                    applied_edits_audit["edge_edits"].append({
+                        "original_kind": old_rel_k,
+                        "approved_kind": target_rel.kind,
+                        "direction": r_edit.direction,
+                        "action": r_edit.action,
+                    })
+
+            rejected_edges = {
+                (re.source_ref, re.target_ref) for re in edits.edge_edits if re.action == "reject"
+            }
+            rels_data = [
+                r
+                for r in rels_data
+                if (r.source_ref, r.target_ref) not in rejected_edges
+                and r.source_ref not in rejected_temp_ids
+                and r.target_ref not in rejected_temp_ids
+            ]
+
+        # Audit trail preservation
+        if "original_proposal" not in payload:
+            payload["original_proposal"] = {
+                "entities": output_data.get("entities", []),
+                "relationships": output_data.get("relationships", []),
+                "memories": output_data.get("memories", []),
+            }
+        payload["human_edits"] = applied_edits_audit
+        event.extraction_payload = payload
+
+        # 1. Apply Knowledge Graph candidates
+        if entities_data or rels_data:
+            graph_val = await GraphManagerService.resolve_and_validate(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                candidate_entities=entities_data,
+                candidate_relationships=rels_data,
+                source_ref=f"turn:{event.source_event_id}",
+                session=session,
+            )
+            graph_app = await GraphManagerService.apply_resolved(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                resolved_entities=graph_val["resolved_entities"],
+                resolved_relationships=graph_val["resolved_relationships"],
+            )
+            event.applied_graph_entity_ids = graph_app["applied_entities"]
+            event.applied_graph_rel_ids = graph_app["applied_relationships"]
+
+        # 2. Apply Candidate Memories
+        applied_mem_ids: list[str] = list(event.applied_memory_ids or [])
+        for m_data in memories:
+            text = m_data.get("content", "").strip()
+            if not text:
+                continue
+            kind = m_data.get("kind", "note")
+            conf = float(m_data.get("confidence") or 1.0)
+            saved = await MemoryService.remember(
+                session=session,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                text=text,
+                kind=kind,
+                confidence=conf,
+                provenance="memory_curator_approved",
+                status="active",
+                source_ref=event.source_event_id or f"event:{event.id}",
+                meta={"evidence_refs": m_data.get("evidence_refs", [])},
+            )
+            applied_mem_ids.append(saved.id)
+            MarkdownMemoryService.sync_memory(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                memory_id=saved.id,
+                text=saved.text,
+                kind=saved.kind,
+                confidence=saved.confidence,
+                status="active",
+            )
+
+        event.applied_memory_ids = applied_mem_ids
+        event.requires_review = False
+        event.status = "completed"
+        await session.commit()
+        return event
+
+    @classmethod
+    async def reject_event(
+        cls, session: AsyncSession, tenant_id: str, project_id: str, event_id: str
+    ) -> MemoryLearningEvent | None:
+        """Reject pending candidate knowledge to prevent re-learning. No mutations applied."""
+        event = (
+            await session.execute(
+                select(MemoryLearningEvent).where(
+                    MemoryLearningEvent.id == event_id,
+                    MemoryLearningEvent.tenant_id == tenant_id,
+                    MemoryLearningEvent.project_id == project_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if not event:
+            return None
+
+        event.status = "rejected"
+        event.requires_review = False
+        await session.commit()
+        return event
+
+    @classmethod
+    async def recover_pending_events(
+        cls,
+        tenant_id: str | None = None,
+        project_id: str | None = None,
+    ) -> int:
+        """Scan SQLite for interrupted learning events across restarts and resume them."""
+        recovered = 0
+        async with SessionLocal() as session:
+            stmt = select(MemoryLearningEvent).where(
+                MemoryLearningEvent.status.in_(["pending", "extracted", "applying"]),
+                MemoryLearningEvent.requires_review.is_(False),
+            )
+            if tenant_id:
+                stmt = stmt.where(MemoryLearningEvent.tenant_id == tenant_id)
+            if project_id:
+                stmt = stmt.where(MemoryLearningEvent.project_id == project_id)
+            events = (await session.execute(stmt)).scalars().all()
+
+            ev_snapshots = [
+                (
+                    ev.id,
+                    ev.tenant_id,
+                    ev.project_id,
+                    ev.source_event_id,
+                    ev.retry_count,
+                    dict(ev.extraction_payload or {}),
+                )
+                for ev in events
+            ]
+
+            for ev_id, tenant_id, project_id, source_event_id, retry_count, payload in ev_snapshots:
+                key = f"{tenant_id}:{project_id}:{source_event_id}"
+                if key in cls._in_progress_keys:
+                    logger.debug("Event %s already owned by active worker task; skipping recovery", key)
+                    continue
+
+                enabled = await cls.is_learning_enabled(session, tenant_id, project_id)
+                if not enabled:
+                    ev_obj = await session.get(MemoryLearningEvent, ev_id)
+                    if ev_obj:
+                        ev_obj.status = "cancelled"
+                        ev_obj.error = "Learning scope disabled for project"
+                        await session.commit()
+                    continue
+
+                max_retries = getattr(settings, "memory_learning_max_retries", 3)
+                if retry_count >= max_retries:
+                    ev_obj = await session.get(MemoryLearningEvent, ev_id)
+                    if ev_obj:
+                        ev_obj.status = "failed"
+                        ev_obj.error = f"Exceeded maximum retry attempts ({max_retries}) (dead-lettered)"
+                        await session.commit()
+                    continue
+
+                turn_info = payload.get("turn", {})
+                u_text = turn_info.get("user_message", "")
+                a_text = turn_info.get("ai_response", "")
+                if not u_text:
+                    ev_obj = await session.get(MemoryLearningEvent, ev_id)
+                    if ev_obj:
+                        ev_obj.status = "failed"
+                        ev_obj.error = "Missing turn payload on restart recovery"
+                        await session.commit()
+                    continue
+
+                ev_obj = await session.get(MemoryLearningEvent, ev_id)
+                if ev_obj:
+                    ev_obj.retry_count += 1
+                    await session.commit()
+
+                cls._in_progress_keys.add(key)
+                task = asyncio.create_task(
+                    cls._safe_run_turn_learning(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        source_event_id=source_event_id,
+                        user_message=u_text,
+                        ai_response=a_text,
+                    )
+                )
+                cls._active_tasks.add(task)
+                task.add_done_callback(cls._active_tasks.discard)
+                recovered += 1
+        return recovered
+
+    @classmethod
+    async def drain_active_tasks(cls, timeout: float = 5.0) -> None:
+        """Wait for active background learning tasks during graceful shutdown."""
+        if not cls._active_tasks:
+            return
+        tasks = list(cls._active_tasks)
+        try:
+            async with asyncio.timeout(timeout):
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception:
+            for t in tasks:
+                t.cancel()

@@ -364,6 +364,23 @@ class AlbertoTracer(BaseCallbackHandler):
         cost = sum(s.cost_usd for s in self.spans.values())
         return tokens, round(cost, 6)
 
+    def token_totals(self) -> tuple[int, int, int]:
+        """Returns (prompt_tokens, completion_tokens, total_tokens) across LLM/embedding spans."""
+        in_tok = sum(s.input_tokens for s in self.spans.values() if s.kind in ("llm", "embedding"))
+        out_tok = sum(s.output_tokens for s in self.spans.values() if s.kind == "llm")
+        return in_tok, out_tok, in_tok + out_tok
+
+    def has_token_counts(self) -> bool:
+        """Returns True if any model span reported non-zero token usage."""
+        return any(s.input_tokens > 0 or s.output_tokens > 0 for s in self.spans.values() if s.kind in ("llm", "embedding"))
+
+    def token_breakdown(self) -> dict[str, int | None]:
+        """Structured token usage dict distinguishing prompt, completion, and total."""
+        in_tok, out_tok, total_tok = self.token_totals()
+        if not self.has_token_counts():
+            return {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+        return {"prompt_tokens": in_tok, "completion_tokens": out_tok, "total_tokens": total_tok}
+
     def ordered(self) -> list[SpanRecord]:
         return [self.spans[sid] for sid in self._order if sid in self.spans]
 

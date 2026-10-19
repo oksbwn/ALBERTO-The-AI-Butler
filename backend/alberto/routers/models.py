@@ -958,3 +958,43 @@ async def legacy_discover(
     adapter = ProviderAdapter(provider_type=body.provider_type or "openai_compatible", base_url=body.base_url, api_key=body.api_key)
     discovered = await adapter.discover_models()
     return {"ok": len(discovered) > 0, "models": discovered, "error": None if discovered else "No models discovered"}
+
+
+# --- On-Demand Embedding Model Download & Status ---
+
+class EmbeddingModelStatusOut(BaseModel):
+    model_id: str
+    is_local: bool
+    cached: bool
+    package_installed: bool
+    approx_size: str | None = None
+    cache_dir: str | None = None
+    error: str | None = None
+
+
+class EmbeddingModelDownloadIn(BaseModel):
+    model_id: str
+
+
+@router.get("/embeddings/status", response_model=EmbeddingModelStatusOut)
+async def get_embedding_model_status(
+    model_id: str = Query(...),
+    _: CurrentUser = Depends(require_role("viewer")),
+) -> EmbeddingModelStatusOut:
+    """Check if model weights exist in data/models/fastembed for the selected embedding model."""
+    from alberto.knowledge.embeddings import check_embedding_model_status
+    status = check_embedding_model_status(model_id)
+    return EmbeddingModelStatusOut(**status)
+
+
+@router.post("/embeddings/download")
+async def download_embedding_model(
+    body: EmbeddingModelDownloadIn,
+    _: CurrentUser = Depends(require_role("editor")),
+) -> dict[str, Any]:
+    """Download ONNX weights for ONLY the selected model into data/models/fastembed."""
+    from alberto.knowledge.embeddings import download_embedding_model_weights
+    try:
+        return await download_embedding_model_weights(body.model_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

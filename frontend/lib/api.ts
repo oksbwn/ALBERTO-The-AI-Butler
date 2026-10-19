@@ -230,6 +230,8 @@ export interface Agent {
   config: Record<string, any>;
   created_by?: string | null;
   created_by_email?: string | null;
+  is_system?: boolean;
+  system_key?: string | null;
 }
 
 export interface KbSource { id: string; project_id: string; kind: string; name: string; folder?: string; uri?: string | null; status: string; chunks: number; embedding_model?: string | null; chunking_strategy?: string | null; chunk_size?: number | null; chunk_overlap?: number | null; }
@@ -243,10 +245,198 @@ export interface ChunkDetail { id: string; text: string; source_id?: string | nu
 export interface Trace { id: string; run_id: string; workflow_id?: string | null; name: string; status: string; started_at?: string | null; ended_at?: string | null; latency_ms: number; total_tokens: number; total_cost_usd: number; }
 export interface Span { id: string; parent_span_id?: string | null; name: string; kind: string; latency_ms: number; input?: any; output?: any; model?: string | null; input_tokens: number; output_tokens: number; cost_usd: number; error?: string | null; }
 export interface Conversation { thread_id: string; actor: string; source: string; end_user_id?: string | null; workflow_id?: string | null; turns: number; total_tokens: number; total_cost_usd: number; started_at?: string | null; last_activity?: string | null; status: string; preview: string; }
-export interface Turn { trace_id: string; run_id: string; source: string; user_message?: string | null; ai_response?: string | null; status: string; error?: string | null; latency_ms: number; total_tokens: number; total_cost_usd: number; started_at?: string | null; }
+export interface Turn { trace_id: string; run_id: string; source: string; user_message?: string | null; ai_response?: string | null; status: string; error?: string | null; latency_ms: number; total_tokens: number; total_cost_usd: number; started_at?: string | null; meta?: Record<string, any>; }
 export interface ConversationDetail { conversation: Conversation; turns: Turn[]; }
 export interface Facets { actors: string[]; sources: string[]; }
 export interface Secret { id: string; name: string; kind: string; version: number; }
+
+export interface GraphStats {
+  entity_count: number;
+  relationship_count: number;
+  storage_path: string;
+  is_available: boolean;
+}
+
+export interface GraphEntity {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  kind: string;
+  name: string;
+  canonical_name: string;
+  description: string;
+  source: string;
+  confidence: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GraphRelationship {
+  id: string;
+  source_id: string;
+  target_id: string;
+  kind: string;
+  tenant_id: string;
+  project_id: string;
+  source: string;
+  confidence: number;
+  provenance: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GraphPath {
+  nodes: GraphEntity[];
+  relationships: GraphRelationship[];
+  length: number;
+}
+
+export interface GraphSubgraph {
+  nodes: GraphEntity[];
+  relationships: GraphRelationship[];
+  truncated: boolean;
+  focus_id?: string | null;
+  total_nodes: number;
+  total_relationships: number;
+}
+
+export interface MemoryStatus {
+  memory_learning_enabled: boolean;
+  sqlite: { memory_count: number; qa_count: number };
+  ladybug_graph: { available: boolean; entity_count: number; relationship_count: number; path?: string; error?: string };
+  chroma: {
+    available: boolean;
+    path: string;
+    status?: string;
+    mode?: string;
+    durable?: boolean;
+    backend?: string;
+    reason?: string;
+  };
+  markdown: { status: string; active_writer: boolean; deferred_milestone?: string; path: string; directory_exists: boolean; file_count?: number };
+}
+
+export interface MemoryRecordDetail {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  scope: string;
+  text: string;
+  kind: string;
+  confidence: number;
+  provenance: string;
+  status: string;
+  source_ref?: string | null;
+  superseded_by?: string | null;
+  metadata?: Record<string, any>;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface MemoryLearningSettings {
+  memory_learning_enabled: boolean;
+  tool_execution_learning_enabled?: boolean;
+  memory_curator_model: string;
+  memory_curator_effective_model: string;
+  graph_manager_model: string;
+  graph_manager_effective_model: string;
+  operational_state: string;
+  last_learning_at?: string | null;
+}
+
+export interface LearningEventItem {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  source_event_id: string;
+  source_type: string;
+  status: string;
+  extraction_payload: Record<string, any>;
+  error?: string | null;
+  retry_count: number;
+  requires_review: boolean;
+  applied_memory_ids: string[];
+  applied_graph_entity_ids: string[];
+  applied_graph_rel_ids: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface MarkdownMemoryFile {
+  filename: string;
+  category: string;
+  size_bytes: number;
+  updated_at: string;
+  content?: string | null;
+}
+
+export interface CuratorAdvisorySuggestion {
+  target_type: "entity" | "relationship";
+  target_ref: string;
+  suggested_kind?: string | null;
+  existing_type_mapping?: string | null;
+  suggested_direction?: "normal" | "reverse" | null;
+  explanation: string;
+  evidence_refs: string[];
+  uncertainty: number;
+  requires_new_ontology_definition: boolean;
+}
+
+export interface NodeApprovalEdit {
+  temporary_id: string;
+  name?: string;
+  kind?: string;
+  description?: string;
+  action?: "approve" | "reject" | "reclassify";
+  is_new_ontology_type?: boolean;
+  ontology_type_description?: string;
+}
+
+export interface EdgeApprovalEdit {
+  source_ref?: string;
+  target_ref?: string;
+  kind?: string;
+  direction?: "normal" | "reverse";
+  action?: "approve" | "reject";
+  is_new_ontology_type?: boolean;
+  ontology_type_description?: string;
+}
+
+export interface LearningEventApprovalIn {
+  node_edits?: NodeApprovalEdit[];
+  edge_edits?: EdgeApprovalEdit[];
+  approved_memories?: Record<string, any>[];
+}
+
+export interface OntologyEntityType {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  canonical_key: string;
+  display_name: string;
+  description: string;
+  aliases: string[];
+  status: string;
+  provenance: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface OntologyRelationshipType {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  canonical_key: string;
+  description: string;
+  allowed_source_types: string[];
+  allowed_target_types: string[];
+  direction_semantics: string;
+  aliases: string[];
+  status: string;
+  provenance: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
 
 export interface StatRollup { runs: number; tokens: number; cost_usd: number; avg_latency_ms: number; errors?: number; error_rate?: number; }
 export interface ReportRow extends StatRollup { label: string; kind: "workflow" | "assistant" | "other"; }
@@ -543,6 +733,12 @@ export const api = {
     json<{ ok: boolean }>(`/v1/projects/${pid}/mcp-clients/${cid}`, { method: "DELETE" }),
   discoverMcpTools: (pid: string, cid: string) =>
     json<{ ok: boolean; tools?: { name: string; description?: string }[]; error?: string }>(`/v1/projects/${pid}/mcp-clients/${cid}/tools`),
+  refreshMcpCapabilities: (pid: string, cid: string) =>
+    json<{ ok: boolean; discovery?: any; client?: McpClientT; error?: string }>(`/v1/projects/${pid}/mcp-clients/${cid}/refresh`, { method: "POST" }),
+  updateMcpLearning: (pid: string, cid: string, learning_enabled: boolean) =>
+    json<{ ok: boolean; learning_enabled: boolean }>(`/v1/projects/${pid}/mcp-clients/${cid}/learning`, { method: "PATCH", body: JSON.stringify({ learning_enabled }) }),
+  getMcpCapabilities: (pid: string, cid: string) =>
+    json<{ ok: boolean; capabilities: Record<string, any>; schema_fingerprint?: string; last_discovered_at?: string; learning_enabled: boolean }>(`/v1/projects/${pid}/mcp-clients/${cid}/capabilities`),
 
   // --- Connectors ---------------------------------------------------------------------
   connectorCatalog: (pid: string) =>
@@ -633,6 +829,73 @@ export const api = {
   updateQa: (pid: string, qid: string, body: { question?: string; answer?: string; kind?: string; tags?: string[] }) =>
     json<QaPair>(`/v1/projects/${pid}/qa-pairs/${qid}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteQa: (pid: string, qid: string) => fetch(`${BASE}/v1/projects/${pid}/qa-pairs/${qid}`, { method: "DELETE", headers: authHeader() }),
+  graphStats: (pid: string) => json<GraphStats>(`/v1/projects/${pid}/graph/stats`),
+  graphSubgraph: (pid: string, opts?: { focus_id?: string; search?: string; kind?: string; rel_kind?: string; limit?: number; hop_depth?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.focus_id) q.set("focus_id", opts.focus_id);
+    if (opts?.search) q.set("search", opts.search);
+    if (opts?.kind) q.set("kind", opts.kind);
+    if (opts?.rel_kind) q.set("rel_kind", opts.rel_kind);
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    if (opts?.hop_depth) q.set("hop_depth", String(opts.hop_depth));
+    const qs = q.toString();
+    return json<GraphSubgraph>(`/v1/projects/${pid}/graph/subgraph${qs ? `?${qs}` : ""}`);
+  },
+  graphEntities: (pid: string, opts?: { kind?: string; name?: string; search?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.kind) q.set("kind", opts.kind);
+    if (opts?.name) q.set("name", opts.name);
+    if (opts?.search) q.set("search", opts.search);
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return json<GraphEntity[]>(`/v1/projects/${pid}/graph/entities${qs ? `?${qs}` : ""}`);
+  },
+  graphEntityNeighbors: (pid: string, entityId: string, opts?: { direction?: "in" | "out" | "both"; max_depth?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.direction) q.set("direction", opts.direction);
+    if (opts?.max_depth) q.set("max_depth", String(opts.max_depth));
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return json<GraphPath[]>(`/v1/projects/${pid}/graph/entities/${encodeURIComponent(entityId)}/neighbors${qs ? `?${qs}` : ""}`);
+  },
+  memoryStatus: (pid: string) => json<MemoryStatus>(`/v1/projects/${pid}/memory/status`),
+  recallMemory: (pid: string, body: { query: string; sources?: string[]; scope?: string; top_k?: number }) =>
+    json<{ query: string; results: { source: string; record_id: string; content: string; score?: number; metadata?: any; provenance?: string }[] }>(
+      `/v1/projects/${pid}/memory/recall`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  listMemoryRecords: (pid: string, opts?: { status?: string; kind?: string }) => {
+    const q = new URLSearchParams();
+    if (opts?.status) q.set("status", opts.status);
+    if (opts?.kind) q.set("kind", opts.kind);
+    const qs = q.toString();
+    return json<MemoryRecordDetail[]>(`/v1/projects/${pid}/memory/records${qs ? `?${qs}` : ""}`);
+  },
+  updateMemoryRecord: (pid: string, id: string, body: { text?: string; kind?: string; status?: string }) =>
+    json<MemoryRecordDetail>(`/v1/projects/${pid}/memory/records/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteMemoryRecord: (pid: string, id: string) =>
+    fetch(`${BASE}/v1/projects/${pid}/memory/records/${id}`, { method: "DELETE", headers: authHeader() }),
+  getMemoryLearningSettings: (pid: string) =>
+    json<MemoryLearningSettings>(`/v1/projects/${pid}/memory/learning/settings`),
+  updateMemoryLearningSettings: (pid: string, body: { memory_learning_enabled?: boolean; tool_execution_learning_enabled?: boolean; memory_curator_model?: string; graph_manager_model?: string }) =>
+    json<MemoryLearningSettings>(`/v1/projects/${pid}/memory/learning/settings`, { method: "PATCH", body: JSON.stringify(body) }),
+  listLearningEvents: (pid: string, status?: string) =>
+    json<LearningEventItem[]>(`/v1/projects/${pid}/memory/learning/events${status ? `?status=${status}` : ""}`),
+  approveLearningEvent: (pid: string, id: string, edits?: LearningEventApprovalIn) =>
+    json<LearningEventItem>(`/v1/projects/${pid}/memory/learning/events/${id}/approve`, {
+      method: "POST",
+      body: edits ? JSON.stringify(edits) : undefined,
+    }),
+  getLearningEventSuggestions: (pid: string, id: string) =>
+    json<CuratorAdvisorySuggestion[]>(`/v1/projects/${pid}/memory/learning/events/${id}/suggest`, { method: "POST" }),
+  rejectLearningEvent: (pid: string, id: string) =>
+    json<LearningEventItem>(`/v1/projects/${pid}/memory/learning/events/${id}/reject`, { method: "POST" }),
+  listOntologyEntityTypes: (pid: string, status?: string) =>
+    json<OntologyEntityType[]>(`/v1/projects/${pid}/graph/ontology/entity-types${status ? `?status=${status}` : ""}`),
+  listOntologyRelationshipTypes: (pid: string, status?: string) =>
+    json<OntologyRelationshipType[]>(`/v1/projects/${pid}/graph/ontology/relationship-types${status ? `?status=${status}` : ""}`),
+  listMarkdownMemoryFiles: (pid: string, filename?: string) =>
+    json<MarkdownMemoryFile[]>(`/v1/projects/${pid}/memory/markdown${filename ? `?filename=${encodeURIComponent(filename)}` : ""}`),
   // traces + conversations (Traces view)
   listTraces: (pid: string) => json<Trace[]>(`/v1/projects/${pid}/traces`),
   getTrace: (pid: string, trid: string) => json<{ trace: Trace; spans: Span[] }>(`/v1/projects/${pid}/traces/${trid}`),
@@ -711,6 +974,10 @@ export const api = {
     json<{ ok: boolean; latency_ms: number; tool_called?: string; tool_args?: any; error?: string }>(`/v1/models/registry/${id}/test-tools`, { method: "POST" }),
   setDefaultModel: (modelId: string, projectId?: string) =>
     json<{ ok: boolean; default_model_id: string }>("/v1/models/default", { method: "PUT", body: JSON.stringify({ model_id: modelId, project_id: projectId }) }),
+  getEmbeddingModelStatus: (modelId: string) =>
+    json<{ model_id: string; is_local: boolean; cached: boolean; package_installed: boolean; approx_size?: string; cache_dir?: string; error?: string }>(`/v1/models/embeddings/status?model_id=${encodeURIComponent(modelId)}`),
+  downloadEmbeddingModel: (modelId: string) =>
+    json<{ ok: boolean; model_id: string; cached: boolean; cache_dir?: string }>("/v1/models/embeddings/download", { method: "POST", body: JSON.stringify({ model_id: modelId }) }),
 
   listModelProviders: () => json<ModelProviderT[]>("/v1/models/providers"),
   createModelProvider: (body: { name: string; base_url: string; api_key?: string; enabled?: boolean }) =>
@@ -829,6 +1096,10 @@ export interface McpClientT {
   id: string; name: string; transport: string; url?: string | null; command?: string | null;
   args?: any; headers_ref?: string | null; enabled: boolean; disabled_tools?: string[];
   auth_provider_id?: string | null;
+  capabilities?: Record<string, any>;
+  last_discovered_at?: string | null;
+  schema_fingerprint?: string | null;
+  learning_enabled?: boolean;
   /** Set when a connector owns this server. Its actions are already offered as that connector's
    *  tool set, so tool pickers skip it rather than showing one integration as two choices. */
   connector_slug?: string | null;

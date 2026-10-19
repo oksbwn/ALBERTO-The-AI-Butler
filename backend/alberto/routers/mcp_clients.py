@@ -24,6 +24,7 @@ class McpClientIn(BaseModel):
     # Attach an Auth Provider instead of (or as well as) a static header secret - this is how a
     # server behind OAuth is reached, with refresh and optional per-user credentials.
     auth_provider_id: str | None = None
+    learning_enabled: bool = False
 
 
 class McpClientPatch(BaseModel):
@@ -33,13 +34,26 @@ class McpClientPatch(BaseModel):
     url: str | None = None
     headers_ref: str | None = None
     auth_provider_id: str | None = None
+    learning_enabled: bool | None = None
 
 
 def _out(m: McpClient) -> dict:
-    return {"id": m.id, "name": m.name, "transport": m.transport, "url": m.url,
-            "command": m.command, "args": m.args, "headers_ref": m.headers_ref,
-            "enabled": m.enabled, "disabled_tools": m.disabled_tools or [],
-            "auth_provider_id": m.auth_provider_id}
+    return {
+        "id": m.id,
+        "name": m.name,
+        "transport": m.transport,
+        "url": m.url,
+        "command": m.command,
+        "args": m.args,
+        "headers_ref": m.headers_ref,
+        "enabled": m.enabled,
+        "disabled_tools": m.disabled_tools or [],
+        "auth_provider_id": m.auth_provider_id,
+        "capabilities": m.capabilities or {},
+        "last_discovered_at": m.last_discovered_at.isoformat() if m.last_discovered_at else None,
+        "schema_fingerprint": m.schema_fingerprint,
+        "learning_enabled": m.learning_enabled,
+    }
 
 
 @router.get("")
@@ -103,12 +117,97 @@ async def update_client(project_id: str, client_id: str, body: McpClientPatch, s
     if body.auth_provider_id is not None:
         # "" clears the attachment (back to anonymous / headers_ref only).
         m.auth_provider_id = body.auth_provider_id or None
+    if body.learning_enabled is not None:
+        m.learning_enabled = body.learning_enabled
     await session.commit()
     await session.refresh(m)
     # Drop the cached connection so running agents pick up the new config (audit F12).
     from alberto.tools.mcp import invalidate_client
     await invalidate_client(client_id)
     return _out(m)
+
+
+class McpLearningToggleIn(BaseModel):
+    learning_enabled: bool
+
+
+@router.post("/{client_id}/refresh")
+async def refresh_capabilities(
+    project_id: str,
+    client_id: str,
+    session: AsyncSession = Depends(get_session),
+    tenant_id: str = Depends(current_tenant_id),
+    user: CurrentUser = Depends(get_current_user),
+    _: CurrentUser = Depends(require_role("editor")),
+):
+    """Explicitly discover and refresh integration tool schemas, fingerprint, and graph representation."""
+    from alberto.services.mcp_discovery import McpDiscoveryService
+    from alberto.tools.mcp import McpUnavailable, describe_mcp_error
+
+    row = (await session.execute(
+        select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
+
+    try:
+        summary = await McpDiscoveryService.discover_and_update(
+            session=session,
+            client_row=row,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            context={"end_user_id": user.id},
+        )
+        return {"ok": True, "discovery": summary, "client": _out(row)}
+    except McpUnavailable as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": f"Discovery failed: {describe_mcp_error(e)}"}
+
+
+@router.patch("/{client_id}/learning")
+async def update_learning_toggle(
+    project_id: str,
+    client_id: str,
+    body: McpLearningToggleIn,
+    session: AsyncSession = Depends(get_session),
+    tenant_id: str = Depends(current_tenant_id),
+    _: CurrentUser = Depends(require_role("editor")),
+):
+    """Toggle tool execution learning permission for this specific integration."""
+    row = (await session.execute(
+        select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
+
+    row.learning_enabled = body.learning_enabled
+    await session.commit()
+    await session.refresh(row)
+    return {"ok": True, "learning_enabled": row.learning_enabled}
+
+
+@router.get("/{client_id}/capabilities")
+async def get_capabilities(
+    project_id: str,
+    client_id: str,
+    session: AsyncSession = Depends(get_session),
+    tenant_id: str = Depends(current_tenant_id),
+):
+    """Retrieve cached discovery capabilities and fingerprint without triggering remote connection."""
+    row = (await session.execute(
+        select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
+
+    return {
+        "ok": True,
+        "capabilities": row.capabilities or {},
+        "schema_fingerprint": row.schema_fingerprint,
+        "last_discovered_at": row.last_discovered_at.isoformat() if row.last_discovered_at else None,
+        "learning_enabled": row.learning_enabled,
+    }
 
 
 @router.get("/{client_id}/tools")

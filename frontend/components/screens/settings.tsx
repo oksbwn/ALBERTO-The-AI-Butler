@@ -161,6 +161,38 @@ export function SettingsScreen({ project }: { project: any }) {
   const embeddingModel = rag.embedding_model || defaultEmbedding;
   const setRag = (patch: Record<string, any>) => setCfg({ rag_defaults: { ...rag, ...patch } });
 
+  const [embedStatus, setEmbedStatus] = useState<{
+    model_id: string;
+    is_local: boolean;
+    cached: boolean;
+    package_installed: boolean;
+    approx_size?: string;
+    cache_dir?: string;
+    error?: string;
+  } | null>(null);
+  const [downloadingEmbed, setDownloadingEmbed] = useState(false);
+
+  useEffect(() => {
+    if (!embeddingModel) return;
+    api.getEmbeddingModelStatus(embeddingModel)
+      .then(setEmbedStatus)
+      .catch(() => setEmbedStatus(null));
+  }, [embeddingModel]);
+
+  const handleDownloadEmbed = async () => {
+    if (!embeddingModel || downloadingEmbed) return;
+    setDownloadingEmbed(true);
+    try {
+      await api.downloadEmbeddingModel(embeddingModel);
+      const res = await api.getEmbeddingModelStatus(embeddingModel);
+      setEmbedStatus(res);
+    } catch (e: any) {
+      alert(`Download failed: ${e?.message || e}`);
+    } finally {
+      setDownloadingEmbed(false);
+    }
+  };
+
   async function persist() {
     setSave("saving");
     try {
@@ -679,6 +711,41 @@ export function SettingsScreen({ project }: { project: any }) {
                       })}
                       {embeddingModel && !embeddingModels.some((m) => m.id === embeddingModel) && <option value={embeddingModel}>{embeddingModel}</option>}
                     </select>
+                    {embedStatus?.is_local && (
+                      <div className="row gap2" style={{ marginTop: 8, alignItems: "center" }}>
+                        <span
+                          className="badge"
+                          style={{
+                            background: embedStatus.cached
+                              ? "rgba(34, 197, 94, 0.12)"
+                              : "rgba(234, 179, 8, 0.15)",
+                            color: embedStatus.cached
+                              ? "var(--ok, #22c55e)"
+                              : "var(--warn, #eab308)",
+                          }}
+                        >
+                          {embedStatus.cached
+                            ? "✓ Weights ready"
+                            : `Not downloaded (${embedStatus.approx_size || "local"})`}
+                        </span>
+                        {!embedStatus.cached && (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-primary"
+                            onClick={handleDownloadEmbed}
+                            disabled={downloadingEmbed}
+                          >
+                            <Icon name="download" size={13} />
+                            {downloadingEmbed ? "Downloading…" : "Download weights"}
+                          </button>
+                        )}
+                        {!embedStatus.package_installed && !embedStatus.cached && (
+                          <span className="t-micro fg-2" style={{ color: "var(--err)" }}>
+                            Requires fastembed installed in backend
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </Field>
                   <Field label="Retrieval mode" help="How chunks are matched vs. handed to the agent. Chunk: search and return the same chunks. Parent/child: embed small child chunks for precise matching but feed the agent the larger parent passage for context.">
                     <Segmented

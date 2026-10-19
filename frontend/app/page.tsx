@@ -9,7 +9,14 @@ import { ToolsScreen, ToolBuilderScreen } from "@/components/screens/tools";
 import { WorkflowsScreen, WorkflowCanvas } from "@/components/screens/workflows";
 import { AgentsScreen, AgentConfigScreen } from "@/components/screens/agents";
 import { ComponentsScreen, ComponentBuilderScreen } from "@/components/screens/components";
-import { KnowledgeScreen } from "@/components/screens/knowledge";
+import {
+  KnowledgePlaygroundScreen,
+  KnowledgeDocsScreen,
+  KnowledgeVectorScreen,
+  KnowledgeQaScreen,
+  KnowledgeGraphScreen,
+  KnowledgeMemoryScreen,
+} from "@/components/screens/knowledge";
 import { TracesScreen } from "@/components/screens/traces";
 import { AuthProvidersScreen } from "@/components/screens/auth";
 import { SettingsScreen } from "@/components/screens/settings";
@@ -27,9 +34,16 @@ const SCREEN_LABEL: Record<string, string> = {
   auth: "Auth Providers", knowledge: "Knowledge", playground: "Playground", traces: "Traces",
   connectors: "Connectors", settings: "Settings",
   channels: "Channels", triggers: "Triggers", datasets: "Evaluations", handoff: "Agent Inbox",
+  "knowledge-playground": "Playground", "knowledge-docs": "Documents", "knowledge-vector": "Vector Store",
+  "knowledge-qa": "Q&A Pairs", "knowledge-graph": "Knowledge Graph", "knowledge-memory": "Long-Term Memory",
+  "knowledge-explorer": "Playground",
 };
 const PARENT: Record<string, [string, string]> = {
   "workflow-canvas": ["workflows", "Workflows"], "agent-config": ["agents", "Agents"], "tool-builder": ["tools", "Tools"], "component-builder": ["components", "Components"],
+  "knowledge-playground": ["knowledge-playground", "Knowledge"], "knowledge-docs": ["knowledge-playground", "Knowledge"],
+  "knowledge-vector": ["knowledge-playground", "Knowledge"], "knowledge-qa": ["knowledge-playground", "Knowledge"],
+  "knowledge-graph": ["knowledge-playground", "Knowledge"], "knowledge-memory": ["knowledge-playground", "Knowledge"],
+  "knowledge-explorer": ["knowledge-playground", "Knowledge"],
 };
 
 function App() {
@@ -147,8 +161,14 @@ function App() {
       case "components": return <ComponentsScreen project={project} onOpen={(c) => { setSelComponent(c); navScreen("component-builder"); }} />;
       case "component-builder": return <ComponentBuilderScreen project={project} componentId={selComponent?.id} onBack={() => navScreen("components")} />;
       case "auth": return <AuthProvidersScreen project={project} />;
-      case "connectors": return <ConnectorsScreen project={project} onOpenToolSet={(setId) => { setFocusToolSet(setId); navScreen("tools"); }} />;
-      case "knowledge": return <KnowledgeScreen project={project} />;
+      case "knowledge":
+      case "knowledge-playground":
+      case "knowledge-explorer": return <KnowledgePlaygroundScreen project={project} />;
+      case "knowledge-docs": return <KnowledgeDocsScreen project={project} />;
+      case "knowledge-vector": return <KnowledgeVectorScreen project={project} />;
+      case "knowledge-qa": return <KnowledgeQaScreen project={project} />;
+      case "knowledge-graph": return <KnowledgeGraphScreen project={project} />;
+      case "knowledge-memory": return <KnowledgeMemoryScreen project={project} />;
       case "channels": return <ChannelsScreen project={project} />;
       case "triggers": return <TriggersScreen project={project} />;
       case "datasets": return <DatasetsScreen project={project} />;
@@ -163,7 +183,10 @@ function App() {
     view.screen === "workflow-canvas" ? "workflows" :
     view.screen === "agent-config" ? "agents" :
     view.screen === "tool-builder" ? "tools" :
-    view.screen === "component-builder" ? "components" : (view.screen || "home");
+    view.screen === "component-builder" ? "components" :
+    view.screen === "knowledge" ? "knowledge-playground" :
+    view.screen === "knowledge-explorer" ? "knowledge-playground" :
+    (view.screen || "home");
 
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden" }}>
@@ -181,6 +204,7 @@ function App() {
         <Topbar
           crumbs={crumbs}
           right={topRight}
+          project={project}
           onCommand={() => setCmdOpen(true)}
         />
         <div key={(view.screen || "") + (project?.id || "") + refreshNonce} className="col grow" style={{ minHeight: 0 }}>

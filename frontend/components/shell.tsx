@@ -95,9 +95,96 @@ function AccountMenu() {
   );
 }
 
+/* ---------------- Learning indicator / toggle ---------------- */
+export function LearningIndicatorToggle({ project }: { project: any }) {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchSettings = () => {
+    if (!project?.id) return;
+    import("@/lib/api")
+      .then(({ api }) => api.getMemoryLearningSettings(project.id))
+      .then((s) => setEnabled(Boolean(s.memory_learning_enabled)))
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    fetchSettings();
+  }, [project?.id]);
+
+  useEffect(() => {
+    const handler = (e: any) => {
+      if (e.detail && typeof e.detail.memory_learning_enabled === "boolean") {
+        setEnabled(e.detail.memory_learning_enabled);
+      } else {
+        fetchSettings();
+      }
+    };
+    window.addEventListener("alberto:learning-changed", handler);
+    return () => window.removeEventListener("alberto:learning-changed", handler);
+  }, [project?.id]);
+
+  if (!project?.id) return null;
+
+  const isEnabled = Boolean(enabled);
+
+  const toggle = async () => {
+    if (loading || !project?.id) return;
+    setLoading(true);
+    try {
+      const { api } = await import("@/lib/api");
+      const nextState = !isEnabled;
+      const updated = await api.updateMemoryLearningSettings(project.id, {
+        memory_learning_enabled: nextState,
+      });
+      setEnabled(Boolean(updated.memory_learning_enabled));
+      window.dispatchEvent(new CustomEvent("alberto:learning-changed", { detail: updated }));
+    } catch (err: any) {
+      alert(`Failed to update learning settings: ${err?.message || err}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <button
+      onClick={toggle}
+      disabled={loading}
+      className="row gap2"
+      title={`Autonomous Memory Learning: ${isEnabled ? "ON (click to turn OFF)" : "OFF (click to turn ON)"}`}
+      aria-label={`Toggle autonomous memory learning, currently ${isEnabled ? "ON" : "OFF"}`}
+      style={{
+        height: 32,
+        padding: "0 8px",
+        borderRadius: 6,
+        cursor: loading ? "wait" : "pointer",
+        fontSize: 11.5,
+        fontWeight: 700,
+        fontFamily: "var(--font-ui)",
+        border: isEnabled ? "1px solid rgba(34, 197, 94, 0.35)" : "1px solid rgba(239, 68, 68, 0.35)",
+        background: isEnabled ? "rgba(34, 197, 94, 0.1)" : "rgba(239, 68, 68, 0.08)",
+        color: isEnabled ? "var(--ok, #22c55e)" : "var(--err, #ef4444)",
+        transition: "all 0.15s ease",
+        alignItems: "center",
+      }}
+    >
+      <Icon
+        name="brain"
+        size={15}
+        style={{
+          color: isEnabled ? "var(--ok, #22c55e)" : "var(--err, #ef4444)",
+          filter: isEnabled ? "drop-shadow(0 0 3px rgba(34, 197, 94, 0.45))" : "none",
+          flex: "none",
+        }}
+      />
+      <span>{loading ? "…" : isEnabled ? "ON" : "OFF"}</span>
+    </button>
+  );
+}
+
 /* ---------------- Topbar ---------------- */
 export interface Crumb { label: string; onClick?: () => void }
-export function Topbar({ crumbs, right, left, onCommand }: { crumbs: Crumb[]; right?: ReactNode; left?: ReactNode; onCommand: () => void }) {
+export function Topbar({ crumbs, right, left, onCommand, project }: { crumbs: Crumb[]; right?: ReactNode; left?: ReactNode; onCommand: () => void; project?: any }) {
   const [theme, setTheme] = useTheme();
 
   return (
@@ -115,6 +202,7 @@ export function Topbar({ crumbs, right, left, onCommand }: { crumbs: Crumb[]; ri
         ))}
       </div>
       <div style={{ flex: 1 }} />
+      {project && <LearningIndicatorToggle project={project} />}
       <button className="row gap2" onClick={onCommand}
         style={{ height: 32, padding: "0 10px", border: "1px solid var(--line-strong)", borderRadius: 6, background: "var(--bg-1)", cursor: "pointer", color: "var(--fg-2)", fontSize: 12.5 }}>
         <Icon name="search" size={15} />
@@ -195,6 +283,7 @@ export function ProjectSidebar({
   const [flyoutPos, setFlyoutPos] = useState<{ top: number } | null>(null);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     automate: true,
+    knowledge_group: true,
     integrations: true,
     observability: true,
   });

@@ -121,14 +121,12 @@ cleanup() {
   echo ""
   echo "Shutting down Alberto processes..."
 
-  if [ -n "${FRONTEND_PID}" ] && kill -0 "${FRONTEND_PID}" 2>/dev/null; then
-    kill -TERM "${FRONTEND_PID}" 2>/dev/null || true
+  # Cross-platform cleanup for all child workers, ports, and database locks
+  if [ -n "${PYTHON_BIN}" ] && [ -f "${REPO_ROOT}/backend/alberto/util/process_cleanup.py" ]; then
+    "${PYTHON_BIN}" "${REPO_ROOT}/backend/alberto/util/process_cleanup.py" \
+      --ports "${BACKEND_PORT}" "${FRONTEND_PORT}" \
+      --lock-files "${REPO_ROOT}/data/db/ladybug/.owner.lock" 2>/dev/null || true
   fi
-  if [ -n "${BACKEND_PID}" ] && kill -0 "${BACKEND_PID}" 2>/dev/null; then
-    kill -TERM "${BACKEND_PID}" 2>/dev/null || true
-  fi
-
-  sleep 1
 
   if [ -n "${FRONTEND_PID}" ] && kill -0 "${FRONTEND_PID}" 2>/dev/null; then
     kill -9 "${FRONTEND_PID}" 2>/dev/null || true
@@ -145,6 +143,13 @@ trap cleanup INT TERM EXIT
 # ------------------------------------------------------------------------------
 # 5. Start Backend
 # ------------------------------------------------------------------------------
+# Free any stale process, port conflict, or database lock (cross-platform: Linux, macOS, Windows)
+if [ -n "${PYTHON_BIN}" ] && [ -f "${REPO_ROOT}/backend/alberto/util/process_cleanup.py" ]; then
+  "${PYTHON_BIN}" "${REPO_ROOT}/backend/alberto/util/process_cleanup.py" \
+    --ports "${BACKEND_PORT}" \
+    --lock-files "${REPO_ROOT}/data/db/ladybug/.owner.lock" 2>/dev/null || true
+fi
+
 echo "Starting FastAPI backend on port ${BACKEND_PORT}..."
 export PYTHONPATH="${REPO_ROOT}/backend${PYTHONPATH:+:${PYTHONPATH}}"
 "${PYTHON_BIN}" -m uvicorn alberto.main:app --host 0.0.0.0 --port "${BACKEND_PORT}" --reload --reload-dir "${REPO_ROOT}/backend/alberto" &
@@ -159,6 +164,11 @@ fi
 # ------------------------------------------------------------------------------
 # 6. Start Frontend
 # ------------------------------------------------------------------------------
+if [ -n "${PYTHON_BIN}" ] && [ -f "${REPO_ROOT}/backend/alberto/util/process_cleanup.py" ]; then
+  "${PYTHON_BIN}" "${REPO_ROOT}/backend/alberto/util/process_cleanup.py" \
+    --ports "${FRONTEND_PORT}" 2>/dev/null || true
+fi
+
 echo "Starting Next.js frontend on port ${FRONTEND_PORT}..."
 (
   cd "${REPO_ROOT}/frontend"

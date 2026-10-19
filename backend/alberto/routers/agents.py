@@ -49,8 +49,11 @@ async def list_agents(project_id: str, session: AsyncSession = Depends(get_sessi
 @router.post("", response_model=AgentOut, status_code=201)
 async def create_agent(project_id: str, body: AgentCreate, session: AsyncSession = Depends(get_session),
                        tenant_id: str = Depends(current_tenant_id), user: CurrentUser = Depends(require_role("editor"))):
-    agent = await AgentService.create(session, tenant_id, project_id, name=body.name, config=body.config,
-                                      created_by=user.id, created_by_email=user.email)
+    try:
+        agent = await AgentService.create(session, tenant_id, project_id, name=body.name, config=body.config,
+                                          created_by=user.id, created_by_email=user.email)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     await safe_snapshot(session, "agent", agent, author=user)
     return agent
 
@@ -69,7 +72,10 @@ async def update_agent(project_id: str, agent_id: str, body: AgentUpdate, sessio
     agent = await AgentService.get(session, tenant_id, agent_id)
     if agent is None:
         raise HTTPException(404, "Agent not found")
-    agent = await AgentService.update(session, agent, name=body.name, config=body.config)
+    try:
+        agent = await AgentService.update(session, agent, name=body.name, config=body.config)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     await safe_snapshot(session, "agent", agent, author=user)
     return agent
 
@@ -80,7 +86,12 @@ async def delete_agent(project_id: str, agent_id: str, session: AsyncSession = D
     agent = await AgentService.get(session, tenant_id, agent_id)
     if agent is None:
         raise HTTPException(404, "Agent not found")
-    await AgentService.delete(session, agent)
+    if agent.is_system:
+        raise HTTPException(403, "Protected system agents cannot be deleted.")
+    try:
+        await AgentService.delete(session, agent)
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from e
 
 
 @router.post("/validate", response_model=ValidateOut)

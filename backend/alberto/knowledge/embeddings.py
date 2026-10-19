@@ -252,3 +252,89 @@ def cosine(a: list[float], b: list[float]) -> float:
     na = math.sqrt(sum(x * x for x in a)) or 1.0
     nb = math.sqrt(sum(x * x for x in b)) or 1.0
     return dot / (na * nb)
+
+
+def check_embedding_model_status(model_id: str) -> dict:
+    """Check if model weights exist in data/models/fastembed for the selected model."""
+    from pathlib import Path
+
+    from alberto.config import settings
+
+    is_local = not (model_id and (model_id.startswith("openai:") or model_id.startswith("hosted:")))
+    if not is_local:
+        return {
+            "model_id": model_id,
+            "is_local": False,
+            "cached": True,
+            "package_installed": True,
+            "cache_dir": None,
+        }
+
+    bare_name = model_id.split(":", 1)[1].strip() if (model_id and ":" in model_id) else (model_id or _DEFAULT_FASTEMBED)
+    cache_path = Path(settings.fastembed_cache_dir)
+
+    try:
+        import fastembed  # noqa: F401
+        package_installed = True
+    except ImportError:
+        package_installed = False
+
+    cached = False
+    if cache_path.exists():
+        sanitized = bare_name.replace("/", "-").lower()
+        alt_sanitized = bare_name.replace("/", "--").lower()
+        leaf = bare_name.split("/")[-1].lower()
+        for item in cache_path.iterdir():
+            if item.is_dir():
+                il = item.name.lower()
+                if sanitized in il or alt_sanitized in il or leaf in il:
+                    onnx_files = list(item.glob("**/*.onnx"))
+                    if onnx_files:
+                        cached = True
+                        break
+
+    approx_size = "130 MB" if "small" in bare_name else "440 MB" if "base" in bare_name else "1.3 GB"
+    return {
+        "model_id": model_id or f"fastembed:{_DEFAULT_FASTEMBED}",
+        "bare_name": bare_name,
+        "is_local": True,
+        "cached": cached,
+        "package_installed": package_installed,
+        "approx_size": approx_size,
+        "cache_dir": str(cache_path),
+    }
+
+
+async def download_embedding_model_weights(model_id: str) -> dict:
+    """Download ONNX weights for ONLY the selected model into data/models/fastembed."""
+    import asyncio
+    from pathlib import Path
+
+    from alberto.config import settings
+
+    status = check_embedding_model_status(model_id)
+    if not status["is_local"]:
+        return {"ok": True, "model_id": model_id, "cached": True, "message": "Hosted model requires no local download"}
+
+    if not status["package_installed"]:
+        raise RuntimeError(
+            "Package 'fastembed' is not installed in the backend Python environment. "
+            "Please install with: pip install \"fastembed>=0.3\""
+        )
+
+    bare_name = status["bare_name"]
+    cache_dir = settings.fastembed_cache_dir
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+
+    def _download():
+        from fastembed import TextEmbedding
+        _ = TextEmbedding(model_name=bare_name, cache_dir=cache_dir)
+        return True
+
+    await asyncio.to_thread(_download)
+    return {
+        "ok": True,
+        "model_id": model_id,
+        "cached": True,
+        "cache_dir": cache_dir,
+    }

@@ -32,11 +32,13 @@ from alberto.routers import (
     connectors,
     conversations,
     evals,
+    graph,
     handoff,
     health,
     hooks,
     knowledge,
     mcp_clients,
+    memory,
     models,
     nodes,
     oauth,
@@ -84,7 +86,10 @@ async def _reaper_loop(app: FastAPI) -> None:
     from alberto.services.runs import RunService
 
     log = logging.getLogger("forge.reaper")
-    run_service = RunService(checkpointer=app.state.checkpointer, store=app.state.store)
+    run_service = RunService(
+        checkpointer=getattr(app.state, "checkpointer", None),
+        store=getattr(app.state, "store", None),
+    )
     while True:
         try:
             await asyncio.sleep(300)
@@ -115,16 +120,24 @@ async def _retention_loop() -> None:
 
 async def _scheduler_loop(app: FastAPI) -> None:
     """Fire due `schedule` triggers once a minute. Single-worker in-process scheduler."""
-    from alberto.services.dispatch import run_due_app_events, run_due_schedules
+    from alberto.services.dispatch import (
+        run_due_app_events,
+        run_due_schedules,
+        run_due_source_syncs,
+    )
     from alberto.services.runs import RunService
 
     log = logging.getLogger("forge.scheduler")
-    run_service = RunService(checkpointer=app.state.checkpointer, store=app.state.store)
+    run_service = RunService(
+        checkpointer=getattr(app.state, "checkpointer", None),
+        store=getattr(app.state, "store", None),
+    )
     while True:
         try:
             await asyncio.sleep(60)
             await run_due_schedules(run_service)
             await run_due_app_events(run_service)
+            await run_due_source_syncs()
         except asyncio.CancelledError:
             break
         except Exception:  # noqa: BLE001 - keep the scheduler alive across failures
@@ -165,7 +178,6 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=_preload_heavy_modules, name="forge-preload", daemon=True).start()
     app.state.exit_stack = AsyncExitStack()
     app.state.checkpointer = await _make_checkpointer(app.state.exit_stack)
-    app.state.store = None
     from alberto.queue import set_checkpointer
 
     set_checkpointer(app.state.checkpointer)
@@ -174,17 +186,30 @@ async def lifespan(app: FastAPI):
         if settings.seed_demo:
             await seed_demo_data(session, tenant_id)
         app.state.tenant_id = tenant_id
+    app.state.store = None
+    from alberto.knowledge.graph import get_graph_adapter
+    app.state.graph_db = get_graph_adapter()
     # Immediate startup sweep for stranded runs and abandoned tasks from previous process (Milestone 1.6)
     with contextlib.suppress(Exception):
         from alberto.services.runs import RunService
 
-        startup_run_service = RunService(checkpointer=app.state.checkpointer, store=app.state.store)
+        startup_run_service = RunService(
+            checkpointer=getattr(app.state, "checkpointer", None),
+            store=getattr(app.state, "store", None),
+        )
         reaped = await startup_run_service.reap_stale_runs(
             queued_max_age_s=settings.run_wall_clock_timeout_seconds * 3,
             running_max_age_s=settings.run_wall_clock_timeout_seconds,
         )
         if reaped:
             logging.getLogger("forge.startup").info("Startup sweep reaped %d stale/abandoned runs", reaped)
+    # Immediate startup sweep for pending/interrupted memory learning events (Milestone 2.1)
+    with contextlib.suppress(Exception):
+        from alberto.services.learning_coordinator import LearningCoordinator
+
+        recovered = await LearningCoordinator.recover_pending_events()
+        if recovered:
+            logging.getLogger("forge.startup").info("Startup sweep recovered %d pending learning events", recovered)
     if settings.otel_enabled:
         from alberto.tracing import otel
 
@@ -222,6 +247,10 @@ async def lifespan(app: FastAPI):
         from alberto.queue import set_checkpointer
 
         set_checkpointer(None)
+    with contextlib.suppress(Exception):
+        from alberto.knowledge.graph import reset_graph_adapter
+
+        reset_graph_adapter()
     await aclose_shared_client()
     await app.state.exit_stack.aclose()
 
@@ -263,6 +292,7 @@ def create_app() -> FastAPI:
         knowledge.router, knowledge.qa_router, traces.router, conversations.router, assistant.router, stats.router,
         triggers_router.router, channels.router, channels.public, handoff.router, evals.router,
         mcp_clients.router, versions.router,
+        graph.router, memory.router,
         connectors.router,
     ):
         app.include_router(r)

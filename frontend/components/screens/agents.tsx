@@ -72,15 +72,43 @@ export function AgentsScreen({ project, onOpen }: { project: any; onOpen: (a: Ag
               const c = a.config || {};
               const tools = (c.tools || []).length;
               const mw = (c.middleware || []).filter((m: any) => m.enabled !== false).length;
+              const isSys = !!a.is_system;
+              const modelDesc = c.model ? `Override: ${c.model}` : "Inherits Global Default";
+              const opStatus = a.system_key === "intent_router"
+                ? "Deterministic"
+                : a.system_key
+                ? "Inactive (M2.1)"
+                : (c.flavor || "agent");
               return (
                 <div key={a.id} className="card card-hover" style={{ padding: 14 }} onClick={() => onOpen(a)}>
                   <div className="row gap3">
-                    <Tile icon={c.flavor === "deep_agent" ? "n_deepagent" : "n_agent"} color="var(--accent)" size={38} />
+                    <Tile icon={c.flavor === "deep_agent" ? "n_deepagent" : "n_agent"} color={isSys ? "var(--cyan, #06b6d4)" : "var(--accent)"} size={38} />
                     <div className="grow">
-                      <div className="row gap2"><span className="t-h2 mono">{a.name}</span><span className="typechip">{c.flavor || "agent"}</span></div>
-                      <div className="fg-2 t-caption mono" style={{ marginTop: 3 }}>{c.model || "-"} · {tools} tools · {mw} middleware{a.created_by_email ? ` · by ${a.created_by_email}` : ""}</div>
+                      <div className="row gap2" style={{ alignItems: "center" }}>
+                        <span className="t-h2 mono">{a.name}</span>
+                        {isSys ? (
+                          <span className="badge" style={{ background: "rgba(6, 182, 212, 0.15)", color: "var(--cyan, #06b6d4)", borderColor: "rgba(6, 182, 212, 0.3)" }}>
+                            System Agent
+                          </span>
+                        ) : (
+                          <span className="typechip">{c.flavor || "agent"}</span>
+                        )}
+                        <span className="badge" style={{ opacity: 0.85, fontSize: "11px" }}>{opStatus}</span>
+                      </div>
+                      <div className="fg-2 t-caption mono" style={{ marginTop: 3 }}>
+                        {modelDesc} · {tools} tools · {mw} middleware{a.created_by_email ? ` · by ${a.created_by_email}` : ""}
+                        {c.description && <span style={{ marginLeft: 8, fontStyle: "italic" }}>— {c.description}</span>}
+                      </div>
                     </div>
-                    <button className="iconbtn" title="Delete agent" disabled={deleting === a.id} onClick={(e) => del(e, a)}><Icon name="trash" size={15} /></button>
+                    {isSys ? (
+                      <span className="iconbtn" title="Protected system agent cannot be deleted" style={{ cursor: "not-allowed", opacity: 0.5 }}>
+                        <Icon name="lock" size={15} />
+                      </span>
+                    ) : (
+                      <button className="iconbtn" title="Delete agent" disabled={deleting === a.id} onClick={(e) => del(e, a)}>
+                        <Icon name="trash" size={15} />
+                      </button>
+                    )}
                     <Icon name="chevright" size={16} style={{ color: "var(--fg-2)" }} />
                   </div>
                 </div>
@@ -120,18 +148,39 @@ export function AgentConfigScreen({ project, agentId, onBack }: { project: any; 
   async function persist() {
     if (!agent) return;
     setSave("saving");
-    await api.updateAgent(project.id, agent.id, { name, config });
+    await api.updateAgent(project.id, agent.id, { name: agent.is_system ? agent.name : name, config });
     setSave("saved");
     setTimeout(() => setSave("idle"), 1400);
   }
 
+  const isSys = !!agent?.is_system;
+
   return (
     <div className="col" style={{ flex: 1, minHeight: 0 }}>
+      {isSys && (
+        <div style={{ background: "rgba(6, 182, 212, 0.1)", borderBottom: "1px solid rgba(6, 182, 212, 0.2)", padding: "8px 20px", display: "flex", alignItems: "center", gap: 10, fontSize: "13px" }}>
+          <Icon name="lock" size={14} style={{ color: "var(--cyan, #06b6d4)" }} />
+          <span>
+            <strong>Protected Built-in System Agent ({agent.system_key})</strong> — Identity is protected. Model overrides are permitted below.
+            {agent.system_key === "intent_router" && " Operational: reuses deterministic routing engine."}
+            {agent.system_key === "memory_curator" && " Operational: Inactive (automatic learning planned for Milestone 2.1)."}
+            {agent.system_key === "graph_manager" && " Operational: Inactive (LLM graph management planned for Milestone 2.1)."}
+          </span>
+        </div>
+      )}
       <div className="row spread" style={{ padding: "12px 20px", borderBottom: "1px solid var(--line)", background: "var(--bg-1)" }}>
         <div className="row gap2">
           <button className="iconbtn" onClick={onBack}><Icon name="chevleft" size={18} /></button>
-          <Tile icon={config.flavor === "deep_agent" ? "n_deepagent" : "n_agent"} color="var(--accent)" size={30} />
-          <input className="input mono" style={{ width: 220 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="agent_name" />
+          <Tile icon={config.flavor === "deep_agent" ? "n_deepagent" : "n_agent"} color={isSys ? "var(--cyan, #06b6d4)" : "var(--accent)"} size={30} />
+          <input
+            className="input mono"
+            style={{ width: 220, opacity: isSys ? 0.7 : 1, cursor: isSys ? "not-allowed" : "text" }}
+            value={name}
+            onChange={(e) => !isSys && setName(e.target.value)}
+            disabled={isSys}
+            title={isSys ? "Protected system agent identity cannot be renamed" : "Agent name"}
+            placeholder="agent_name"
+          />
           {agent?.created_by_email && (
             <span className="fg-2 t-caption row gap1" title={`Created by ${agent.created_by_email}`}>
               <Icon name="user" size={13} />Created by {agent.created_by_email}

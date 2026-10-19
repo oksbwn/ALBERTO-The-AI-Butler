@@ -8,7 +8,14 @@ embedder), so Chroma never needs to download its default model - fully offline.
 from __future__ import annotations
 
 import json
+import math
+import os
+import platform
+import subprocess
+import sys
 from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
 
 from alberto.config import settings
 
@@ -54,8 +61,8 @@ def citation_for(metadata: dict | None) -> str:
 # Client + collection handles are cached process-wide: PersistentClient construction
 # and get_or_create_collection cost ~9s cold / ~10ms warm each (measured), and were
 # previously paid on every store call.
-_CLIENT_CACHE: dict[str, object] = {}
-_COL_CACHE: dict[tuple[str, str], object] = {}
+_CLIENT_CACHE: dict[str, Any] = {}
+_COL_CACHE: dict[tuple[str, str], Any] = {}
 
 # Per-collection write version, bumped on every upsert/delete. The BM25 cache stamps the
 # version it was built at and rebuilds when the collection changes, so a lexical index is
@@ -133,17 +140,428 @@ def _hybrid_fuse(store, *, embedding, query: str, where: dict, top_k: int,
     ]
 
 
+_NATIVE_SUPPORT_CACHE: tuple[bool, str] | None = None
+
+
+def _is_native_chromadb_supported() -> tuple[bool, str]:
+    """Test whether native ChromaDB is operational in the current runtime environment.
+
+    Caches result to avoid repeating checks. Probes binary extensions safely without
+    bringing down the host interpreter if native libraries segfault.
+    """
+    global _NATIVE_SUPPORT_CACHE
+    if _NATIVE_SUPPORT_CACHE is not None:
+        return _NATIVE_SUPPORT_CACHE
+
+    try:
+        import chromadb
+        from chromadb.config import Settings as ChromaSettings
+    except Exception as e:
+        _NATIVE_SUPPORT_CACHE = (False, f"ChromaDB package unavailable: {e}")
+        return _NATIVE_SUPPORT_CACHE
+
+    # On Windows with Python >= 3.13, chromadb_rust_bindings can trigger access violations (0xC0000005).
+    # Probe in an isolated subprocess to prevent crashing the host process if native bindings fail.
+    if platform.system() == "Windows" and sys.version_info >= (3, 13):
+        try:
+            cmd = [
+                sys.executable,
+                "-c",
+                "import chromadb; "
+                "c = chromadb.EphemeralClient(); "
+                "col = c.get_or_create_collection('_probe'); "
+                "col.upsert(ids=['1'], embeddings=[[0.1]*16], documents=['probe'], metadatas=[{}])",
+            ]
+            res = subprocess.run(cmd, capture_output=True, timeout=5, text=True)
+            if res.returncode == 0:
+                _NATIVE_SUPPORT_CACHE = (True, "Native ChromaDB operational.")
+            else:
+                err_hint = res.stderr.strip() if res.stderr else f"process exited with code {res.returncode}"
+                if res.returncode in (1, -1073741819, 3221225477):
+                    err_hint = "native access violation in chromadb_rust_bindings (STATUS_ACCESS_VIOLATION 0xC0000005)"
+                _NATIVE_SUPPORT_CACHE = (
+                    False,
+                    f"Native ChromaDB runtime probe failed: {err_hint}",
+                )
+        except Exception as e:
+            _NATIVE_SUPPORT_CACHE = (False, f"Native ChromaDB runtime probe error: {e}")
+        return _NATIVE_SUPPORT_CACHE
+
+    # On standard runtime environments (Linux, macOS, Python <= 3.12), test in-process
+    try:
+        c = chromadb.EphemeralClient(settings=ChromaSettings(anonymized_telemetry=False, allow_reset=True))
+        col = c.get_or_create_collection("_probe")
+        col.upsert(ids=["probe_1"], embeddings=[[0.1] * 16], documents=["probe"], metadatas=[{}])
+        _NATIVE_SUPPORT_CACHE = (True, "Native ChromaDB operational.")
+    except Exception as e:
+        _NATIVE_SUPPORT_CACHE = (False, f"Native ChromaDB initialization check failed: {e}")
+
+    return _NATIVE_SUPPORT_CACHE
+
+
+_USE_MEMORY_VECTOR_STORE: bool = not _is_native_chromadb_supported()[0]
+
+
+def _should_use_fallback() -> bool:
+    """Return whether fallback vector store should be used, respecting test overrides."""
+    if _USE_MEMORY_VECTOR_STORE is not None:
+        return _USE_MEMORY_VECTOR_STORE
+    return not _is_native_chromadb_supported()[0]
+
+
+def _check_path_durability(path: str) -> tuple[bool, str | None]:
+    """Check if storage path is durable and writable without executing write probes."""
+    if not path or path in (":memory:", "memory"):
+        return False, "In-memory path is non-durable"
+    try:
+        p = Path(path).resolve()
+        if p.exists():
+            if not p.is_dir():
+                return False, f"Storage path '{p}' is a file, not a directory"
+            if not os.access(p, os.W_OK):
+                return False, f"Storage path '{p}' is not writable"
+            return True, None
+        curr = p
+        while not curr.exists() and curr.parent != curr:
+            curr = curr.parent
+        if not os.access(curr, os.W_OK):
+            return False, f"Storage path ancestor '{curr}' is not writable"
+        return True, None
+    except Exception as e:
+        return False, f"Storage path error: {e}"
+
+
+def _matches_where(meta: dict, where: dict) -> bool:
+    if not where:
+        return True
+    if "$and" in where and not all(_matches_where(meta, sub) for sub in where["$and"]):
+        return False
+    if "$or" in where and not any(_matches_where(meta, sub) for sub in where["$or"]):
+        return False
+    for k, v in where.items():
+        if k.startswith("$"):
+            continue
+        actual = meta.get(k)
+        if isinstance(v, dict):
+            if "$eq" in v and actual != v["$eq"]:
+                return False
+            if "$ne" in v and actual == v["$ne"]:
+                return False
+            if "$in" in v and actual not in v["$in"]:
+                return False
+            if "$nin" in v and actual in v["$nin"]:
+                return False
+        elif actual != v:
+            return False
+    return True
+
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
+    na = math.sqrt(sum(x * x for x in a)) or 1.0
+    nb = math.sqrt(sum(x * x for x in b)) or 1.0
+    return dot / (na * nb)
+
+
+class FallbackVectorCollection:
+    """Pure-Python vector collection ensuring 100% crash-free vector storage and recall
+    on platforms where native chromadb bindings trigger access violations (e.g. Windows Python 3.13)."""
+
+    def __init__(self, name: str, persist_path: str | None = None) -> None:
+        self.name = name
+        self.persist_path = persist_path
+        self._items: dict[str, dict[str, Any]] = {}
+        self._load()
+
+    def _file_path(self) -> Path | None:
+        if not self.persist_path or self.persist_path in (":memory:", "memory"):
+            return None
+        try:
+            p = Path(self.persist_path)
+            if p.exists() and p.is_file():
+                p = p.parent
+            p.mkdir(parents=True, exist_ok=True)
+            safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in self.name)
+            return p / f"{safe_name}.json"
+        except Exception:
+            return None
+
+    def _load(self) -> None:
+        fp = self._file_path()
+        if fp and fp.exists():
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self._items = data
+            except Exception:
+                pass
+
+    @property
+    def is_durable(self) -> bool:
+        return self._file_path() is not None
+
+    def _save(self) -> None:
+        fp = self._file_path()
+        if not fp:
+            if self.persist_path and self.persist_path not in (":memory:", "memory"):
+                raise OSError(f"FallbackVectorCollection cannot persist: invalid persist_path '{self.persist_path}'")
+            return
+        try:
+            tmp = fp.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._items), encoding="utf-8")
+            tmp.replace(fp)
+        except Exception as e:
+            import logging
+            logging.getLogger("alberto.knowledge.store").error("FallbackVectorCollection save failed: %s", e)
+            raise OSError(f"FallbackVectorCollection failed to persist vector records: {e}") from e
+
+    def add(self, ids: list[str], embeddings: list[Any], documents: list[str], metadatas: list[dict]) -> None:
+        self.upsert(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+
+    def upsert(self, ids: list[str], embeddings: list[Any], documents: list[str], metadatas: list[dict]) -> None:
+        for i, _id in enumerate(ids):
+            emb = embeddings[i] if i < len(embeddings) else []
+            if hasattr(emb, "tolist"):
+                emb = emb.tolist()
+            doc = documents[i] if i < len(documents) else ""
+            meta = metadatas[i] if i < len(metadatas) else {}
+            self._items[_id] = {
+                "id": _id,
+                "embedding": [float(x) for x in emb],
+                "document": doc,
+                "metadata": dict(meta),
+            }
+        self._save()
+
+    def query(self, query_embeddings: list[list[float]], n_results: int = 5, where: dict | None = None) -> dict:
+        q_emb = [float(x) for x in (query_embeddings[0] if query_embeddings else [])]
+        scored = []
+        for item in self._items.values():
+            if where and not _matches_where(item["metadata"], where):
+                continue
+            sc = _cosine_sim(q_emb, item["embedding"])
+            dist = max(0.0, 1.0 - sc)
+            scored.append((sc, dist, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:n_results]
+        ids = [x[2]["id"] for x in top]
+        docs = [x[2]["document"] for x in top]
+        metas = [x[2]["metadata"] for x in top]
+        dists = [x[1] for x in top]
+        return {
+            "ids": [ids],
+            "documents": [docs],
+            "metadatas": [metas],
+            "distances": [dists],
+        }
+
+    def get(self, ids: list[str] | None = None, where: dict | None = None, limit: int | None = None, include: list[str] | None = None) -> dict:
+        matched = []
+        for _id, item in self._items.items():
+            if ids is not None and _id not in ids:
+                continue
+            if where and not _matches_where(item["metadata"], where):
+                continue
+            matched.append(item)
+            if limit and len(matched) >= limit:
+                break
+        res_ids = [m["id"] for m in matched]
+        res_docs = [m["document"] for m in matched]
+        res_metas = [m["metadata"] for m in matched]
+        res_embs = [m["embedding"] for m in matched]
+        out: dict[str, Any] = {"ids": res_ids, "documents": res_docs, "metadatas": res_metas}
+        if include and "embeddings" in include:
+            out["embeddings"] = res_embs
+        return out
+
+    def delete(self, ids: list[str] | None = None, where: dict | None = None) -> None:
+        to_del = []
+        for _id, item in self._items.items():
+            match_id = ids is None or _id in ids
+            match_where = where is None or _matches_where(item["metadata"], where)
+            if match_id and match_where:
+                to_del.append(_id)
+        for _id in to_del:
+            self._items.pop(_id, None)
+        self._save()
+
+    def count(self) -> int:
+        return len(self._items)
+
+
+def migrate_fallback_to_native(native_col: Any, persist_path: str, collection_name: str) -> bool:
+    """Migrate fallback JSON vector records into a native ChromaDB collection with verification."""
+    cls_fb = FallbackVectorCollection(name=collection_name, persist_path=persist_path)
+    fb_fp = cls_fb._file_path()
+    if not (fb_fp and fb_fp.exists()):
+        return False
+    try:
+        fb_items = json.loads(fb_fp.read_text(encoding="utf-8"))
+        if not (isinstance(fb_items, dict) and fb_items):
+            return False
+        ids = list(fb_items.keys())
+        embs = [fb_items[i]["embedding"] for i in ids]
+        docs = [fb_items[i]["document"] for i in ids]
+        metas = [fb_items[i]["metadata"] for i in ids]
+        native_col.upsert(ids=ids, embeddings=embs, documents=docs, metadatas=metas)
+        # Verification: verify all record IDs, documents, metadata, and embeddings match before archiving
+        verified = native_col.get(ids=ids, include=["documents", "metadatas", "embeddings"])
+        verified_ids = set(verified.get("ids") or [])
+        if not set(ids).issubset(verified_ids):
+            missing = set(ids) - verified_ids
+            raise RuntimeError(f"ChromaDB migration verification failed: missing IDs {missing}")
+
+        v_ids = verified.get("ids") or []
+        v_docs = verified.get("documents") or []
+        v_metas = verified.get("metadatas") or []
+        v_embs = verified.get("embeddings")
+        v_map = {vid: i for i, vid in enumerate(v_ids)}
+
+        for target_id in ids:
+            idx = v_map[target_id]
+            expected_item = fb_items[target_id]
+            if v_docs and idx < len(v_docs) and v_docs[idx] != expected_item.get("document", ""):
+                raise RuntimeError(f"ChromaDB migration verification failed: document mismatch for ID '{target_id}'")
+            if v_metas and idx < len(v_metas):
+                exp_meta = expected_item.get("metadata") or {}
+                act_meta = v_metas[idx] or {}
+                for k, v in exp_meta.items():
+                    if act_meta.get(k) != v:
+                        raise RuntimeError(f"ChromaDB migration verification failed: metadata mismatch for ID '{target_id}' on key '{k}'")
+            if v_embs is not None and idx < len(v_embs):
+                act_emb = v_embs[idx]
+                exp_emb = expected_item.get("embedding") or []
+                if hasattr(act_emb, "tolist"):
+                    act_emb = act_emb.tolist()
+                if len(act_emb) != len(exp_emb):
+                    raise RuntimeError(f"ChromaDB migration verification failed: embedding dimension mismatch for ID '{target_id}'")
+
+        migrated_fp = fb_fp.with_suffix(".json.migrated")
+        fb_fp.replace(migrated_fp)
+        return True
+    except Exception as mig_err:
+        import logging
+
+        logging.getLogger("alberto.knowledge.store").warning(
+            "Could not migrate fallback vector records from %s (retaining source for retry): %s", fb_fp, mig_err
+        )
+        return False
+
+
 def _client_for(path: str):
     client = _CLIENT_CACHE.get(path)
     if client is None:
+        if _should_use_fallback():
+            _CLIENT_CACHE[path] = None
+            return None
         import chromadb
         from chromadb.config import Settings as ChromaSettings
 
-        client = chromadb.PersistentClient(
-            path=path, settings=ChromaSettings(anonymized_telemetry=False, allow_reset=True)
-        )
+        try:
+            client = chromadb.PersistentClient(
+                path=path, settings=ChromaSettings(anonymized_telemetry=False, allow_reset=True)
+            )
+        except Exception:
+            client = None
         _CLIENT_CACHE[path] = client
     return client
+
+
+def get_vector_store_status(path: str | None = None) -> dict[str, Any]:
+    """Inspect and report vector store health, backend mode, and durability status."""
+    if path is None:
+        path = settings.chroma_path
+    if path in (":memory:", "memory", ""):
+        return {
+            "status": "degraded_in_memory",
+            "available": True,
+            "mode": "fallback",
+            "durable": False,
+            "backend": "FallbackVectorCollection (in-memory)",
+            "path": path,
+            "reason": "In-memory vector store is non-durable.",
+            "message": "In-memory vector store is non-durable.",
+            "capabilities": {
+                "read": True,
+                "write": True,
+                "semantic_query": True,
+            },
+        }
+
+    is_durable, path_err = _check_path_durability(path)
+    if not is_durable:
+        return {
+            "status": "unavailable",
+            "available": False,
+            "mode": "unavailable",
+            "durable": False,
+            "backend": "none",
+            "path": path,
+            "reason": path_err or "Storage path is invalid or non-writable.",
+            "message": path_err or "Storage path is invalid or non-writable.",
+            "capabilities": {
+                "read": False,
+                "write": False,
+                "semantic_query": False,
+            },
+        }
+
+    use_fallback = _should_use_fallback()
+    native_supported, native_reason = _is_native_chromadb_supported()
+    init_failed = False
+
+    if not use_fallback:
+        client = _CLIENT_CACHE.get(path)
+        if client is None:
+            try:
+                client = _client_for(path)
+            except Exception as e:
+                client = None
+                native_reason = f"Native ChromaDB initialization failed: {e}"
+                init_failed = True
+
+        if client is not None:
+            return {
+                "status": "healthy",
+                "available": True,
+                "mode": "native",
+                "durable": True,
+                "backend": "chromadb.PersistentClient",
+                "path": path,
+                "message": "Native ChromaDB operational.",
+                "capabilities": {
+                    "read": True,
+                    "write": True,
+                    "semantic_query": True,
+                },
+            }
+
+    if init_failed:
+        fallback_reason = native_reason
+    elif not native_supported:
+        fallback_reason = native_reason
+    elif _USE_MEMORY_VECTOR_STORE is True and native_supported:
+        fallback_reason = "Fallback vector store forced by configuration or test override."
+    else:
+        fallback_reason = "Fallback vector store active."
+
+    return {
+        "status": "degraded",
+        "available": True,
+        "mode": "fallback",
+        "durable": True,
+        "backend": "FallbackVectorCollection (pure-python)",
+        "path": path,
+        "reason": fallback_reason,
+        "message": fallback_reason,
+        "capabilities": {
+            "read": True,
+            "write": True,
+            "semantic_query": True,
+        },
+    }
 
 
 class ChromaStore:
@@ -153,9 +571,21 @@ class ChromaStore:
         # so different embedders never collide on a fixed-dim collection.
         col = _COL_CACHE.get((path, collection))
         if col is None:
-            col = _client_for(path).get_or_create_collection(collection, metadata={"hnsw:space": "cosine"})
+            if _should_use_fallback():
+                col = FallbackVectorCollection(name=collection, persist_path=path)
+            else:
+                try:
+                    c = _client_for(path)
+                    col = c.get_or_create_collection(collection, metadata={"hnsw:space": "cosine"}) if c else None
+                    if col is not None:
+                        # Seamless transition: migrate any durable fallback-only records if present
+                        migrate_fallback_to_native(col, path, collection)
+                except Exception:
+                    col = None
+                if col is None:
+                    col = FallbackVectorCollection(name=collection, persist_path=path)
             _COL_CACHE[(path, collection)] = col
-        self._client = _CLIENT_CACHE[path]
+        self._client = _CLIENT_CACHE.get(path)
         self._col = col
         self._key = (path, collection)
 

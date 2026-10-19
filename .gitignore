@@ -18,16 +18,7 @@ build/
 
 # --- Alberto runtime data & secrets ---
 backend/.data/
-data/db/*
-!data/db/.gitkeep
-data/chroma/*
-!data/chroma/.gitkeep
-data/memory/*
-!data/memory/.gitkeep
-data/logs/*
-!data/logs/.gitkeep
-data/config/*
-!data/config/.gitkeep
+data/
 *.db
 *.sqlite
 *.sqlite3
