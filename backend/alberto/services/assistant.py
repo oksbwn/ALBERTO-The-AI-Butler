@@ -137,7 +137,7 @@ async def _default_agent_model(session, tenant_id: str, project_id: str) -> str:
     raise ValueError("No model configured or available. Please configure a default model in project settings or model registry.")
 
 
-def build_assistant_tools(tenant_id: str, project_id: str, mutated: list) -> list:
+def build_assistant_tools(tenant_id: str, project_id: str, mutated: list, current_user: Any = None) -> list:
     """StructuredTools bound to one project. `mutated` collects created-resource notes."""
     from langchain_core.tools import StructuredTool
 
@@ -759,6 +759,34 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list) -> lis
         mutated.append({"kind": "workflow_deleted", "name": wf.name})
         return f"Deleted workflow '{wf.name}' (id {wf.id}) and its run history."
 
+    async def delegate_tool_execution(tool_id_or_capability: str, parameters_json: str = "{}", approval_id: str = "") -> str:
+        """Execute an external tool securely by delegating to the Tool Manager system agent.
+        The Master Agent has NO direct external tool access; all external tool execution must be
+        mediated by Tool Manager. Tool Manager resolves the tool, verifies activation, caller
+        entitlements, and human approval before execution. Pass tool_id_or_capability, optional
+        parameters_json, and optional approval_id if resuming an approved execution."""
+        from alberto.services.tool_manager import ToolManagerService
+        try:
+            params = json.loads(parameters_json) if parameters_json else {}
+        except Exception:
+            params = {}
+        user_ctx = {
+            "user_id": getattr(current_user, "id", None),
+            "tenant_id": getattr(current_user, "tenant_id", tenant_id),
+            "role": getattr(current_user, "role", "assistant"),
+            "email": getattr(current_user, "email", None),
+        } if current_user else {"role": "assistant", "tenant_id": tenant_id}
+        exec_ctx = {"approval_id": approval_id} if approval_id else {}
+        res = await ToolManagerService.execute_delegated_tool(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            tool_id_or_capability=tool_id_or_capability,
+            parameters=params,
+            user_context=user_ctx,
+            execution_context=exec_ctx,
+        )
+        return json.dumps(res)
+
     def mk(fn, name):
         return StructuredTool.from_function(coroutine=fn, name=name, parse_docstring=False)
 
@@ -786,6 +814,7 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list) -> lis
         mk(test_workflow, "test_workflow"),
         mk(evaluate_build, "evaluate_build"),
         mk(delete_workflow, "delete_workflow"),
+        mk(delegate_tool_execution, "delegate_tool_execution"),
     ]
 
 
@@ -805,6 +834,7 @@ What you can do (use your tools to actually do these - don't just describe them)
 - MULTI-INTENT questions ("one message asks two things"): prefer ONE agent with config.knowledge enabled (rag and/or qa) - it searches each sub-question separately and composes one answer - over a classifier→router, which answers only one part. For parallel specialists, use classifier multi_label=true + router multi=true + a synthesizer agent before end (see the forge-platform skill).
 - Verify and judge your own work (test_workflow, then evaluate_build).
 - Delete a workflow to clean up duplicates (delete_workflow - the run PAUSES for human approval before deleting).
+- Execute external tools via Tool Manager (delegate_tool_execution - pass tool_id_or_capability, optional parameters_json, and optional approval_id; the Master Agent has no direct external tool access, all external tool execution must be mediated by Tool Manager).
 
 How Forge concepts work, so you can explain them:
 - A WORKFLOW is a graph of nodes wired start → … → end. Messages flow through. Common nodes: \
@@ -867,7 +897,7 @@ def _assistant_model_ref(ctx) -> str:
 
 class AssistantService:
     @staticmethod
-    async def _build_agent(*, tenant_id: str, project_id: str, checkpointer, mutated: list, model_override: str | None = None):
+    async def _build_agent(*, tenant_id: str, project_id: str, checkpointer, mutated: list, model_override: str | None = None, current_user: Any = None):
         # Deep agent: adds planning (write_todos), virtual files, summarization, skills,
         # and HITL on top of the Forge tools - so it can take a multi-step request,
         # build, verify with test_workflow, judge with evaluate_build, and keep
@@ -900,7 +930,7 @@ class AssistantService:
         from alberto.nodes.agent_node import MemoryRecallMiddleware
         middleware.append(MemoryRecallMiddleware(tenant_id=tenant_id, project_id=project_id))
 
-        tools = build_assistant_tools(tenant_id, project_id, mutated)
+        tools = build_assistant_tools(tenant_id, project_id, mutated, current_user=current_user)
         kwargs: dict[str, Any] = {
             "model": model,
             "tools": tools,
@@ -1050,7 +1080,7 @@ class AssistantService:
     async def _fast_stream(
         *, tenant_id: str, project_id: str, messages: list[dict],
         thread_id: str | None = None, model: str | None = None,
-        persona: str | None = None,
+        persona: str | None = None, current_user: Any = None,
     ) -> AsyncIterator[dict]:
         import time
 
@@ -1073,9 +1103,9 @@ class AssistantService:
             # Hermes-style on-demand tool injection:
             # Only inject tools when query asks for project resources/automations
             tools_to_bind = []
-            if any(w in user_lower for w in ("what workflow", "what automation", "list workflow", "list resource", "what do i have", "my tools", "my agents")):
-                all_tools = build_assistant_tools(tenant_id, project_id, [])
-                tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow")]
+            if any(w in user_lower for w in ("what workflow", "what automation", "list workflow", "list resource", "what do i have", "my tools", "my agents", "run tool", "call tool", "execute tool", "delegate")):
+                all_tools = build_assistant_tools(tenant_id, project_id, [], current_user=current_user)
+                tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow", "delegate_tool_execution")]
 
             runnable = model_inst.bind_tools(tools_to_bind) if tools_to_bind else model_inst
 
@@ -1303,7 +1333,7 @@ class AssistantService:
     async def stream(
         *, tenant_id: str, project_id: str, messages: list[dict],
         thread_id: str | None = None, checkpointer=None, model: str | None = None,
-        thinking: bool = False, persona: str | None = None,
+        thinking: bool = False, persona: str | None = None, current_user: Any = None,
     ) -> AsyncIterator[dict]:
         import time
 
@@ -1311,7 +1341,7 @@ class AssistantService:
         if not thinking:
             async for frame in AssistantService._fast_stream(
                 tenant_id=tenant_id, project_id=project_id, messages=messages,
-                thread_id=thread_id, model=model, persona=persona,
+                thread_id=thread_id, model=model, persona=persona, current_user=current_user,
             ):
                 yield frame
             return
@@ -1319,7 +1349,7 @@ class AssistantService:
         mutated: list = []
         try:
             agent = await AssistantService._build_agent(
-                tenant_id=tenant_id, project_id=project_id, checkpointer=checkpointer, mutated=mutated, model_override=model,
+                tenant_id=tenant_id, project_id=project_id, checkpointer=checkpointer, mutated=mutated, model_override=model, current_user=current_user,
             )
         except Exception as e:  # noqa: BLE001
             yield {"event": "error", "data": {"message": f"assistant init failed: {e}"}}

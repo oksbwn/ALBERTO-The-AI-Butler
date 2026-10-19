@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from alberto.db import SessionLocal
-from alberto.deps import current_tenant_id, get_checkpointer
+from alberto.deps import CurrentUser, current_tenant_id, get_checkpointer, get_current_user
 from alberto.services.assistant import AssistantService
 from alberto.services.projects import ProjectService
 
@@ -51,6 +51,7 @@ async def assistant_stream(
     body: AssistantIn,
     tenant_id: str = Depends(current_tenant_id),
     checkpointer=Depends(get_checkpointer),
+    user: CurrentUser = Depends(get_current_user),
 ):
     # Ownership check (audit H4): scoped cleanly before streaming so DB connection does not linger
     async with SessionLocal() as session:
@@ -70,7 +71,7 @@ async def assistant_stream(
         async for frame in AssistantService.stream(
             tenant_id=tenant_id, project_id=project_id, messages=messages,
             thread_id=body.thread_id, checkpointer=checkpointer, model=body.model,
-            thinking=body.thinking, persona=body.persona,
+            thinking=body.thinking, persona=body.persona, current_user=user,
         ):
             yield {"event": frame["event"], "data": json.dumps(frame["data"], default=str)}
 

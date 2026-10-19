@@ -47,6 +47,7 @@ from alberto.routers import (
     runs,
     secrets,
     stats,
+    tool_manager,
     tool_sets,
     tools,
     traces,
@@ -144,6 +145,26 @@ async def _scheduler_loop(app: FastAPI) -> None:
             log.exception("scheduler tick failed")
 
 
+async def _channel_poll_loop(app: FastAPI) -> None:
+    """Poll inbound channels (e.g. Telegram in polling mode) periodically."""
+    from alberto.services.channel_gateway import telegram_poll_all
+    from alberto.services.runs import RunService
+
+    log = logging.getLogger("forge.channels.poller")
+    run_service = RunService(
+        checkpointer=getattr(app.state, "checkpointer", None),
+        store=getattr(app.state, "store", None),
+    )
+    while True:
+        try:
+            await asyncio.sleep(3)
+            await telegram_poll_all(run_service=run_service)
+        except asyncio.CancelledError:
+            break
+        except Exception:  # noqa: BLE001
+            log.exception("channel poller tick failed")
+
+
 def _preload_heavy_modules() -> None:
     """Import the slow modules off the critical path. First import of langchain_openai
     / chromadb costs ~22s / ~9s on this machine (AV scanning); doing it in a daemon
@@ -210,6 +231,20 @@ async def lifespan(app: FastAPI):
         recovered = await LearningCoordinator.recover_pending_events()
         if recovered:
             logging.getLogger("forge.startup").info("Startup sweep recovered %d pending learning events", recovered)
+    # Immediate startup sweep for pending/interrupted tool discovery/analysis jobs
+    with contextlib.suppress(Exception):
+        from alberto.services.tool_manager import ToolManagerService
+
+        recovered_tools = await ToolManagerService.recover_pending_analysis_jobs()
+        if recovered_tools:
+            logging.getLogger("forge.startup").info("Startup sweep recovered %d tool analysis jobs", recovered_tools)
+    # Immediate startup sweep for pending/stuck channel events (Integrations v3)
+    with contextlib.suppress(Exception):
+        from alberto.services.channel_gateway import ChannelGatewayService
+
+        recovered_events = await ChannelGatewayService.recover_stale_events()
+        if recovered_events:
+            logging.getLogger("forge.startup").info("Startup sweep recovered %d stale channel events", recovered_events)
     if settings.otel_enabled:
         from alberto.tracing import otel
 
@@ -220,6 +255,7 @@ async def lifespan(app: FastAPI):
     # so you can ship one image everywhere (audit P3).
     if settings.enable_scheduler and settings.scheduler_leader:
         bg_tasks.append(asyncio.create_task(_scheduler_loop(app), name="forge-scheduler"))
+        bg_tasks.append(asyncio.create_task(_channel_poll_loop(app), name="forge-channel-poller"))
     # The reaper is safe to run everywhere (idempotent), but one instance is enough.
     if settings.scheduler_leader:
         bg_tasks.append(asyncio.create_task(_reaper_loop(app), name="forge-reaper"))
@@ -293,7 +329,7 @@ def create_app() -> FastAPI:
         triggers_router.router, channels.router, channels.public, handoff.router, evals.router,
         mcp_clients.router, versions.router,
         graph.router, memory.router,
-        connectors.router,
+        connectors.router, tool_manager.router, tool_manager.integration_router,
     ):
         app.include_router(r)
     return app
