@@ -728,7 +728,7 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list, curren
             "required": ["verdict", "issues"],
         }
         async with SessionLocal() as s:
-            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id)
+            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id, load_tools=False)
         model = resolve_model(_assistant_model_ref(ctx), ctx)
         # Offline (fake) model can't actually judge anything - returning 'pass' would be a false
         # green. Report 'unverified' so the caller knows the build was NOT independently checked (F7).
@@ -919,7 +919,7 @@ class AssistantService:
         from langchain.agents.middleware import ModelFallbackMiddleware
 
         async with SessionLocal() as s:
-            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id)
+            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id, load_tools=False)
             proj = (await s.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
             ctx.project_config = (proj.config or {}) if proj else {}
 
@@ -1105,7 +1105,7 @@ class AssistantService:
 
         tracer = ForgeTracer()
         async with SessionLocal() as s:
-            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id)
+            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id, load_tools=False)
             proj = (await s.execute(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))).scalar_one_or_none()
             ctx.project_config = (proj.config or {}) if proj else {}
 

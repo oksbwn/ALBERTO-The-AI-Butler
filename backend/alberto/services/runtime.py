@@ -43,6 +43,7 @@ def _tool_cfg(t: Tool) -> dict:
 async def build_compile_context(
     session, *, tenant_id: str, project_id: str, checkpointer=None, store=None,
     end_user: dict | None = None, run_context: dict | None = None,
+    load_tools: bool = True,
 ) -> CompileContext:
     # Scope the project load by tenant too (audit H4): callers pass the CALLER's tenant_id, so a
     # cross-tenant project_id resolves to None here (empty config) instead of loading another
@@ -116,104 +117,105 @@ async def build_compile_context(
     # for {{ctx.<key>}} templating and by the auth resolver. See CompileContext.run_context.
     ctx.run_context = run_context or {}
 
-    rows = (
-        await session.execute(
-            select(Tool).where(
-                Tool.tenant_id == tenant_id, Tool.project_id == project_id, Tool.enabled.is_(True)
-            )
-        )
-    ).scalars()
-    registry: dict[str, object] = {}
-    specs: dict[str, dict] = {}
-    # LLM name -> human-readable label for streaming/chat activity (keeps the underscore
-    # identifier for the model; see CompileContext.tool_display_names). Blank falls back to
-    # the identifier so existing tools keep their current label.
-    display_names: dict[str, str] = {}
-    for t in rows:
-        cfg = _tool_cfg(t)
-        display_names[t.name] = (cfg.get("display_name") or "").strip() or t.name
-        try:
-            if t.kind == "mcp":
-                from alberto.tools.mcp import load_mcp_tool
-                tool = await load_mcp_tool(cfg, ctx)
-            else:
-                tool = materialize_tool(cfg, ctx)
-            registry[t.id] = tool
-            specs[t.id] = {"kind": t.kind, "config": cfg, "tool": tool}
-        except Exception as e:  # noqa: BLE001 - skip unimplemented/broken tools
-            from alberto.util.metrics import incr
-
-            incr("tool.materialize_failed", detail=f"{t.name} ({t.kind}): {e}")
-            log.warning("Skipping tool %s (%s): %s", t.name, t.kind, e)
-    ctx.tool_registry = registry
-    ctx.tool_specs = specs
-
-    # Tool-set membership (set_id -> [tool_id]) so an agent node can reference a whole set via
-    # config.toolsets and resolve it to member tools at compile time. One query per run.
-    from alberto.services.tool_sets import ToolSetService
-
-    ctx.toolset_members = await ToolSetService.members_map(session, tenant_id, project_id)
-
-    # User-defined UI components → widget-tools (Feature 2). Each becomes a tool the agent
-    # can call to render a saved html/css template client-side (the tool args are the props).
-    from alberto.models import Component
-    from alberto.tools.components import build_component_tool
-
-    try:
-        comp_rows = list((
+    if load_tools:
+        rows = (
             await session.execute(
-                select(Component).where(
-                    Component.tenant_id == tenant_id,
-                    Component.project_id == project_id,
-                    Component.enabled.is_(True),
+                select(Tool).where(
+                    Tool.tenant_id == tenant_id, Tool.project_id == project_id, Tool.enabled.is_(True)
                 )
             )
-        ).scalars())
-    except Exception as e:  # noqa: BLE001 - a components-table error must not abort the whole run
-        log.warning("Skipping components (load failed): %s", e)
-        comp_rows = []
-    comp_registry: dict[str, object] = {}
-    for c in comp_rows:
-        # A component is exposed to the model as a widget-tool named after `c.name`; relabel it
-        # in the stream with its title (falling back to the name) like any other tool.
-        display_names[c.name] = (c.title or "").strip() or c.name
-        try:
-            comp_registry[c.id] = build_component_tool(
-                {
-                    "id": c.id, "name": c.name, "description": c.description,
-                    "props_schema": c.props_schema, "actions": c.actions, "version": c.version,
-                },
-                ctx,
-            )
-        except Exception as e:  # noqa: BLE001 - skip a broken component; don't break the run
-            log.warning("Skipping component %s: %s", c.name, e)
-    ctx.component_registry = comp_registry
-    ctx.tool_display_names = display_names
+        ).scalars()
+        registry: dict[str, object] = {}
+        specs: dict[str, dict] = {}
+        # LLM name -> human-readable label for streaming/chat activity (keeps the underscore
+        # identifier for the model; see CompileContext.tool_display_names). Blank falls back to
+        # the identifier so existing tools keep their current label.
+        display_names: dict[str, str] = {}
+        for t in rows:
+            cfg = _tool_cfg(t)
+            display_names[t.name] = (cfg.get("display_name") or "").strip() or t.name
+            try:
+                if t.kind == "mcp":
+                    from alberto.tools.mcp import load_mcp_tool
+                    tool = await load_mcp_tool(cfg, ctx)
+                else:
+                    tool = materialize_tool(cfg, ctx)
+                registry[t.id] = tool
+                specs[t.id] = {"kind": t.kind, "config": cfg, "tool": tool}
+            except Exception as e:  # noqa: BLE001 - skip unimplemented/broken tools
+                from alberto.util.metrics import incr
 
-    # Pre-load enabled MCP servers' tools (one connect per server) so agent nodes can
-    # attach them - the agent factory is sync, but MCP discovery is async.
-    from alberto.models import McpClient
-    from alberto.tools.mcp import auth_context_from, server_tools
+                incr("tool.materialize_failed", detail=f"{t.name} ({t.kind}): {e}")
+                log.warning("Skipping tool %s (%s): %s", t.name, t.kind, e)
+        ctx.tool_registry = registry
+        ctx.tool_specs = specs
 
-    # The run's per-user dims, so a server behind a PER-USER auth provider resolves the calling
-    # end user's own credential here rather than a shared workspace token.
-    mcp_auth_context = auth_context_from(ctx)
-    mcp_by_client: dict[str, list] = {}
-    mcp_rows = (
-        await session.execute(
-            select(McpClient).where(
-                McpClient.tenant_id == tenant_id,
-                McpClient.project_id == project_id,
-                McpClient.enabled.is_(True),
-            )
-        )
-    ).scalars()
-    for m in mcp_rows:
+        # Tool-set membership (set_id -> [tool_id]) so an agent node can reference a whole set via
+        # config.toolsets and resolve it to member tools at compile time. One query per run.
+        from alberto.services.tool_sets import ToolSetService
+
+        ctx.toolset_members = await ToolSetService.members_map(session, tenant_id, project_id)
+
+        # User-defined UI components → widget-tools (Feature 2). Each becomes a tool the agent
+        # can call to render a saved html/css template client-side (the tool args are the props).
+        from alberto.models import Component
+        from alberto.tools.components import build_component_tool
+
         try:
-            mcp_by_client[m.id] = await server_tools(m, tenant_id, project_id, mcp_auth_context)
-        except Exception as e:  # noqa: BLE001 - an unreachable server must not break the run
-            log.warning("MCP server %s unavailable, skipping its tools: %s", m.name, e)
-    ctx.mcp_tools_by_client = mcp_by_client
+            comp_rows = list((
+                await session.execute(
+                    select(Component).where(
+                        Component.tenant_id == tenant_id,
+                        Component.project_id == project_id,
+                        Component.enabled.is_(True),
+                    )
+                )
+            ).scalars())
+        except Exception as e:  # noqa: BLE001 - a components-table error must not abort the whole run
+            log.warning("Skipping components (load failed): %s", e)
+            comp_rows = []
+        comp_registry: dict[str, object] = {}
+        for c in comp_rows:
+            # A component is exposed to the model as a widget-tool named after `c.name`; relabel it
+            # in the stream with its title (falling back to the name) like any other tool.
+            display_names[c.name] = (c.title or "").strip() or c.name
+            try:
+                comp_registry[c.id] = build_component_tool(
+                    {
+                        "id": c.id, "name": c.name, "description": c.description,
+                        "props_schema": c.props_schema, "actions": c.actions, "version": c.version,
+                    },
+                    ctx,
+                )
+            except Exception as e:  # noqa: BLE001 - skip a broken component; don't break the run
+                log.warning("Skipping component %s: %s", c.name, e)
+        ctx.component_registry = comp_registry
+        ctx.tool_display_names = display_names
+
+        # Pre-load enabled MCP servers' tools (one connect per server) so agent nodes can
+        # attach them - the agent factory is sync, but MCP discovery is async.
+        from alberto.models import McpClient
+        from alberto.tools.mcp import auth_context_from, server_tools
+
+        # The run's per-user dims, so a server behind a PER-USER auth provider resolves the calling
+        # end user's own credential here rather than a shared workspace token.
+        mcp_auth_context = auth_context_from(ctx)
+        mcp_by_client: dict[str, list] = {}
+        mcp_rows = (
+            await session.execute(
+                select(McpClient).where(
+                    McpClient.tenant_id == tenant_id,
+                    McpClient.project_id == project_id,
+                    McpClient.enabled.is_(True),
+                )
+            )
+        ).scalars()
+        for m in mcp_rows:
+            try:
+                mcp_by_client[m.id] = await server_tools(m, tenant_id, project_id, mcp_auth_context)
+            except Exception as e:  # noqa: BLE001 - an unreachable server must not break the run
+                log.warning("MCP server %s unavailable, skipping its tools: %s", m.name, e)
+        ctx.mcp_tools_by_client = mcp_by_client
 
     # Saved agent presets, so an agent node with `agent_ref` mirrors the live preset.
     agent_rows = (

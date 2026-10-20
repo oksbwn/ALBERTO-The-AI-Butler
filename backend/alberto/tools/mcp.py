@@ -60,6 +60,7 @@ class _Cached:
     created: float
     used: float
     client: Any = None
+    tools: list | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -454,6 +455,7 @@ async def _client_and_tools(client_row: McpClient, tenant_id: str, project_id: s
                 # elapsed may still be running against it.
                 _retire(entry.client, now)
                 entry.client = None
+                entry.tools = None
                 try:
                     # Reuse the provider we just resolved instead of making _connection_for
                     # re-read it.
@@ -475,8 +477,11 @@ async def _client_and_tools(client_row: McpClient, tenant_id: str, project_id: s
                 else:
                     _evict(now)
     client = entry.client
-    tools = await client.get_tools()
-    return client, tools
+    if entry.tools is None:
+        async with entry.lock:
+            if entry.tools is None:
+                entry.tools = await client.get_tools()
+    return client, entry.tools
 
 
 async def discover_tools(client_row: McpClient, tenant_id: str, project_id: str,

@@ -125,7 +125,7 @@ async def _prepare_run(session, *, tenant_id, project_id, dataset_id, user):
     if _needs_judge(ds):
         from alberto.engine.models import resolve_model
         from alberto.services.runtime import build_compile_context
-        ctx = await build_compile_context(session, tenant_id=tenant_id, project_id=project_id)
+        ctx = await build_compile_context(session, tenant_id=tenant_id, project_id=project_id, load_tools=False)
         # resolve_model returns the offline fake model when the project has no real model;
         # EvalService then reports judge items as "unavailable" rather than grading against it.
         judge_model = resolve_model(ctx.default_model, ctx)
