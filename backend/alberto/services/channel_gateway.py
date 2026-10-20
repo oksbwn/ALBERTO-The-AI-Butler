@@ -20,6 +20,7 @@ Security invariants:
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import hashlib
 import logging
 import secrets
@@ -133,10 +134,20 @@ class _ConvLock:
     async def __aenter__(self):
         lock = _locks.setdefault(self.key, asyncio.Lock())
         self.lock = lock
-        await lock.acquire()
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=15.0)
+        except asyncio.TimeoutError:
+            # Stale lock recovery: reset lock so new messages are never blocked indefinitely
+            _locks[self.key] = asyncio.Lock()
+            self.lock = _locks[self.key]
+            await self.lock.acquire()
 
     async def __aexit__(self, *exc):
-        self.lock.release()
+        try:
+            if self.lock.locked():
+                self.lock.release()
+        except RuntimeError:
+            pass
         if not self.lock.locked() and not getattr(self.lock, "_waiters", None):
             _locks.pop(self.key, None)
 
@@ -391,13 +402,41 @@ class ChannelGatewayService:
         thread_id = conversation_thread_id(channel, msg, epoch)
         msg.thread_key = thread_id
         await ChannelGatewayService._mark(event_id, "processing", None, user_id=user.id, route=route_label, thread_key=thread_id)
-        # 6. dispatch
+        # 6. dispatch with typing indicator and 45s timeout
+        token = await tg.resolve_token(channel) if channel.type == "telegram" else None
         try:
-            reply, extra = await ChannelGatewayService._dispatch(
-                channel, msg, user, target_type, target_id, route_text, thread_id, run_service)
-        except RoutingError as e:
-            return await ChannelGatewayService._reply(channel, event_id, msg, "rejected",
-                                                      f"This channel can't route your message: {e}", str(e), route=route_label)
+            with open("data/typing.log", "a") as f:
+                f.write(f"_process_locked token resolved: {bool(token)}, conv: {msg.external_conversation_id}\n")
+        except Exception:
+            pass
+        typing_ctx = tg.TypingNotifier(token, msg.external_conversation_id) if token else nullcontext()
+        async with typing_ctx:
+            try:
+                reply, extra = await asyncio.wait_for(
+                    ChannelGatewayService._dispatch(
+                        channel, msg, user, target_type, target_id, route_text, thread_id, run_service
+                    ),
+                    timeout=45.0,
+                )
+            except asyncio.TimeoutError:
+                log.warning("dispatch timed out for channel %s event %s", channel.id, event_id)
+                return await ChannelGatewayService._reply(
+                    channel, event_id, msg, "failed",
+                    "I'm taking longer than expected to process that. Please ask again in a moment.",
+                    "dispatch timeout", route=route_label,
+                )
+            except RoutingError as e:
+                return await ChannelGatewayService._reply(
+                    channel, event_id, msg, "rejected",
+                    f"This channel can't route your message: {e}", str(e), route=route_label,
+                )
+            except Exception as e:
+                log.exception("dispatch failed for channel %s event %s", channel.id, event_id)
+                return await ChannelGatewayService._reply(
+                    channel, event_id, msg, "failed",
+                    "I encountered an issue processing that request. Please try again.",
+                    f"{type(e).__name__}: {str(e)[:100]}", route=route_label,
+                )
         return await ChannelGatewayService._reply(channel, event_id, msg, "delivered", reply, route=route_label, **extra)
 
     # --- routing ------------------------------------------------------------------------

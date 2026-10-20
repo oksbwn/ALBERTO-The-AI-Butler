@@ -12,6 +12,7 @@ returned to the frontend and never logged - every error string is passed through
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -43,7 +44,7 @@ class TelegramError(RuntimeError):
 
 def redact(text: str, token: str | None = None) -> str:
     """Strip the bot token (and anything shaped like one) from a string before it can be logged."""
-    out = str(text)
+    out = text
     if token:
         out = out.replace(token, "[REDACTED]")
     return _TOKEN_RE.sub("[REDACTED]", out)
@@ -121,6 +122,60 @@ async def send_message(token: str, chat_id: str | int, text: str, *, reply_to: i
         await _call(token, "sendMessage", payload)
         sent += 1
     return sent
+
+
+async def send_chat_action(token: str, chat_id: str | int, action: str = "typing") -> bool:
+    """Broadcast chat action (e.g. 'typing'). Returns True if successful."""
+    try:
+        target = int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
+        res = await _call(token, "sendChatAction", {"chat_id": target, "action": action})
+        try:
+            with open("data/typing.log", "a") as f:
+                f.write(f"send_chat_action {action} to {target}: {res}\n")
+        except Exception:
+            pass
+        return bool(res)
+    except Exception as e:
+        try:
+            with open("data/typing.log", "a") as f:
+                f.write(f"send_chat_action {action} to {chat_id} FAILED: {e}\n")
+        except Exception:
+            pass
+        log.warning("telegram sendChatAction %s to chat %s failed: %s", action, chat_id, e)
+        return False
+
+
+class TypingNotifier:
+    """Context manager that sends chat action immediately and repeats every interval seconds."""
+
+    def __init__(self, token: str, chat_id: str | int, interval: float = 3.5) -> None:
+        self.token = token
+        self.chat_id = chat_id
+        self.interval = interval
+        self._task: asyncio.Task | None = None
+
+    async def _loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.interval)
+                await send_chat_action(self.token, self.chat_id, "typing")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.warning("typing notifier loop failed: %s", e)
+
+    async def __aenter__(self):
+        await send_chat_action(self.token, self.chat_id, "typing")
+        self._task = asyncio.create_task(self._loop())
+        return self
+
+    async def __aexit__(self, *exc):
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
 
 
 # ------------------------------------------------------------- credentials ---

@@ -78,6 +78,10 @@ export function IntegrationsScreen({
   const [newChannelOpen, setNewChannelOpen] = useState(false);
   const [newChannelType, setNewChannelType] = useState<"telegram" | "email">("telegram");
   const [newChannelName, setNewChannelName] = useState("");
+  const [newChannelToken, setNewChannelToken] = useState("");
+  const [newChannelTransport, setNewChannelTransport] = useState<"auto" | "polling" | "webhook">("auto");
+  const [newChannelTargetType, setNewChannelTargetType] = useState<"master_agent" | "subagent" | "workflow">("master_agent");
+  const [newChannelTargetId, setNewChannelTargetId] = useState("");
 
   // UI states
   const [loading, setLoading] = useState(true);
@@ -1003,29 +1007,143 @@ export function IntegrationsScreen({
               onChange={(e) => setNewChannelName(e.target.value)}
             />
           </Field>
-          <div className="t-caption fg-2">
-            Default destination will be set to <strong>Master Agent</strong> (Conversational AI Butler). Independent of workflows.
-          </div>
+          {newChannelType === "telegram" && (
+            <>
+              <Field
+                label="Telegram Bot Token"
+                required
+                help="Obtained from @BotFather on Telegram (e.g. 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ)"
+              >
+                <input
+                  type="password"
+                  className="input mono"
+                  placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+                  value={newChannelToken}
+                  onChange={(e) => setNewChannelToken(e.target.value)}
+                />
+              </Field>
+              <Field
+                label="Transport Mode"
+                help="Auto detects webhook or polling. Polling works seamlessly on localhost / behind NAT."
+              >
+                <select
+                  className="select"
+                  value={newChannelTransport}
+                  onChange={(e) => setNewChannelTransport(e.target.value as any)}
+                >
+                  <option value="auto">Auto (Detect Webhook or Polling)</option>
+                  <option value="polling">Long Polling (Recommended for Local Dev)</option>
+                  <option value="webhook">Webhook Mode (Public HTTPS)</option>
+                </select>
+              </Field>
+              <div
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 8,
+                  background: "rgba(99, 102, 241, 0.08)",
+                  border: "1px solid rgba(99, 102, 241, 0.25)",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  color: "var(--fg-1)",
+                }}
+              >
+                <strong>Pairing Notice:</strong> After creating this channel, open your bot in Telegram and send <code>/start</code>. It will reply with a 6-character linking code. Enter that code under the channel&apos;s <strong>Access &amp; Pairing</strong> tab to authorize your Telegram account.
+              </div>
+            </>
+          )}
+          <Field label="Default Destination" help="Select who answers inbound queries from this channel">
+            <select
+              className="select"
+              value={newChannelTargetType}
+              onChange={(e) => {
+                setNewChannelTargetType(e.target.value as any);
+                setNewChannelTargetId("");
+              }}
+            >
+              <option value="master_agent">Master Agent (Conversational AI Butler)</option>
+              <option value="subagent">Specialized Subagent</option>
+              <option value="workflow">Workflow</option>
+            </select>
+          </Field>
+          {newChannelTargetType === "subagent" && (
+            <Field label="Select Subagent" required>
+              <select
+                className="select"
+                value={newChannelTargetId}
+                onChange={(e) => setNewChannelTargetId(e.target.value)}
+              >
+                <option value="">Choose a subagent...</option>
+                {agents.map((a: any) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name} ({a.role || "Agent"})
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          {newChannelTargetType === "workflow" && (
+            <Field label="Select Workflow" required>
+              <select
+                className="select"
+                value={newChannelTargetId}
+                onChange={(e) => setNewChannelTargetId(e.target.value)}
+              >
+                <option value="">Choose a workflow...</option>
+                {workflows.map((w: any) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
           <div className="row end gap2" style={{ marginTop: 12 }}>
-            <button className="btn btn-ghost" onClick={() => setNewChannelOpen(false)}>Cancel</button>
+            <button
+              className="btn btn-ghost"
+              onClick={() => {
+                setNewChannelOpen(false);
+                setNewChannelName("");
+                setNewChannelToken("");
+                setNewChannelTransport("auto");
+                setNewChannelTargetType("master_agent");
+                setNewChannelTargetId("");
+              }}
+            >
+              Cancel
+            </button>
             <button
               className="btn btn-primary"
-              disabled={!newChannelName.trim()}
+              disabled={
+                !newChannelName.trim() ||
+                (newChannelType === "telegram" && !newChannelToken.trim()) ||
+                ((newChannelTargetType === "subagent" || newChannelTargetType === "workflow") && !newChannelTargetId)
+              }
               onClick={async () => {
                 try {
+                  const config: Record<string, any> = {};
+                  if (newChannelType === "telegram") {
+                    config.bot_token = newChannelToken.trim();
+                    config.transport = newChannelTransport;
+                  }
                   const ch = await api.createChannel(project.id, {
                     type: newChannelType,
                     name: newChannelName.trim(),
-                    target_type: "master_agent",
+                    target_type: newChannelTargetType,
+                    target_id: newChannelTargetType === "master_agent" ? undefined : newChannelTargetId || undefined,
+                    config,
                   });
                   setNewChannelOpen(false);
                   setNewChannelName("");
+                  setNewChannelToken("");
+                  setNewChannelTransport("auto");
+                  setNewChannelTargetType("master_agent");
+                  setNewChannelTargetId("");
                   await reload();
                   setSelectedItem({
                     id: `channel:${ch.id}`,
                     slug: ch.type,
                     name: ch.name,
-                    summary: "Channel Gateway · Master Agent (Default)",
+                    summary: `Channel Gateway · ${ch.target_type === "subagent" ? "Subagent" : ch.target_type === "workflow" ? "Workflow" : "Master Agent (Default)"}`,
                     icon: ch.type === "telegram" ? "msg" : "mail",
                     kind: ch.type === "telegram" ? "channel_telegram" : "channel_email",
                     status: "connected",
@@ -2123,10 +2241,8 @@ function ChannelDetailView({
   }, [project.id, channel.id]);
 
   useEffect(() => {
-    if (tab === "pairing") {
-      loadIdentities();
-    }
-  }, [tab, loadIdentities]);
+    loadIdentities();
+  }, [loadIdentities]);
 
   // Pairing TTL timer countdown
   useEffect(() => {
@@ -2200,29 +2316,22 @@ function ChannelDetailView({
   };
 
   const handleConfirmPairing = async () => {
-    if (!manualCode.trim() || !manualSender.trim()) {
-      setErr("Challenge code and external sender ID are required.");
+    if (!manualCode.trim()) {
+      setErr("Please enter the 6-character pairing code received from your bot.");
       return;
     }
     setBusy(true);
     setErr(null);
     setMsg(null);
     try {
-      const res = await api.confirmChannelPairing(project.id, {
-        channel_id: channel.id,
-        code: manualCode.trim().toUpperCase(),
-        external_user_id: manualSender.trim(),
-        display_label: manualLabel.trim() || undefined,
-      });
-      if (res.ok) {
-        setMsg(`Identity '${manualSender}' successfully paired.`);
-        setManualSender("");
-        setManualLabel("");
-        setActivePairing(null);
-        await loadIdentities();
-      }
+      const code = manualCode.trim().toUpperCase();
+      const res = await api.confirmChannelPairing(project.id, channel.id, code);
+      setMsg(`Telegram account successfully paired and verified.`);
+      setManualCode("");
+      await loadIdentities();
+      onReload();
     } catch (e: any) {
-      setErr(e.message || "Pairing confirmation failed");
+      setErr(e.message || "Pairing confirmation failed. Ensure the code is correct and not expired.");
     } finally {
       setBusy(false);
     }
@@ -2443,6 +2552,35 @@ function ChannelDetailView({
                 </div>
               </div>
             )}
+            {isTg && identities.length === 0 && (
+              <div
+                className="col gap2"
+                style={{
+                  padding: "16px 20px",
+                  borderRadius: "var(--radius)",
+                  background: "rgba(99, 102, 241, 0.08)",
+                  border: "1px solid rgba(99, 102, 241, 0.25)",
+                }}
+              >
+                <div className="row gap2" style={{ alignItems: "center", fontWeight: 600 }}>
+                  <Icon name="shield-check" size={16} style={{ color: "var(--signal)" }} />
+                  <span>Next Step: Link Your Telegram Account</span>
+                </div>
+                <div className="t-body-sm fg-2">
+                  External Telegram users must pair once before interacting with Alberto:
+                  <ol style={{ margin: "8px 0 0 16px", padding: 0, lineHeight: 1.6 }}>
+                    <li>Open Telegram and send <code>/start</code> to your bot{channel.config?.bot?.username ? ` (@${channel.config.bot.username})` : ""}.</li>
+                    <li>The bot will reply with a 6-character pairing code.</li>
+                    <li>Enter the code in the <strong>Access &amp; Pairing</strong> tab to link your account.</li>
+                  </ol>
+                </div>
+                <div style={{ marginTop: 4 }}>
+                  <button className="btn btn-primary btn-xs" onClick={() => setTab("pairing")}>
+                    Go to Access &amp; Pairing →
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="card col gap2" style={{ padding: 18, background: "var(--bg-1)" }}>
               <span className="t-h3">Channel Summary</span>
               <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 10, fontSize: 13 }}>
@@ -2574,74 +2712,56 @@ function ChannelDetailView({
         {tab === "pairing" && (
           <div className="col gap3">
             <div className="card col gap3" style={{ padding: 20, background: "var(--bg-1)" }}>
-              <div className="row spread">
-                <div className="col gap1">
-                  <span className="t-h3">One-Time Pairing Challenge</span>
-                  <div className="t-caption fg-2">
-                    External users must pair their Telegram handle or Email address with an Alberto account before interacting.
-                  </div>
+              <div className="col gap1">
+                <span className="t-h3">Account Pairing &amp; Security</span>
+                <div className="t-caption fg-2">
+                  External users must pair their Telegram handle or Email address with an Alberto account before interacting.
                 </div>
-                <button className="btn btn-primary btn-sm" disabled={busy} onClick={handleGeneratePairing}>
-                  <Icon name="shield-check" size={14} /> Generate Code
-                </button>
               </div>
 
-              {activePairing && (
-                <div
-                  style={{
-                    padding: 18,
-                    borderRadius: 8,
-                    background: "rgba(99, 102, 241, 0.1)",
-                    border: "1px solid rgba(99, 102, 241, 0.3)",
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    gap: 8,
-                  }}
-                >
-                  <span className="t-caption fg-2">Send this 6-character challenge code from Telegram or Email:</span>
-                  <span
-                    className="mono"
-                    style={{
-                      fontSize: 32,
-                      fontWeight: 700,
-                      letterSpacing: 6,
-                      color: "var(--accent, #6366f1)",
-                    }}
-                  >
-                    {activePairing.code}
-                  </span>
-                  <span className="t-caption fg-2">
-                    Expires in <strong>{pairingTtlRemaining ?? activePairing.ttl_seconds}s</strong> (SHA-256 protected, one-time use)
-                  </span>
+              {/* Step-by-Step Instructions */}
+              <div
+                className="col gap2"
+                style={{
+                  padding: "14px 18px",
+                  borderRadius: 8,
+                  background: "rgba(99, 102, 241, 0.06)",
+                  border: "1px solid rgba(99, 102, 241, 0.2)",
+                  fontSize: 13,
+                  lineHeight: 1.5,
+                }}
+              >
+                <span style={{ fontWeight: 600 }}>How to Pair in 3 Steps:</span>
+                <div className="col gap1 fg-2">
+                  <div>1. Open Telegram and search for your bot{channel.config?.bot?.username ? ` (@${channel.config.bot.username})` : ""}.</div>
+                  <div>2. Send <code>/start</code> or any message. The bot will reply with a one-time 6-character code (valid for 15 minutes).</div>
+                  <div>3. Enter the code below and click <strong>Verify &amp; Link Account</strong>.</div>
                 </div>
-              )}
+              </div>
 
-              {/* Manual Confirmation Form for Dev Testing */}
-              <div className="col gap2" style={{ paddingTop: 12, borderTop: "1px solid var(--line)" }}>
-                <span className="t-h4">Manual Confirmation / Simulated Pairing</span>
-                <div className="row gap2">
-                  <div style={{ flex: 1 }}>
-                    <Field label="Code">
-                      <input className="input mono" placeholder="ABC123" value={manualCode} onChange={(e) => setManualCode(e.target.value)} />
-                    </Field>
-                  </div>
-                  <div style={{ flex: 2 }}>
-                    <Field label="External User ID">
-                      <input className="input mono" placeholder="e.g. 12345678 or user@example.com" value={manualSender} onChange={(e) => setManualSender(e.target.value)} />
-                    </Field>
-                  </div>
-                  <div style={{ flex: 2 }}>
-                    <Field label="Display Label">
-                      <input className="input" placeholder="e.g. @alice or Alice" value={manualLabel} onChange={(e) => setManualLabel(e.target.value)} />
-                    </Field>
-                  </div>
+              {/* Code Entry Form */}
+              <div className="row gap2" style={{ alignItems: "flex-end", flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 200, maxWidth: 300 }}>
+                  <Field label="Pairing Code">
+                    <input
+                      className="input mono"
+                      placeholder="e.g. ABC123"
+                      maxLength={10}
+                      value={manualCode}
+                      onChange={(e) => setManualCode(e.target.value.toUpperCase())}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && manualCode.trim()) handleConfirmPairing();
+                      }}
+                    />
+                  </Field>
                 </div>
-                <div className="row end">
-                  <button className="btn btn-secondary btn-sm" disabled={busy} onClick={handleConfirmPairing}>
-                    Confirm Pairing
-                  </button>
-                </div>
+                <button
+                  className="btn btn-primary"
+                  disabled={busy || !manualCode.trim()}
+                  onClick={handleConfirmPairing}
+                >
+                  <Icon name="shield-check" size={14} /> Verify &amp; Link Account
+                </button>
               </div>
             </div>
 
@@ -2651,10 +2771,10 @@ function ChannelDetailView({
               {loadingIdentities ? (
                 <div className="t-caption fg-2">Loading paired identities...</div>
               ) : identities.length === 0 ? (
-                <div className="t-caption fg-2">No external senders paired yet. Generate a challenge code above.</div>
+                <div className="t-caption fg-2">No external senders paired yet. Follow the steps above to link your Telegram account.</div>
               ) : (
                 <div className="col gap1">
-                  {identities.map((id) => (
+                  {identities.map((id: any) => (
                     <div
                       key={id.id}
                       className="row spread"
@@ -2666,9 +2786,21 @@ function ChannelDetailView({
                       }}
                     >
                       <div className="row gap3" style={{ alignItems: "center" }}>
-                        <span className="mono" style={{ fontWeight: 600 }}>{id.external_user_id}</span>
-                        {id.display_label && <span className="typechip">{id.display_label}</span>}
-                        <span className="t-caption fg-3">Paired {new Date(id.paired_at).toLocaleDateString()}</span>
+                        <span className="mono" style={{ fontWeight: 600 }}>{id.provider_user_id || id.external_user_id}</span>
+                        {(id.label || id.display_label) && <span className="typechip">{id.label || id.display_label}</span>}
+                        <span
+                          className="badge"
+                          style={{
+                            background: id.status === "verified" ? "rgba(34, 197, 94, 0.15)" : "rgba(245, 158, 11, 0.15)",
+                            color: id.status === "verified" ? "#22c55e" : "#f59e0b",
+                            fontSize: 11,
+                          }}
+                        >
+                          {id.status === "verified" ? "verified" : (id.status || "pending")}
+                        </span>
+                        <span className="t-caption fg-3">
+                          {(id.verified_at || id.paired_at) ? `Paired ${new Date(id.verified_at || id.paired_at).toLocaleDateString()}` : ""}
+                        </span>
                       </div>
                       <button className="btn btn-ghost btn-xs" onClick={() => handleRevokeIdentity(id.id)} title="Revoke pairing">
                         Revoke

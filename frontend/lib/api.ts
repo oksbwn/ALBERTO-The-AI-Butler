@@ -1068,8 +1068,8 @@ export const api = {
     json<ChannelDiagnostics>(`/v1/projects/${pid}/channels/${cid}/diagnostics`),
   createChannelPairing: (pid: string, cid: string) =>
     json<ChannelPairingOut>(`/v1/projects/${pid}/channels/${cid}/pairings`, { method: "POST" }),
-  confirmChannelPairing: (pid: string, body: { channel_id: string; code: string; external_user_id: string; display_label?: string }) =>
-    json<{ ok: boolean; identity_id: string }>(`/v1/projects/${pid}/channels/pairings/confirm`, { method: "POST", body: JSON.stringify(body) }),
+  confirmChannelPairing: (pid: string, cid: string, code: string) =>
+    json<{ id: string; status: string; user_id: string; label?: string }>(`/v1/projects/${pid}/channels/${cid}/pairings/confirm`, { method: "POST", body: JSON.stringify({ code }) }),
   listChannelIdentities: (pid: string, cid: string) =>
     json<ChannelIdentityOut[]>(`/v1/projects/${pid}/channels/${cid}/identities`),
   revokeChannelIdentity: (pid: string, cid: string, iid: string) =>
