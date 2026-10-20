@@ -275,6 +275,13 @@ class ToolService:
                     tool = build_sql_tool(cfg, ctx)
                 out = await tool.ainvoke(args)
                 res = {"raw": out, "projected": out, "status": 200, "latency_ms": 0}
+            elif kind == "mcp":
+                from alberto.services.runtime import make_runtime_ctx
+                from alberto.tools.mcp import load_mcp_tool
+                ctx = make_runtime_ctx(tenant_id, project_id)
+                tool = await load_mcp_tool(cfg, ctx)
+                out = await tool.ainvoke(args)
+                res = {"raw": out, "projected": out, "status": 200, "latency_ms": 0}
             else:
                 return {"ok": False, "error": f"Test {kind!r} tools by attaching them to an agent and running the workflow."}
         except Exception as e:  # noqa: BLE001 - surface failures (network/auth/etc.) to the UI

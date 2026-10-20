@@ -532,8 +532,8 @@ class ToolPolicyService:
             # 7. HITL / Runtime Approval Check
             needs_approval = bool(
                 cfg.get("requires_approval")
-                or effect in ("delete", "write")
-                or risk in ("high", "critical")
+                or effect == "delete"
+                or risk == "critical"
             )
 
             is_approved = bool(execution_context.get("approved") or execution_context.get("approval_granted"))

@@ -1115,24 +1115,19 @@ class AssistantService:
             user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") in ("user", "human")), "")
             user_lower = user_msg.lower()
 
-            # Hermes-style on-demand tool injection & integration context
+            # Fast mode tool binding & live integration context
             is_tool_mgr = persona in ("tool_manager", "integration_manager")
-            is_integration_query = any(w in user_lower for w in (
-                "what workflow", "what automation", "list workflow", "list resource", "what do i have",
-                "my tools", "my agents", "run tool", "call tool", "execute tool", "delegate",
-                "integration", "integrat", "mcp", "connector", "home assistant", "homeassistant", "ha",
-                "device", "sensor", "entity", "service", "connected", "connect",
-            ))
+            is_assistant = persona in (None, "", "assistant")
 
             tools_to_bind = []
-            if is_tool_mgr or is_integration_query:
+            if is_tool_mgr or is_assistant:
                 all_tools = build_assistant_tools(tenant_id, project_id, [], current_user=current_user)
                 tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow", "delegate_tool_execution")]
 
             runnable = model_inst.bind_tools(tools_to_bind) if tools_to_bind else model_inst
 
             integration_context = ""
-            if is_tool_mgr or is_integration_query:
+            if is_tool_mgr or is_assistant:
                 try:
                     from alberto.models import ConnectorInstall, McpClient, Tool
                     mcps = (await s.execute(select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.project_id == project_id))).scalars().all()
@@ -1201,6 +1196,9 @@ class AssistantService:
                     "Be natural, warm, and concise (1-3 sentences). Answer questions directly. "
                     "Always preserve user-provided technical terms, product names, acronyms, and model identifiers exactly as stated. "
                     "Never substitute, normalize, or autocorrect them with more common, popular, or phonetically similar alternatives unless the user explicitly tells you to. "
+                    "SMART HOME CONTROL & INTEGRATIONS: You do NOT have a direct physical connection to devices. Instead, you delegate all device actions, light toggles, sensors, and external tools to the Integration Manager via the `delegate_tool_execution` tool. "
+                    "For smart home actions with Home Assistant (HA), call `delegate_tool_execution(tool_id_or_capability='ha_manage_pipeline', parameters_json='{\"action\": \"process\", \"sentence\": \"<user command>\"}'). "
+                    "If tool execution returns READ_ONLY_MODE, explain to the user that the Home Assistant MCP server has Read-Only Mode enabled and must be disabled in the ha-mcp add-on settings to allow smart home control. "
                     "If the user asks for multi-step automation design or deep reasoning, "
                     "mention they can toggle Deep Thinking mode or ask you to execute it."
                 )

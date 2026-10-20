@@ -47,7 +47,7 @@ WRITE_VERBS = {
     "create", "post", "send", "put", "update", "edit", "write", "set",
     "insert", "add", "append", "modify", "patch", "upload", "submit",
     "publish", "trigger", "sync", "execute", "run", "store", "save",
-    "remember", "start", "stop", "restart", "connect",
+    "remember", "start", "stop", "restart", "connect", "manage",
 }
 
 DELETE_VERBS = {
@@ -59,7 +59,7 @@ DELETE_VERBS = {
 # Ambiguous operations that must never be assumed read-only or auto-activated
 AMBIGUOUS_OPERATIONS = {
     "execute_query", "run_command", "invoke_action", "execute_script",
-    "manage_resources", "command", "script", "query_exec", "eval", "manage", "action",
+    "manage_resources", "command", "script", "query_exec", "eval",
 }
 
 SENSITIVE_KEYWORDS = {
@@ -125,16 +125,44 @@ class ToolManagerService:
         """
         clean_name = name.lower()
         combined_text = f"{name} {description}".lower()
-        tokens = set(re.findall(r"\b[a-z0-9_\-]+\b", combined_text))
+        name_tokens = set(re.findall(r"\b[a-z0-9]+\b", clean_name.replace("-", "_")))
+        all_tokens = set(re.findall(r"\b[a-z0-9]+\b", combined_text.replace("-", "_")))
 
         # Check ambiguous operations first
-        is_ambiguous = any(op in clean_name for op in AMBIGUOUS_OPERATIONS) or bool(tokens & AMBIGUOUS_OPERATIONS)
+        is_ambiguous = any(op in clean_name for op in AMBIGUOUS_OPERATIONS) or bool(name_tokens & AMBIGUOUS_OPERATIONS)
 
-        # Check verb matches
-        has_delete = bool(tokens & DELETE_VERBS) or any(v in clean_name for v in DELETE_VERBS)
-        has_write = bool(tokens & WRITE_VERBS) or any(v in clean_name for v in WRITE_VERBS)
-        has_read = bool(tokens & READ_VERBS) or any(v in clean_name for v in READ_VERBS)
-        has_sensitive = bool(tokens & SENSITIVE_KEYWORDS)
+        # Check verb matches: first verb token in name establishes primary intent across any namespace
+        name_words = [w for w in re.split(r"[_\-:]+", clean_name) if w]
+        first_verb = next((w for w in name_words if w in READ_VERBS or w in WRITE_VERBS or w in DELETE_VERBS), None)
+
+        if first_verb in DELETE_VERBS:
+            name_has_delete = True
+            name_has_write = False
+            name_has_read = False
+        elif first_verb in WRITE_VERBS:
+            name_has_delete = False
+            name_has_write = True
+            name_has_read = False
+        elif first_verb in READ_VERBS:
+            name_has_delete = False
+            name_has_write = False
+            name_has_read = True
+        else:
+            name_has_delete = bool(name_tokens & DELETE_VERBS)
+            name_has_write = bool(name_tokens & WRITE_VERBS)
+            name_has_read = bool(name_tokens & READ_VERBS)
+
+        if name_has_delete or name_has_write or name_has_read:
+            has_delete = name_has_delete
+            has_write = name_has_write
+            has_read = name_has_read
+        else:
+            strong_delete = {"delete", "remove", "drop", "destroy", "purge", "wipe", "erase", "format"}
+            has_delete = bool(all_tokens & strong_delete)
+            has_write = bool(all_tokens & WRITE_VERBS)
+            has_read = bool(all_tokens & READ_VERBS)
+
+        has_sensitive = bool(name_tokens & SENSITIVE_KEYWORDS)
 
         # Explicit overrides in config
         if cfg:
@@ -255,7 +283,7 @@ class ToolManagerService:
         Guarantees safe fallback if the LLM is unavailable.
         """
         det_effect, det_risk, det_activation = cls.classify_effect_and_risk(
-            name=name, description=description, input_schema=input_schema, cfg=cfg
+            name=name, description=description, input_schema=input_schema, cfg=None
         )
         category = cls.infer_category(name, description)
 
@@ -715,14 +743,16 @@ class ToolManagerService:
                     # Deduplication check: suppress duplicate work if already completed
                     job = (
                         await s.execute(
-                            select(ToolAnalysisJob).where(
+                            select(ToolAnalysisJob)
+                            .where(
                                 ToolAnalysisJob.tenant_id == tenant_id,
                                 ToolAnalysisJob.project_id == project_id,
                                 ToolAnalysisJob.tool_id == tool.id,
                                 ToolAnalysisJob.schema_fingerprint == fingerprint,
                             )
+                            .order_by(ToolAnalysisJob.created_at.desc())
                         )
-                    ).scalar_one_or_none()
+                    ).scalars().first()
 
                     if job and job.status == "completed":
                         continue
@@ -759,8 +789,10 @@ class ToolManagerService:
                         cfg["capabilities"] = analysis.capabilities
                         cfg["effect"] = analysis.effect
                         cfg["risk"] = analysis.risk
-                        if analysis.recommended_activation in ("manual_review", "restricted"):
+                        if analysis.recommended_activation == "restricted" or analysis.effect == "delete" or analysis.risk == "critical":
                             cfg["requires_approval"] = True
+                        else:
+                            cfg.setdefault("requires_approval", False)
                         tool.config = cfg
 
                         await cls.project_tool_to_graph(
