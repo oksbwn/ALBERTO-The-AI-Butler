@@ -331,7 +331,10 @@ class ChannelGatewayService:
     async def _reply(channel: Channel, event_id: str, msg: NormalizedMessage, status: str, text: str | None,
                      detail: str | None = None, **extra: Any) -> GatewayResult:
         delivered = None
-        if text:
+        already_delivered = bool(extra.pop("already_delivered", False))
+        if already_delivered:
+            delivered = True
+        elif text:
             delivered = await ChannelGatewayService.deliver(channel, msg, text)
             if delivered is False and status in ("delivered", "pairing_required"):
                 status = "delivery_failed"
@@ -414,7 +417,8 @@ class ChannelGatewayService:
             try:
                 reply, extra = await asyncio.wait_for(
                     ChannelGatewayService._dispatch(
-                        channel, msg, user, target_type, target_id, route_text, thread_id, run_service
+                        channel, msg, user, target_type, target_id, route_text, thread_id, run_service,
+                        token=token,
                     ),
                     timeout=45.0,
                 )
@@ -470,9 +474,17 @@ class ChannelGatewayService:
     # --- dispatch -----------------------------------------------------------------------
     @staticmethod
     async def _dispatch(channel: Channel, msg: NormalizedMessage, user: User, target_type: str,
-                        target_id: str | None, text: str, thread_id: str, run_service) -> tuple[str, dict]:
+                        target_id: str | None, text: str, thread_id: str, run_service,
+                        token: str | None = None) -> tuple[str, dict]:
         if target_type == "master_agent":
-            return await ChannelGatewayService._run_assistant(channel, user, text, thread_id, persona=None), {}
+            reply_to = (msg.reply_context or {}).get("reply_to")
+            res = await ChannelGatewayService._run_assistant(
+                channel, user, text, thread_id, persona=None,
+                token=token, chat_id=msg.external_conversation_id if channel.type == "telegram" else None,
+                reply_to=reply_to,
+            )
+            reply, delivered = res if isinstance(res, tuple) else (str(res), False)
+            return reply, {"already_delivered": delivered}
         if target_type == "subagent":
             async with SessionLocal() as s:
                 agent = (await s.execute(select(Agent).where(
@@ -487,7 +499,14 @@ class ChannelGatewayService:
             if not role_at_least(user.role, "viewer"):
                 raise RoutingError("your account is not allowed to use this subagent")
             persona = agent.system_key or agent.name
-            return await ChannelGatewayService._run_assistant(channel, user, text, thread_id, persona=persona), {}
+            reply_to = (msg.reply_context or {}).get("reply_to")
+            res = await ChannelGatewayService._run_assistant(
+                channel, user, text, thread_id, persona=persona,
+                token=token, chat_id=msg.external_conversation_id if channel.type == "telegram" else None,
+                reply_to=reply_to,
+            )
+            reply, delivered = res if isinstance(res, tuple) else (str(res), False)
+            return reply, {"already_delivered": delivered}
         if target_type == "workflow":
             async with SessionLocal() as s:
                 wf = (await s.execute(select(Workflow).where(
@@ -512,15 +531,19 @@ class ChannelGatewayService:
         raise RoutingError("unknown destination type")
 
     @staticmethod
-    async def _run_assistant(channel: Channel, user: User, text: str, thread_id: str, persona: str | None) -> str:
-        """Run the Master Agent (or a persona) AS the paired user. Tool execution inside still goes
-        through delegate_tool_execution -> ToolManagerService -> ToolPolicyService."""
+    async def _run_assistant(channel: Channel, user: User, text: str, thread_id: str, persona: str | None,
+                             token: str | None = None, chat_id: str | int | None = None, reply_to: int | None = None) -> tuple[str, bool]:
+        """Run the Master Agent (or a persona) AS the paired user. Progressively streams text chunks to Telegram."""
         from alberto.deps import CurrentUser
         from alberto.services.assistant import AssistantService
 
         cu = CurrentUser(id=user.id, tenant_id=user.tenant_id, role=user.role, email=user.email)
         chunks: list[str] = []
         err: str | None = None
+        sent_msg_id: int | None = None
+        last_edit_time: float = 0.0
+        last_edited_text: str = ""
+
         async for frame in AssistantService.stream(
             tenant_id=channel.tenant_id, project_id=channel.project_id,
             messages=[{"role": "user", "content": text}], thread_id=thread_id,
@@ -528,13 +551,46 @@ class ChannelGatewayService:
         ):
             ev, data = frame.get("event"), frame.get("data") or {}
             if ev == "messages":
-                chunks.append(str(data.get("content", "")))
+                chunk = str(data.get("content", ""))
+                chunks.append(chunk)
+                accumulated = "".join(chunks).strip()
+                now = asyncio.get_event_loop().time()
+
+                if token and chat_id and len(accumulated) >= 15 and (now - last_edit_time) >= 1.5:
+                    if sent_msg_id is None:
+                        try:
+                            res = await tg.send_raw_message(token, chat_id, accumulated + " ▌", reply_to=reply_to)
+                            if res and isinstance(res, dict) and "message_id" in res:
+                                sent_msg_id = int(res["message_id"])
+                                last_edit_time = now
+                                last_edited_text = accumulated
+                        except Exception as se:
+                            log.debug("initial progressive telegram send failed: %s", se)
+                    elif sent_msg_id is not None and accumulated != last_edited_text:
+                        try:
+                            if len(accumulated) + 2 <= tg.MAX_MESSAGE_CHARS:
+                                await tg.edit_message_text(token, chat_id, sent_msg_id, accumulated + " ▌")
+                                last_edit_time = now
+                                last_edited_text = accumulated
+                        except Exception as ee:
+                            log.debug("progressive telegram edit failed: %s", ee)
             elif ev == "error":
                 err = str(data.get("message", "error"))
+
         reply = "".join(chunks).strip()
         if not reply:
             raise RuntimeError(err or "empty assistant reply")
-        return reply
+
+        already_delivered = False
+        if sent_msg_id is not None and token and chat_id:
+            try:
+                if len(reply) <= tg.MAX_MESSAGE_CHARS:
+                    await tg.edit_message_text(token, chat_id, sent_msg_id, reply)
+                    already_delivered = True
+            except Exception as fe:
+                log.debug("final telegram edit failed: %s", fe)
+
+        return reply, already_delivered
 
     # --- outbound -----------------------------------------------------------------------
     @staticmethod
@@ -659,10 +715,10 @@ async def _set_state(channel_id: str, **kv: Any) -> None:
         await s.commit()
 
 
-async def telegram_poll_once(channel_id: str, *, run_service=None, timeout: int = 0, wait: bool = False) -> int:
-    """One getUpdates cycle for a polling-mode channel. At-least-once: the offset advances only
-    after every update was handed to the gateway, and the event ledger dedups any re-delivery.
-    Errors are recorded (token-redacted) with exponential backoff - the loop never dies."""
+async def telegram_poll_once(channel_id: str, *, run_service=None, timeout: int = 25, wait: bool = False) -> int:
+    """One getUpdates cycle for a polling-mode channel using Telegram long-polling (timeout=25s).
+    At-least-once: the offset advances only after every update was handed to the gateway, and the
+    event ledger dedups any re-delivery. Errors are recorded with exponential backoff."""
     import time
 
     async with SessionLocal() as s:
@@ -701,12 +757,16 @@ async def telegram_poll_once(channel_id: str, *, run_service=None, timeout: int 
     return handled
 
 
-async def telegram_poll_all(run_service=None) -> int:
-    """Poll every enabled polling-mode Telegram channel once."""
+async def telegram_poll_all(run_service=None, timeout: int = 25) -> int:
+    """Poll every enabled polling-mode Telegram channel concurrently using long polling."""
     async with SessionLocal() as s:
         ids = [c.id for c in (await s.execute(select(Channel).where(
             Channel.type == "telegram", Channel.enabled.is_(True)))).scalars()]
-    total = 0
-    for cid in ids:
-        total += await telegram_poll_once(cid, run_service=run_service)
-    return total
+    if not ids:
+        return 0
+    results = await asyncio.gather(
+        *(telegram_poll_once(cid, run_service=run_service, timeout=timeout) for cid in ids),
+        return_exceptions=True,
+    )
+    return sum(r for r in results if isinstance(r, int))
+

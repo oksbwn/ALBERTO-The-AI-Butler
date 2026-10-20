@@ -146,7 +146,7 @@ async def _scheduler_loop(app: FastAPI) -> None:
 
 
 async def _channel_poll_loop(app: FastAPI) -> None:
-    """Poll inbound channels (e.g. Telegram in polling mode) periodically."""
+    """Poll inbound channels (e.g. Telegram in polling mode) using long-polling for instant pickup."""
     from alberto.services.channel_gateway import telegram_poll_all
     from alberto.services.runs import RunService
 
@@ -157,12 +157,15 @@ async def _channel_poll_loop(app: FastAPI) -> None:
     )
     while True:
         try:
-            await asyncio.sleep(3)
-            await telegram_poll_all(run_service=run_service)
+            handled = await telegram_poll_all(run_service=run_service, timeout=25)
+            if handled == 0:
+                await asyncio.sleep(0.2)
         except asyncio.CancelledError:
             break
         except Exception:  # noqa: BLE001
             log.exception("channel poller tick failed")
+            await asyncio.sleep(3)
+
 
 
 def _preload_heavy_modules() -> None:

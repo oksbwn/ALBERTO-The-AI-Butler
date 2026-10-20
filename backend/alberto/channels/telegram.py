@@ -111,6 +111,31 @@ def split_message(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
     return parts
 
 
+async def send_raw_message(token: str, chat_id: str | int, text: str, *, reply_to: int | None = None) -> dict:
+    """Send a single message and return Telegram's Message result (containing message_id)."""
+    payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    if reply_to:
+        payload["reply_to_message_id"] = reply_to
+        payload["allow_sending_without_reply"] = True
+    return await _call(token, "sendMessage", payload)
+
+
+async def edit_message_text(token: str, chat_id: str | int, message_id: int, text: str) -> dict | None:
+    """Edit existing Telegram message text in place. Ignores 'message is not modified' gracefully."""
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    try:
+        return await _call(token, "editMessageText", payload)
+    except TelegramError as e:
+        if "message is not modified" in str(e).lower():
+            return None
+        raise
+
+
 async def send_message(token: str, chat_id: str | int, text: str, *, reply_to: int | None = None) -> int:
     """Send `text` (chunked at Telegram's 4096-char limit). Returns number of messages sent."""
     sent = 0
@@ -122,6 +147,7 @@ async def send_message(token: str, chat_id: str | int, text: str, *, reply_to: i
         await _call(token, "sendMessage", payload)
         sent += 1
     return sent
+
 
 
 async def send_chat_action(token: str, chat_id: str | int, action: str = "typing") -> bool:
