@@ -268,6 +268,7 @@ class McpDiscoveryService:
     ) -> list[str]:
         """Materialize or update discovered MCP tools in the project Tool table and ToolSet."""
         from sqlalchemy import select
+
         from alberto.models import Tool, ToolSet, ToolSetMember
 
         if discovered_tools is None:

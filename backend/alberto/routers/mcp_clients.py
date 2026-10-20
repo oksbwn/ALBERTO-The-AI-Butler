@@ -302,6 +302,7 @@ async def delete_client(project_id: str, client_id: str, session: AsyncSession =
     if m is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
     from sqlalchemy import delete
+
     from alberto.models import Tool, ToolSetMember
     from alberto.services.tools import ToolService
     tools = list((await session.execute(

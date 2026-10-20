@@ -441,10 +441,11 @@ class GraphManagerService:
         3. Capability entities whose name is an exact match for a tool's name (self-referencing duplicate capability nodes).
         4. Redundant prefix capability nodes (e.g. 'HA: ha_config_get_scene').
         """
-        from alberto.db.base import SessionLocal
-        from alberto.models import McpClient, Tool
-        from alberto.knowledge.graph import get_graph_adapter
         from sqlalchemy import select
+
+        from alberto.db.base import SessionLocal
+        from alberto.knowledge.graph import get_graph_adapter
+        from alberto.models import McpClient, Tool
 
         adapter = get_graph_adapter()
         purged = 0

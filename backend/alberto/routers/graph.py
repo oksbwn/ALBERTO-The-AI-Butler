@@ -61,6 +61,7 @@ async def get_subgraph(
 ):
     """Retrieve a bounded, scoped subgraph for interactive visualization."""
     import contextlib
+
     from alberto.services.graph_manager import GraphManagerService
 
     with contextlib.suppress(Exception):

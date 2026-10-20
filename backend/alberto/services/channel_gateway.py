@@ -20,11 +20,11 @@ Security invariants:
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext
 import hashlib
 import logging
 import secrets
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -136,7 +136,7 @@ class _ConvLock:
         self.lock = lock
         try:
             await asyncio.wait_for(lock.acquire(), timeout=15.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Stale lock recovery: reset lock so new messages are never blocked indefinitely
             _locks[self.key] = asyncio.Lock()
             self.lock = _locks[self.key]
@@ -422,7 +422,7 @@ class ChannelGatewayService:
                     ),
                     timeout=45.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.warning("dispatch timed out for channel %s event %s", channel.id, event_id)
                 return await ChannelGatewayService._reply(
                     channel, event_id, msg, "failed",

@@ -6,7 +6,6 @@ from __future__ import annotations
 import ast
 import operator as op
 from datetime import UTC, datetime
-
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -241,10 +240,11 @@ def build_builtin_tool(cfg: dict, ctx):
             value: str | None = None,
             target: str = "memory",
         ) -> str:
-            from alberto.db.base import SessionLocal
-            from alberto.services.unified_memory import UnifiedMemoryManager
-            from alberto.services.memory_curator import SENSITIVE_PATTERNS
             import re
+
+            from alberto.db.base import SessionLocal
+            from alberto.services.memory_curator import SENSITIVE_PATTERNS
+            from alberto.services.unified_memory import UnifiedMemoryManager
 
             content = (text or "").strip()
             if not content:

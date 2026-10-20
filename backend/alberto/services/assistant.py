@@ -1113,7 +1113,6 @@ class AssistantService:
             model_inst = resolve_model(primary_ref, ctx, params={"thinking": False})
 
             user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") in ("user", "human")), "")
-            user_lower = user_msg.lower()
 
             # Fast mode tool binding & live integration context
             is_tool_mgr = persona in ("tool_manager", "integration_manager")
