@@ -27,6 +27,39 @@ interface EventEditState {
   >;
 }
 
+function formatHumanReason(reason: string): string {
+  if (!reason) return "";
+  let m = reason.match(/Low confidence \(([\d.]+)\) on entity candidate ['"]?([^'"]+)['"]?/i);
+  if (m) return `Alberto isn't completely sure if "${m[2]}" should be saved (${Math.round(parseFloat(m[1]) * 100)}% certainty).`;
+
+  m = reason.match(/Low confidence \(([\d.]+)\) on relationship candidate ['"]?([^'"]+)['"]?/i);
+  if (m) return `Alberto is uncertain about the "${m[2]}" connection (${Math.round(parseFloat(m[1]) * 100)}% certainty).`;
+
+  m = reason.match(/Low confidence \(([\d.]+)\) on candidate ['"]?([^'"]+)['"]?/i);
+  if (m) return `Uncertain about saving fact: "${m[2]}" (${Math.round(parseFloat(m[1]) * 100)}% certainty).`;
+
+  m = reason.match(/Missing evidence_refs on candidate ['"]?([^'"]+)['"]?/i);
+  if (m) return `Needs confirmation from your chat before saving "${m[1]}".`;
+
+  m = reason.match(/Ungrounded evidence_refs on candidate ['"]?([^'"]+)['"]?/i);
+  if (m) return `Could not verify "${m[1]}" directly from your message.`;
+
+  m = reason.match(/Proposed deletion requires human confirmation:? ['"]?([^'"]+)['"]?/i);
+  if (m) return `Alberto wants to delete "${m[1]}" — please confirm.`;
+
+  m = reason.match(/Candidate entity kind ['"]?([^'"]+)['"]? not in canonical ontology/i);
+  if (m) return `Suggested new category: "${m[1]}".`;
+
+  m = reason.match(/Unresolved (?:source|target) entity reference:? ['"]?([^'"]+)['"]?/i);
+  if (m) return `Connects to "${m[1]}", which isn't saved in your knowledge graph yet.`;
+
+  if (/sensitive credential/i.test(reason)) {
+    return "May contain sensitive info or credentials — review carefully.";
+  }
+
+  return reason.replace(/_/g, " ");
+}
+
 export function OntologyReviewQueue({
   project,
   onCountChange,
@@ -254,7 +287,7 @@ export function OntologyReviewQueue({
         <div className="row spread" style={{ alignItems: "center", marginBottom: 14 }}>
           <div>
             <div className="row gap2" style={{ alignItems: "center" }}>
-              <span className="t-h1">HITL Ontology Review Queue</span>
+              <span className="t-h1">Memory &amp; Knowledge Reviews</span>
               <span
                 className="badge"
                 style={{
@@ -268,13 +301,12 @@ export function OntologyReviewQueue({
                 }}
               >
                 {reviewEvents.length > 0
-                  ? `${reviewEvents.length} Pending Review`
-                  : "All Clear (0 Pending)"}
+                  ? `${reviewEvents.length} Items to Review`
+                  : "All Up to Date"}
               </span>
             </div>
             <div className="fg-2 t-caption" style={{ marginTop: 4 }}>
-              Human-in-the-Loop review for candidate knowledge extractions: reclassify entity nodes,
-              propose novel ontology types, refine edge relationships, and correct dependency directions.
+              Alberto identified new facts, devices, or connections from your conversations. Confirm or adjust them before saving to your home knowledge.
             </div>
           </div>
           <button className="btn btn-secondary btn-sm" onClick={reload} disabled={loading}>
@@ -283,7 +315,7 @@ export function OntologyReviewQueue({
               size={13}
               style={loading ? { animation: "spin 1s linear infinite" } : {}}
             />
-            {loading ? "Checking…" : "Refresh Queue"}
+            {loading ? "Checking…" : "Refresh"}
           </button>
         </div>
 
@@ -293,9 +325,9 @@ export function OntologyReviewQueue({
             style={{ padding: 48, textAlign: "center", color: "var(--fg-2)", background: "var(--bg-1)" }}
           >
             <Icon name="shield-check" size={32} style={{ color: "var(--ok)", marginBottom: 8 }} />
-            <div className="t-h3" style={{ color: "var(--fg-0)" }}>Review Queue Clean</div>
+            <div className="t-h3" style={{ color: "var(--fg-0)" }}>No Pending Reviews</div>
             <div className="t-caption" style={{ maxWidth: 440, marginTop: 4 }}>
-              All autonomous extractions and graph entities have been authorized or resolved against the canonical ontology.
+              All learned facts, devices, and relationships are confirmed and up to date in your knowledge graph.
             </div>
           </div>
         )}
@@ -305,6 +337,12 @@ export function OntologyReviewQueue({
             const mems = (ev.extraction_payload as any)?.memories || [];
             const ents = (ev.extraction_payload as any)?.entities || [];
             const rels = (ev.extraction_payload as any)?.relationships || [];
+            const entNameMap: Record<string, string> = {};
+            for (const e of ents) {
+              if (e.temporary_id && e.name) entNameMap[e.temporary_id] = e.name;
+              if (e.id && e.name) entNameMap[e.id] = e.name;
+            }
+            const resolveName = (ref: string) => entNameMap[ref] || ref.replace(/^(ent_|tmp_|node_)/, "");
             const reasons: string[] =
               (ev.extraction_payload as any)?.review_reasons || (ev.error ? [ev.error] : []);
             const evSuggs = suggestions[ev.id] || [];
@@ -328,13 +366,9 @@ export function OntologyReviewQueue({
                   <div>
                     <div className="row gap2" style={{ alignItems: "center" }}>
                       <span className="badge" style={{ background: "rgba(234, 179, 8, 0.15)", color: "var(--warn)" }}>
-                        Review Required
+                        Needs Confirmation
                       </span>
-                      <span className="mono-sm fg-2">Event ID: {ev.id.slice(0, 10)}…</span>
-                      <span className="typechip">Source: {ev.source_type}</span>
-                    </div>
-                    <div className="fg-2 t-micro" style={{ marginTop: 4 }}>
-                      From source event: {ev.source_event_id.slice(0, 14)}…
+                      <span className="typechip">Learned from chat</span>
                     </div>
                   </div>
 
@@ -344,14 +378,14 @@ export function OntologyReviewQueue({
                       className="btn btn-secondary btn-sm"
                       onClick={() => handleFetchSuggestions(ev.id)}
                       disabled={isFetchingSugg}
-                      title="Ask Alberto's Memory Curator LLM for advisory recommendations"
+                      title="Ask Alberto for advice on these items"
                     >
                       <Icon
                         name={isFetchingSugg ? "refresh" : "sparkles"}
                         size={13}
                         style={isFetchingSugg ? { animation: "spin 1s linear infinite" } : { color: "var(--accent)" }}
                       />
-                      <span>{isFetchingSugg ? "Analyzing…" : "Curator Advisory"}</span>
+                      <span>{isFetchingSugg ? "Analyzing…" : "Alberto's Advice"}</span>
                     </button>
                     <button
                       className="btn btn-secondary btn-sm"
@@ -359,7 +393,7 @@ export function OntologyReviewQueue({
                       disabled={isRejecting || isApproving}
                     >
                       <Icon name="close" size={13} />
-                      <span>{isRejecting ? "Rejecting…" : "Reject"}</span>
+                      <span>{isRejecting ? "Dismissing…" : "Dismiss"}</span>
                     </button>
                     <button
                       className="btn btn-primary btn-sm"
@@ -367,7 +401,7 @@ export function OntologyReviewQueue({
                       disabled={isApproving || isRejecting}
                     >
                       <Icon name="check" size={13} />
-                      <span>{isApproving ? "Persisting…" : "Approve & Persist"}</span>
+                      <span>{isApproving ? "Saving…" : "Approve & Save"}</span>
                     </button>
                   </div>
                 </div>
@@ -385,13 +419,13 @@ export function OntologyReviewQueue({
                     <div className="row gap2" style={{ alignItems: "center" }}>
                       <Icon name="bolt" size={14} style={{ color: "var(--warn)" }} />
                       <span className="t-body-sm" style={{ fontWeight: 600, color: "var(--warn)" }}>
-                        Review Reasons Triggering HITL:
+                        Why Alberto flagged this:
                       </span>
                     </div>
                     <ul style={{ margin: "6px 0 0 20px", padding: 0 }}>
                       {reasons.map((r, i) => (
                         <li key={i} className="t-caption fg-1" style={{ lineHeight: "19px" }}>
-                          {r}
+                          {formatHumanReason(r)}
                         </li>
                       ))}
                     </ul>
@@ -402,7 +436,7 @@ export function OntologyReviewQueue({
                 {(ev.extraction_payload as any)?.turn_user_text && (
                   <div>
                     <div className="t-caption fg-2" style={{ fontWeight: 600, marginBottom: 4 }}>
-                      Conversation Turn Snippet:
+                      From your conversation:
                     </div>
                     <div
                       className="card"
@@ -431,7 +465,7 @@ export function OntologyReviewQueue({
                   >
                     <div className="row spread" style={{ alignItems: "center" }}>
                       <span className="t-body-sm" style={{ color: "var(--accent)", fontWeight: 600 }}>
-                        Memory Curator Advisory Recommendations
+                        Alberto's Suggestions
                       </span>
                       <span className="chip chip-mono t-micro">{evSuggs.length} suggestions</span>
                     </div>
@@ -446,35 +480,30 @@ export function OntologyReviewQueue({
                             <div className="row gap2" style={{ alignItems: "center", flexWrap: "wrap" }}>
                               <span className="badge">{sugg.target_type}</span>
                               <span className="mono-sm" style={{ fontWeight: 600 }}>
-                                {sugg.target_ref}
+                                {resolveName(sugg.target_ref)}
                               </span>
                               {sugg.suggested_kind && (
                                 <span className="t-caption">
-                                  → Recommends:{" "}
+                                  → Suggested category:{" "}
                                   <strong style={{ color: "var(--ok)" }}>{sugg.suggested_kind}</strong>
                                 </span>
                               )}
                               {sugg.suggested_direction && (
                                 <span className="t-caption">
-                                  → Direction: <strong>{sugg.suggested_direction}</strong>
+                                  → Flow: <strong>{sugg.suggested_direction}</strong>
                                 </span>
                               )}
                             </div>
                             <div className="t-caption fg-2" style={{ marginTop: 4 }}>
                               {sugg.explanation}
                             </div>
-                            {sugg.evidence_refs?.length > 0 && (
-                              <div className="t-micro fg-3" style={{ marginTop: 2 }}>
-                                Evidence: {sugg.evidence_refs.join(", ")}
-                              </div>
-                            )}
                           </div>
                           <button
                             className="btn btn-secondary btn-sm"
                             style={{ flex: "none" }}
                             onClick={() => applySuggestion(ev.id, sugg)}
                           >
-                            Apply Recommendation
+                            Apply
                           </button>
                         </div>
                       ))}
@@ -482,11 +511,11 @@ export function OntologyReviewQueue({
                   </div>
                 )}
 
-                {/* 1. Proposed Entities (HITL Type Reclassification) */}
+                {/* 1. Proposed Entities */}
                 {ents.length > 0 && (
                   <div>
                     <div className="t-caption fg-2" style={{ fontWeight: 600, marginBottom: 6 }}>
-                      Candidate Entities (Review &amp; Edit Canonical Type):
+                      Discovered Items &amp; Devices:
                     </div>
                     <div className="col gap2">
                       {ents.map((e: any) => {
@@ -506,21 +535,21 @@ export function OntologyReviewQueue({
                           >
                             <div className="row spread" style={{ alignItems: "center" }}>
                               <div className="row gap2" style={{ alignItems: "center" }}>
-                                <span className="t-body-sm mono" style={{ fontWeight: 600 }}>
+                                <span className="t-body-sm" style={{ fontWeight: 600 }}>
                                   {e.name}
                                 </span>
-                                <span className="typechip">Proposed: {e.kind}</span>
+                                <span className="typechip">{e.kind}</span>
                               </div>
                               {e.confidence !== undefined && (
                                 <span className="chip chip-mono t-micro">
-                                  Conf: {Math.round(e.confidence * 100)}%
+                                  {Math.round(e.confidence * 100)}% certainty
                                 </span>
                               )}
                             </div>
 
                             <div className="row gap2" style={{ alignItems: "center", flexWrap: "wrap" }}>
                               <span className="t-caption fg-2" style={{ width: 80, flex: "none" }}>
-                                Entity Type:
+                                Category:
                               </span>
                               <select
                                 className="select mono-sm"
@@ -551,13 +580,13 @@ export function OntologyReviewQueue({
                                     {k}
                                   </option>
                                 ))}
-                                <option value="__custom__">+ Propose Novel Type…</option>
+                                <option value="__custom__">+ Add Custom Category…</option>
                               </select>
 
                               {isCustom && (
                                 <input
                                   className="input mono-sm"
-                                  placeholder="Type novel canonical key (e.g. quantum_device)…"
+                                  placeholder="Type custom category name…"
                                   style={{ flex: 1, minWidth: 200 }}
                                   value={nodeEdit.customKind}
                                   onChange={(evt) => {
@@ -585,13 +614,13 @@ export function OntologyReviewQueue({
 
                             <div className="row gap2" style={{ alignItems: "center" }}>
                               <span className="t-caption fg-2" style={{ width: 80, flex: "none" }}>
-                                Description:
+                                Notes:
                               </span>
                               <input
                                 className="input"
                                 style={{ flex: 1 }}
                                 value={nodeEdit.description}
-                                placeholder="Refine entity definition before storage…"
+                                placeholder="Optional notes or details…"
                                 onChange={(evt) => {
                                   const val = evt.target.value;
                                   setEventEdits((prev) => {
@@ -620,11 +649,11 @@ export function OntologyReviewQueue({
                   </div>
                 )}
 
-                {/* 2. Proposed Relationships (HITL Direction & Kind) */}
+                {/* 2. Proposed Relationships */}
                 {rels.length > 0 && (
                   <div>
                     <div className="t-caption fg-2" style={{ fontWeight: 600, marginBottom: 6 }}>
-                      Candidate Relationships (Review &amp; Edit Edge Semantics):
+                      Connections Between Items:
                     </div>
                     <div className="col gap2">
                       {rels.map((r: any, rIdx: number) => {
@@ -648,16 +677,16 @@ export function OntologyReviewQueue({
                           >
                             <div className="row spread" style={{ alignItems: "center" }}>
                               <div className="row gap2" style={{ alignItems: "center" }}>
-                                <span className="mono" style={{ fontWeight: 600, color: "var(--fg-0)" }}>
-                                  {displaySrc}
+                                <span style={{ fontWeight: 600, color: "var(--fg-0)" }}>
+                                  {resolveName(displaySrc)}
                                 </span>
                                 <span style={{ color: "var(--accent)", fontWeight: 700 }}>→</span>
-                                <span className="mono" style={{ fontWeight: 600, color: "var(--fg-0)" }}>
-                                  {displayTgt}
+                                <span style={{ fontWeight: 600, color: "var(--fg-0)" }}>
+                                  {resolveName(displayTgt)}
                                 </span>
                                 {isReversed && (
                                   <span className="badge" style={{ background: "rgba(234,179,8,0.15)", color: "var(--warn)" }}>
-                                    Direction Swapped
+                                    Direction Flipped
                                   </span>
                                 )}
                               </div>
@@ -689,7 +718,7 @@ export function OntologyReviewQueue({
 
                             <div className="row gap2" style={{ alignItems: "center", flexWrap: "wrap" }}>
                               <span className="t-caption fg-2" style={{ width: 80, flex: "none" }}>
-                                Rel Type:
+                                Relationship:
                               </span>
                               <select
                                 className="select mono-sm"
@@ -720,13 +749,13 @@ export function OntologyReviewQueue({
                                     {rk}
                                   </option>
                                 ))}
-                                <option value="__custom__">+ Propose Novel Rel Type…</option>
+                                <option value="__custom__">+ Add Custom Relationship…</option>
                               </select>
 
                               {isCustom && (
                                 <input
                                   className="input mono-sm"
-                                  placeholder="Type novel relationship key (e.g. CONNECTED_OVER)…"
+                                  placeholder="Type custom relationship name (e.g. CONNECTED_OVER)…"
                                   style={{ flex: 1, minWidth: 200 }}
                                   value={edgeEdit.customKind}
                                   onChange={(evt) => {
@@ -762,7 +791,7 @@ export function OntologyReviewQueue({
                 {mems.length > 0 && (
                   <div>
                     <div className="t-caption fg-2" style={{ fontWeight: 600, marginBottom: 4 }}>
-                      Durable Memory Facts:
+                      Facts to Remember:
                     </div>
                     <div className="col gap1">
                       {mems.map((m: any, mIdx: number) => (
@@ -777,7 +806,7 @@ export function OntologyReviewQueue({
                           </div>
                           {m.confidence !== undefined && (
                             <span className="chip chip-mono t-micro">
-                              conf {Math.round(m.confidence * 100)}%
+                              {Math.round(m.confidence * 100)}% certainty
                             </span>
                           )}
                         </div>
