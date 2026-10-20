@@ -47,6 +47,7 @@ async def list_tools(project_id: str, session: AsyncSession = Depends(get_sessio
     # Built-ins are project defaults: make sure this project has them before listing (idempotent),
     # so every project - including freshly imported ones - always has the platform capabilities.
     await ToolService.ensure_builtins(session, tenant_id, project_id)
+    await ToolService.ensure_mcp_tools(session, tenant_id, project_id)
     return await ToolService.list(session, tenant_id, project_id)
 
 

@@ -219,6 +219,14 @@ interface ChatTodo {
 
 export const SYSTEM_SUB_AGENTS: Agent[] = [
   {
+    id: "tool_manager",
+    project_id: "",
+    name: "Integration Manager",
+    system_key: "tool_manager",
+    is_system: true,
+    config: { description: "Inspects, tests, and manages tools, MCP servers, and integration channels." },
+  },
+  {
     id: "memory_curator",
     project_id: "",
     name: "Memory Curator",
@@ -257,7 +265,7 @@ export function ChatScreen({
   onMutate?: () => void;
   externalInput?: string;
   onExternalInputConsumed?: () => void;
-  persona?: "assistant" | "memory_curator";
+  persona?: "assistant" | "memory_curator" | "tool_manager" | "integration_manager" | string;
   target?: string;
   onTargetChange?: (t: string) => void;
 }) {
@@ -286,14 +294,16 @@ export function ChatScreen({
   const selectedAgent = effectiveAgents.find((a) => a.id === targetAgentKey || a.system_key === targetAgentKey);
   const selectedWf = workflows.find((w) => w.id === targetWorkflowId);
 
-  // Custom agents not in the core 3 system keys
-  const coreKeys = new Set(["memory_curator", "graph_manager", "intent_router"]);
+  // Custom agents not in the core system keys
+  const coreKeys = new Set(["tool_manager", "integration_manager", "memory_curator", "graph_manager", "intent_router"]);
   const customAgents = effectiveAgents.filter((a) => !coreKeys.has(a.system_key || a.id));
   const isCustomAgent = isAgent && !coreKeys.has(targetAgentKey || "");
 
   // Active persona resolution
   const activePersona = persona === "memory_curator"
     ? "memory_curator"
+    : persona === "tool_manager" || persona === "integration_manager"
+    ? "tool_manager"
     : isAgent
     ? (selectedAgent?.system_key || selectedAgent?.name?.toLowerCase().replace(/\s+/g, "_") || "agent")
     : "assistant";
@@ -301,6 +311,7 @@ export function ChatScreen({
   const isCurator = activePersona === "memory_curator";
   const isGraphManager = activePersona === "graph_manager";
   const isIntentRouter = activePersona === "intent_router";
+  const isToolManager = activePersona === "tool_manager" || activePersona === "integration_manager";
 
   const [agentDropdownOpen, setAgentDropdownOpen] = useState(false);
   const agentDropdownRef = useRef<HTMLDivElement>(null);
@@ -325,6 +336,14 @@ export function ChatScreen({
         badge: "WORKFLOW",
         icon: "workflow",
         color: "var(--accent)",
+      };
+    }
+    if (isToolManager) {
+      return {
+        name: "Integration Manager",
+        badge: "SUB-AGENT",
+        icon: "tools",
+        color: "var(--accent, #6366f1)",
       };
     }
     if (isCurator) {
@@ -365,7 +384,7 @@ export function ChatScreen({
       icon: "sparkles",
       color: "var(--accent)",
     };
-  }, [isWorkflow, isCurator, isGraphManager, isIntentRouter, isAgent, selectedWf, selectedAgent]);
+  }, [isWorkflow, isToolManager, isCurator, isGraphManager, isIntentRouter, isAgent, selectedWf, selectedAgent]);
 
   const models = useModels();
   const [selectedModel, setSelectedModel] = useState<string>("");
@@ -955,7 +974,12 @@ export function ChatScreen({
     }
   }, [target]);
 
-  const starters = isCurator ? [
+  const starters = isToolManager ? [
+    { label: "Audit Tools", prompt: "Audit all registered tools, their risk levels, and approval policies." },
+    { label: "Diagnose Errors", prompt: "Diagnose recent execution errors and connection failures." },
+    { label: "Check MCP Servers", prompt: "Explain the active MCP servers and the tools they expose." },
+    { label: "Channels Status", prompt: "Summarize communication channels and their routing destinations." },
+  ] : isCurator ? [
     { label: "Audit facts", prompt: "Audit all durable facts you have stored about me and this system." },
     { label: "Check hardware", prompt: "What hardware specifications, RAM, and models do you have registered?" },
     { label: "Graph entities", prompt: "What entities and relationships are stored in the knowledge graph?" },
@@ -981,7 +1005,9 @@ export function ChatScreen({
     { label: "Test Edge Cases", prompt: "Provide edge case inputs to test this automation graph." },
   ];
 
-  const heroBg = isCurator
+  const heroBg = isToolManager
+    ? "linear-gradient(135deg, var(--accent, #6366f1), #4f46e5)"
+    : isCurator
     ? "linear-gradient(135deg, #a855f7, #6366f1)"
     : isGraphManager
     ? "linear-gradient(135deg, #06b6d4, #3b82f6)"
@@ -993,7 +1019,9 @@ export function ChatScreen({
     ? "linear-gradient(135deg, #10b981, #06b6d4)"
     : "linear-gradient(135deg, var(--accent), #4f46e5)";
 
-  const heroShadow = isCurator
+  const heroShadow = isToolManager
+    ? "0 6px 20px rgba(99, 102, 241, 0.25)"
+    : isCurator
     ? "0 6px 20px rgba(168, 85, 247, 0.25)"
     : isGraphManager
     ? "0 6px 20px rgba(6, 182, 212, 0.25)"
@@ -1005,7 +1033,9 @@ export function ChatScreen({
     ? "0 6px 20px rgba(16, 185, 129, 0.25)"
     : "0 6px 20px rgba(99, 102, 241, 0.25)";
 
-  const heroIcon = isCurator
+  const heroIcon = isToolManager
+    ? "tools"
+    : isCurator
     ? "brain"
     : isGraphManager
     ? "workflows"
@@ -1017,7 +1047,9 @@ export function ChatScreen({
     ? "workflow"
     : "sparkles";
 
-  const heroTitle = isCurator
+  const heroTitle = isToolManager
+    ? "Integration Manager Sub-Agent"
+    : isCurator
     ? "Memory Curator Sub-Agent"
     : isGraphManager
     ? "Knowledge Graph Manager Sub-Agent"
@@ -1029,7 +1061,9 @@ export function ChatScreen({
     ? `Ready to run ${selectedWf?.name || "workflow"}`
     : "How can I help you today?";
 
-  const heroDesc = isCurator
+  const heroDesc = isToolManager
+    ? "Inspects, tests, and manages tools, MCP clients, connectors, and communication channels. Helps diagnose execution policies and HITL gates."
+    : isCurator
     ? "Curates, audits, and organizes your long-term memories and knowledge graph. Chats here also train Alberto's background memory."
     : isGraphManager
     ? "Inspects and explains entities, relationships, and ontology mappings in Alberto's graph."
@@ -1042,7 +1076,9 @@ export function ChatScreen({
     : `Alberto is your local AI Butler powered by ${activeModel?.name || "local LLM"}. Ask questions, build automations, or query system tools.`;
 
   const agentAvatarIcon = heroIcon;
-  const agentAvatarColor = isCurator
+  const agentAvatarColor = isToolManager
+    ? "var(--accent, #6366f1)"
+    : isCurator
     ? "#a855f7"
     : isGraphManager
     ? "#06b6d4"
@@ -1054,7 +1090,9 @@ export function ChatScreen({
     ? "#10b981"
     : "var(--accent)";
 
-  const agentAvatarBg = isCurator
+  const agentAvatarBg = isToolManager
+    ? "rgba(99, 102, 241, 0.12)"
+    : isCurator
     ? "rgba(168, 85, 247, 0.12)"
     : isGraphManager
     ? "rgba(6, 182, 212, 0.12)"
@@ -1064,7 +1102,9 @@ export function ChatScreen({
     ? "rgba(139, 92, 246, 0.12)"
     : "var(--bg-2)";
 
-  const agentAvatarBorder = isCurator
+  const agentAvatarBorder = isToolManager
+    ? "1px solid rgba(99, 102, 241, 0.3)"
+    : isCurator
     ? "1px solid rgba(168, 85, 247, 0.3)"
     : isGraphManager
     ? "1px solid rgba(6, 182, 212, 0.3)"
@@ -1171,6 +1211,39 @@ export function ChatScreen({
                   borderRadius: 4,
                   background: "rgba(168, 85, 247, 0.2)",
                   color: "#d8b4fe",
+                  letterSpacing: "0.04em",
+                }}
+              >
+                SUB-AGENT
+              </span>
+            </div>
+          ) : persona === "tool_manager" || persona === "integration_manager" ? (
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                height: 26,
+                padding: "0 10px",
+                fontSize: 12,
+                fontWeight: 600,
+                background: "rgba(99, 102, 241, 0.1)",
+                border: "1px solid rgba(99, 102, 241, 0.3)",
+                borderRadius: 5,
+                color: "var(--accent, #6366f1)",
+              }}
+              title="Integration Manager Sub-Agent: inspects and tests tools and channels"
+            >
+              <Icon name="tools" size={13} style={{ color: "var(--accent, #6366f1)" }} />
+              <span>Integration Manager</span>
+              <span
+                style={{
+                  fontSize: 9.5,
+                  fontWeight: 700,
+                  padding: "1px 5px",
+                  borderRadius: 4,
+                  background: "rgba(99, 102, 241, 0.2)",
+                  color: "var(--accent, #6366f1)",
                   letterSpacing: "0.04em",
                 }}
               >

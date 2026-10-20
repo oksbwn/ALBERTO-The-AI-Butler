@@ -7,6 +7,8 @@ import ast
 import operator as op
 from datetime import UTC, datetime
 
+from typing import Any
+
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
@@ -14,14 +16,84 @@ from pydantic import BaseModel, Field
 # automatically (on project create + whenever the tools list is read), are protected from
 # deletion, and are never carried in import/export bundles - so importing a project neither
 # duplicates nor loses them. `builtin` is both the tool name the model calls and the config key.
-BUILTIN_DEFAULTS: list[dict[str, str]] = [
-    {"builtin": "current_time", "description": "Return the current date and time."},
-    {"builtin": "calculator", "description": "Evaluate an arithmetic expression safely."},
-    {"builtin": "web_fetch", "description": "Fetch the contents of a URL."},
-    {"builtin": "web_search", "description": "Search the web (requires a configured search-provider key)."},
-    {"builtin": "knowledge_search", "description": "Search this project's knowledge base (docs + Q&A)."},
-    {"builtin": "remember", "description": "Store a durable memory for later recall."},
-    {"builtin": "recall", "description": "Recall stored memories relevant to a query."},
+BUILTIN_DEFAULTS: list[dict[str, Any]] = [
+    {
+        "builtin": "current_time",
+        "description": "Return the current date and time.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tz": {"type": "string", "description": "Timezone name (default UTC)", "default": "UTC"}
+            },
+        },
+    },
+    {
+        "builtin": "calculator",
+        "description": "Evaluate an arithmetic expression safely.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "Arithmetic expression, e.g. '2 * (3 + 4)'"}
+            },
+            "required": ["expression"],
+        },
+    },
+    {
+        "builtin": "web_fetch",
+        "description": "Fetch the contents of a URL.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch (e.g. 'https://example.com')"}
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "builtin": "web_search",
+        "description": "Search the web (requires a configured search-provider key).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"}
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "builtin": "knowledge_search",
+        "description": "Search this project's knowledge base (docs + Q&A).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query to find in project documents and FAQs"}
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "builtin": "remember",
+        "description": "Store a durable memory for later recall.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "Memory key or label"},
+                "value": {"type": "string", "description": "Memory content to store"},
+            },
+            "required": ["key", "value"],
+        },
+    },
+    {
+        "builtin": "recall",
+        "description": "Recall stored memories relevant to a query.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Query to search stored memories"}
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 # Safe arithmetic for the calculator (no names, no calls).

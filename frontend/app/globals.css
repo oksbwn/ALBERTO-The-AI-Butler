@@ -162,6 +162,62 @@ input[type="checkbox"]:disabled, input[type="radio"]:disabled { cursor:not-allow
 .segmented button.active { background:var(--bg-1); color:var(--fg-0); box-shadow:var(--sh-1); }
 .segmented button:hover:not(.active) { color:var(--fg-0); }
 
+/* ---------- tabs navigation ---------- */
+.tabs-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  min-height: 44px;
+  padding: 0 var(--s6);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-1);
+  overflow-x: auto;
+}
+.tabbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-2);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--dur-fast), border-color var(--dur-fast), background var(--dur-fast);
+  user-select: none;
+}
+.tabbtn:hover:not(.active) {
+  color: var(--fg-0);
+  background: var(--bg-hover);
+  border-radius: var(--r-xs) var(--r-xs) 0 0;
+}
+.tabbtn.active {
+  color: var(--fg-0);
+  font-weight: 600;
+  border-bottom-color: var(--signal);
+}
+.tabbtn .badge {
+  font-size: 11px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.tabbtn.active .badge {
+  background: var(--accent-glow);
+  color: var(--signal);
+  font-weight: 600;
+}
+
+
 /* ---------- chips / pills / badges ---------- */
 .chip { display:inline-flex; align-items:center; gap:5px; height:24px; padding:0 8px; border-radius:var(--r-sm); background:var(--bg-3); border:1px solid var(--line); font-size:12px; font-weight:500; color:var(--fg-1); }
 .chip .dot { width:7px; height:7px; border-radius:50%; }
@@ -227,7 +283,7 @@ input[type="checkbox"]:disabled, input[type="radio"]:disabled { cursor:not-allow
 .grow { flex:1; min-width:0; }
 .scroll-y { overflow-y:auto; }
 .divider { height:1px; background:var(--line); }
-.vdivider { width:1px; background:var(--line); align-self:stretch; }
+.vdivider, .divider-v { width:1px; background:var(--line); align-self:stretch; }
 .dimmed { opacity:.5; }
 .hairline { border:1px solid var(--line); }
 .truncate { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

@@ -272,10 +272,12 @@ class ToolManagerService:
                 if len(name_tokens & other_tokens) >= 2 or (name_tokens & other_tokens and name_tokens == other_tokens):
                     similar_ids.append(other_id)
 
-        base_capabilities = [name.lower()]
+        base_capabilities: list[str] = []
         for verb in set(re.findall(r"\b[a-z0-9_\-]+\b", f"{name} {description}".lower())):
             if verb in READ_VERBS or verb in WRITE_VERBS or verb in DELETE_VERBS:
                 base_capabilities.append(verb)
+        if not base_capabilities and category:
+            base_capabilities.append(category)
 
         result = ToolAnalysisResult(
             tool_id=tool_id,

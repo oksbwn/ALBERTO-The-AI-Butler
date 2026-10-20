@@ -60,6 +60,12 @@ async def get_subgraph(
     _: CurrentUser = Depends(require_role("viewer")),
 ):
     """Retrieve a bounded, scoped subgraph for interactive visualization."""
+    import contextlib
+    from alberto.services.graph_manager import GraphManagerService
+
+    with contextlib.suppress(Exception):
+        await GraphManagerService.sweep_orphaned_entities()
+
     adapter = get_graph_adapter()
     subgraph = await adapter.get_subgraph(
         tenant_id=tenant_id,

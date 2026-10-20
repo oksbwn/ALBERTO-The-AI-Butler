@@ -468,7 +468,36 @@ async def uninstall_connector(project_id: str, slug: str, session: AsyncSession 
                               tenant_id: str = Depends(current_tenant_id),
                               _: CurrentUser = Depends(require_role("editor"))):
     row = await _load_install(session, tenant_id, project_id, slug)
+
+    # Guard: prevent removing integration if any tools are actively used
+    from alberto.models import Tool
+    from alberto.services.tools import ToolService
+    tool_ids = list(row.created_tool_ids or [])
+    if row.mcp_client_id:
+        mcp_tools = list((await session.execute(
+            select(Tool).where(Tool.tenant_id == tenant_id, Tool.project_id == project_id, Tool.kind == "mcp")
+        )).scalars().all())
+        for t in mcp_tools:
+            if (t.config or {}).get("mcp_client_id") == row.mcp_client_id and t.id not in tool_ids:
+                tool_ids.append(t.id)
+
+    if tool_ids:
+        tools = list((await session.execute(
+            select(Tool).where(Tool.tenant_id == tenant_id, Tool.id.in_(tool_ids))
+        )).scalars().all())
+        tool_names = [t.name for t in tools]
+        usages = await ToolService.get_tool_usages(session, tenant_id, project_id, tool_ids, tool_names)
+        if usages:
+            items_desc = ", ".join(f"{u['target_type']} '{u['target_name']}'" for u in usages[:5])
+            if len(usages) > 5:
+                items_desc += f" and {len(usages) - 5} more"
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Cannot remove integration: {len(usages)} workflow(s) or agent(s) ({items_desc}) are currently using its tools. Please remove or replace these tools before removing the integration.",
+            )
+
     await ConnectorInstaller().uninstall(session, row)
+
 
 
 # --- credentials + connect -----------------------------------------------------------------

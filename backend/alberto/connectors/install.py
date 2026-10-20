@@ -871,10 +871,21 @@ class ConnectorInstaller:
                 select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == install.mcp_client_id)
             )).scalar_one_or_none()
             if client is not None:
+                try:
+                    from alberto.knowledge.graph import get_graph_adapter, make_entity_id
+                    adapter = get_graph_adapter()
+                    await adapter.delete_entity(tenant_id, install.project_id, make_entity_id(tenant_id, install.project_id, client.name))
+                    await adapter.delete_entity(tenant_id, install.project_id, make_entity_id(tenant_id, install.project_id, f"int:{client.name}"))
+                    await adapter.delete_entities_by_source(tenant_id, install.project_id, f"mcp:{install.mcp_client_id}")
+                    await adapter.delete_entities_by_source(tenant_id, install.project_id, f"integration:{client.name}")
+                except Exception as e:
+                    import logging
+                    logging.getLogger("alberto.connectors.install").debug(f"Knowledge graph cleanup failed: {e}")
                 await session.delete(client)
                 await session.commit()
                 from alberto.tools.mcp import invalidate_client
                 await invalidate_client(install.mcp_client_id)
+
 
         if install.tool_set_id:
             ts = await ToolSetService.get(session, tenant_id, install.tool_set_id)

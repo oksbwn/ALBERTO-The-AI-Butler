@@ -18,7 +18,7 @@ import {
   KnowledgeMemoryScreen,
 } from "@/components/screens/knowledge";
 import { TracesScreen } from "@/components/screens/traces";
-import { AuthProvidersScreen } from "@/components/screens/auth";
+import { AuthCredentialsScreen } from "@/components/screens/auth-credentials";
 import { SettingsScreen } from "@/components/screens/settings";
 import { ConnectorsScreen } from "@/components/screens/connectors";
 import { IntegrationsScreen } from "@/components/screens/integrations";
@@ -33,7 +33,7 @@ type View = { screen: string };
 const SCREEN_LABEL: Record<string, string> = {
   home: "Home", chat: "Home", overview: "Analytics", workflows: "Workflows", "workflow-canvas": "Workflow Canvas",
   agents: "Agents", "agent-config": "Agent Config", tools: "Tools", "tool-builder": "Tool Builder", components: "Components", "component-builder": "Component Builder",
-  auth: "Auth Providers", knowledge: "Knowledge", playground: "Playground", traces: "Traces",
+  auth: "Auth & Credentials", knowledge: "Knowledge", playground: "Playground", traces: "Traces",
   integrations: "Integrations", "integrations-playground": "Integrations Playground", connectors: "Integrations", mcp: "Integrations", settings: "Settings",
   channels: "Channels", triggers: "Triggers", datasets: "Evaluations", handoff: "Agent Inbox",
   "knowledge-playground": "Playground", "knowledge-docs": "Documents", "knowledge-vector": "Vector Store",
@@ -42,6 +42,7 @@ const SCREEN_LABEL: Record<string, string> = {
 };
 const PARENT: Record<string, [string, string]> = {
   "workflow-canvas": ["workflows", "Workflows"], "agent-config": ["agents", "Agents"], "tool-builder": ["tools", "Tools"], "component-builder": ["components", "Components"],
+  auth: ["integrations", "Integrations"],
   "integrations-playground": ["integrations", "Integrations"],
   "knowledge-playground": ["knowledge-playground", "Knowledge"], "knowledge-docs": ["knowledge-playground", "Knowledge"],
   "knowledge-vector": ["knowledge-playground", "Knowledge"], "knowledge-qa": ["knowledge-playground", "Knowledge"],
@@ -163,7 +164,7 @@ function App() {
       case "tool-builder": return <ToolBuilderScreen project={project} toolId={selTool?.id} onBack={() => navScreen("tools")} />;
       case "components": return <ComponentsScreen project={project} onOpen={(c) => { setSelComponent(c); navScreen("component-builder"); }} />;
       case "component-builder": return <ComponentBuilderScreen project={project} componentId={selComponent?.id} onBack={() => navScreen("components")} />;
-      case "auth": return <IntegrationsScreen project={project} initialTab="advanced" onNav={navScreen} onOpenTool={(t) => { setSelTool(t); navScreen("tool-builder"); }} />;
+      case "auth": return <AuthCredentialsScreen project={project} onNav={navScreen} />;
       case "integrations":
       case "connectors":
       case "mcp": return <IntegrationsScreen project={project} onNav={navScreen} onOpenTool={(t) => { setSelTool(t); navScreen("tool-builder"); }} />;
@@ -193,7 +194,7 @@ function App() {
     view.screen === "component-builder" ? "components" :
     view.screen === "knowledge" ? "knowledge-playground" :
     view.screen === "knowledge-explorer" ? "knowledge-playground" :
-    view.screen === "auth" ? "integrations" :
+    view.screen === "auth" ? "auth" :
     view.screen === "channels" ? "integrations" :
     (view.screen || "home");
 

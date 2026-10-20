@@ -245,6 +245,13 @@ async def lifespan(app: FastAPI):
         recovered_events = await ChannelGatewayService.recover_stale_events()
         if recovered_events:
             logging.getLogger("forge.startup").info("Startup sweep recovered %d stale channel events", recovered_events)
+    # Immediate startup sweep for orphaned Knowledge Graph entities (Integrations & Tools cleanup)
+    with contextlib.suppress(Exception):
+        from alberto.services.graph_manager import GraphManagerService
+
+        purged_graph = await GraphManagerService.sweep_orphaned_entities()
+        if purged_graph:
+            logging.getLogger("forge.startup").info("Startup sweep purged %d orphaned graph entities", purged_graph)
     if settings.otel_enabled:
         from alberto.tracing import otel
 

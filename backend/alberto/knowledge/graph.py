@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -167,6 +168,7 @@ class LadybugGraphAdapter:
         self._conn: ladybug.Connection | None = None
         self._lock: filelock.FileLock | None = None
         self._lock_acquired: bool = False
+        self._write_lock = threading.Lock()
         self._is_memory: bool = str(db_path) == ":memory:"
 
         self._init_database()
@@ -279,81 +281,82 @@ class LadybugGraphAdapter:
 
     def _create_or_update_entity_sync(self, entity: GraphEntity) -> GraphEntity:
         assert self._conn is not None
-        now = int(time.time() * 1000)
-        created_at = entity.created_at or now
-        updated_at = now
+        with self._write_lock:
+            now = int(time.time() * 1000)
+            created_at = entity.created_at or now
+            updated_at = now
 
-        # Check existing
-        res = self._execute(
-            "MATCH (e:Entity) WHERE e.id = $id RETURN e.tenant_id, e.project_id",
-            {"id": entity.id},
-        )
-        if res.has_next():
-            row: Any = res.get_next()
-            if row[0] != entity.tenant_id or row[1] != entity.project_id:
-                raise GraphScopeViolationError(
-                    f"Entity '{entity.id}' belongs to another tenant/project scope."
+            # Check existing
+            res = self._execute(
+                "MATCH (e:Entity) WHERE e.id = $id RETURN e.tenant_id, e.project_id",
+                {"id": entity.id},
+            )
+            if res.has_next():
+                row: Any = res.get_next()
+                if row[0] != entity.tenant_id or row[1] != entity.project_id:
+                    raise GraphScopeViolationError(
+                        f"Entity '{entity.id}' belongs to another tenant/project scope."
+                    )
+                self._execute(
+                    """
+                    MATCH (e:Entity)
+                    WHERE e.id = $id AND e.tenant_id = $tenant_id AND e.project_id = $project_id
+                    SET e.kind = $kind,
+                        e.name = $name,
+                        e.canonical_name = $cname,
+                        e.description = $description,
+                        e.source = $source,
+                        e.confidence = $conf,
+                        e.updated_at = $uat
+                    """,
+                    {
+                        "id": entity.id,
+                        "tenant_id": entity.tenant_id,
+                        "project_id": entity.project_id,
+                        "kind": entity.kind,
+                        "name": entity.name,
+                        "cname": entity.canonical_name or entity.name.lower(),
+                        "description": entity.description,
+                        "source": entity.source,
+                        "conf": float(entity.confidence),
+                        "uat": updated_at,
+                    },
                 )
-            self._execute(
-                """
-                MATCH (e:Entity)
-                WHERE e.id = $id AND e.tenant_id = $tenant_id AND e.project_id = $project_id
-                SET e.kind = $kind,
-                    e.name = $name,
-                    e.canonical_name = $cname,
-                    e.description = $description,
-                    e.source = $source,
-                    e.confidence = $conf,
-                    e.updated_at = $uat
-                """,
-                {
-                    "id": entity.id,
-                    "tenant_id": entity.tenant_id,
-                    "project_id": entity.project_id,
-                    "kind": entity.kind,
-                    "name": entity.name,
-                    "cname": entity.canonical_name or entity.name.lower(),
-                    "description": entity.description,
-                    "source": entity.source,
-                    "conf": float(entity.confidence),
-                    "uat": updated_at,
-                },
-            )
-        else:
-            self._execute(
-                """
-                CREATE (:Entity {
-                    id: $id,
-                    tenant_id: $tenant_id,
-                    project_id: $project_id,
-                    kind: $kind,
-                    name: $name,
-                    canonical_name: $cname,
-                    description: $description,
-                    source: $source,
-                    confidence: $conf,
-                    created_at: $cat,
-                    updated_at: $uat
-                })
-                """,
-                {
-                    "id": entity.id,
-                    "tenant_id": entity.tenant_id,
-                    "project_id": entity.project_id,
-                    "kind": entity.kind,
-                    "name": entity.name,
-                    "cname": entity.canonical_name or entity.name.lower(),
-                    "description": entity.description,
-                    "source": entity.source,
-                    "conf": float(entity.confidence),
-                    "cat": created_at,
-                    "uat": updated_at,
-                },
-            )
+            else:
+                self._execute(
+                    """
+                    CREATE (:Entity {
+                        id: $id,
+                        tenant_id: $tenant_id,
+                        project_id: $project_id,
+                        kind: $kind,
+                        name: $name,
+                        canonical_name: $cname,
+                        description: $description,
+                        source: $source,
+                        confidence: $conf,
+                        created_at: $cat,
+                        updated_at: $uat
+                    })
+                    """,
+                    {
+                        "id": entity.id,
+                        "tenant_id": entity.tenant_id,
+                        "project_id": entity.project_id,
+                        "kind": entity.kind,
+                        "name": entity.name,
+                        "cname": entity.canonical_name or entity.name.lower(),
+                        "description": entity.description,
+                        "source": entity.source,
+                        "conf": float(entity.confidence),
+                        "cat": created_at,
+                        "uat": updated_at,
+                    },
+                )
 
-        entity.created_at = created_at
-        entity.updated_at = updated_at
-        return entity
+            entity.created_at = created_at
+            entity.updated_at = updated_at
+            return entity
 
     def _get_entity_sync(self, tenant_id: str, project_id: str, entity_id: str) -> GraphEntity | None:
         assert self._conn is not None
@@ -449,83 +452,134 @@ class LadybugGraphAdapter:
 
     def _delete_entity_sync(self, tenant_id: str, project_id: str, entity_id: str) -> bool:
         assert self._conn is not None
-        existing = self._get_entity_sync(tenant_id, project_id, entity_id)
-        if not existing:
-            return False
+        with self._write_lock:
+            existing = self._get_entity_sync(tenant_id, project_id, entity_id)
+            if not existing:
+                return False
 
-        # Scoped DETACH DELETE
-        self._execute(
-            """
-            MATCH (e:Entity)
-            WHERE e.id = $id AND e.tenant_id = $tenant_id AND e.project_id = $project_id
-            DETACH DELETE e
-            """,
-            {"id": entity_id, "tenant_id": tenant_id, "project_id": project_id},
-        )
-        return True
+            # Scoped DETACH DELETE
+            self._execute(
+                """
+                MATCH (e:Entity)
+                WHERE e.id = $id AND e.tenant_id = $tenant_id AND e.project_id = $project_id
+                DETACH DELETE e
+                """,
+                {"id": entity_id, "tenant_id": tenant_id, "project_id": project_id},
+            )
+            return True
+
+    def _delete_entities_by_source_sync(self, tenant_id: str, project_id: str, source_pattern: str) -> int:
+        assert self._conn is not None
+        with self._write_lock:
+            res: Any = self._execute(
+                """
+                MATCH (e:Entity)
+                WHERE e.tenant_id = $tenant_id AND e.project_id = $project_id AND e.source CONTAINS $pattern
+                RETURN e.id
+                """,
+                {"tenant_id": tenant_id, "project_id": project_id, "pattern": source_pattern},
+            )
+            ids = []
+            while res.has_next():
+                ids.append(res.get_next()[0])
+
+            for eid in ids:
+                self._execute(
+                    """
+                    MATCH (e:Entity)
+                    WHERE e.id = $id AND e.tenant_id = $tenant_id AND e.project_id = $project_id
+                    DETACH DELETE e
+                    """,
+                    {"id": eid, "tenant_id": tenant_id, "project_id": project_id},
+                )
+            return len(ids)
+
+    def _delete_relationship_sync(self, tenant_id: str, project_id: str, rel_id: str) -> bool:
+        assert self._conn is not None
+        with self._write_lock:
+            self._execute(
+                """
+                MATCH ()-[r:RelatesTo]->()
+                WHERE r.id = $id AND r.tenant_id = $tenant_id AND r.project_id = $project_id
+                DELETE r
+                """,
+                {"id": rel_id, "tenant_id": tenant_id, "project_id": project_id},
+            )
+            return True
 
     def _create_or_update_relationship_sync(self, rel: GraphRelationship) -> GraphRelationship:
         assert self._conn is not None
-        # Strict scope enforcement: Both endpoints MUST exist in THIS scope
-        src = self._get_entity_sync(rel.tenant_id, rel.project_id, rel.source_id)
-        if not src:
-            raise GraphScopeViolationError(
-                f"Source entity '{rel.source_id}' does not exist in tenant '{rel.tenant_id}' / project '{rel.project_id}'."
+        with self._write_lock:
+            # Strict scope enforcement: Both endpoints MUST exist in THIS scope
+            src = self._get_entity_sync(rel.tenant_id, rel.project_id, rel.source_id)
+            if not src:
+                raise GraphScopeViolationError(
+                    f"Source entity '{rel.source_id}' does not exist in tenant '{rel.tenant_id}' / project '{rel.project_id}'."
+                )
+            dst = self._get_entity_sync(rel.tenant_id, rel.project_id, rel.target_id)
+            if not dst:
+                raise GraphScopeViolationError(
+                    f"Target entity '{rel.target_id}' does not exist in tenant '{rel.tenant_id}' / project '{rel.project_id}'."
+                )
+
+            now = int(time.time() * 1000)
+            created_at = rel.created_at or now
+            updated_at = now
+
+            # Delete existing edge with same id OR between same endpoints with same kind
+            self._execute(
+                """
+                MATCH (a:Entity)-[r:RelatesTo]->(b:Entity)
+                WHERE (r.id = $id OR (a.id = $src_id AND b.id = $dst_id AND r.kind = $kind))
+                  AND a.tenant_id = $tenant_id AND a.project_id = $project_id
+                  AND b.tenant_id = $tenant_id AND b.project_id = $project_id
+                  AND r.tenant_id = $tenant_id AND r.project_id = $project_id
+                DELETE r
+                """,
+                {
+                    "id": rel.id,
+                    "src_id": rel.source_id,
+                    "dst_id": rel.target_id,
+                    "kind": rel.kind,
+                    "tenant_id": rel.tenant_id,
+                    "project_id": rel.project_id,
+                },
             )
-        dst = self._get_entity_sync(rel.tenant_id, rel.project_id, rel.target_id)
-        if not dst:
-            raise GraphScopeViolationError(
-                f"Target entity '{rel.target_id}' does not exist in tenant '{rel.tenant_id}' / project '{rel.project_id}'."
+
+            self._execute(
+                """
+                MATCH (a:Entity {id: $src_id}), (b:Entity {id: $dst_id})
+                WHERE a.tenant_id = $tenant_id AND a.project_id = $project_id
+                  AND b.tenant_id = $tenant_id AND b.project_id = $project_id
+                CREATE (a)-[:RelatesTo {
+                    id: $id,
+                    kind: $kind,
+                    tenant_id: $tenant_id,
+                    project_id: $project_id,
+                    source: $source,
+                    confidence: $conf,
+                    provenance: $provenance,
+                    created_at: $cat,
+                    updated_at: $uat
+                }]->(b)
+                """,
+                {
+                    "src_id": rel.source_id,
+                    "dst_id": rel.target_id,
+                    "id": rel.id,
+                    "kind": rel.kind,
+                    "tenant_id": rel.tenant_id,
+                    "project_id": rel.project_id,
+                    "source": rel.source,
+                    "conf": float(rel.confidence),
+                    "provenance": rel.provenance,
+                    "cat": created_at,
+                    "uat": updated_at,
+                },
             )
-
-        now = int(time.time() * 1000)
-        created_at = rel.created_at or now
-        updated_at = now
-
-        # Delete existing edge with same id if any (scoped)
-        self._execute(
-            """
-            MATCH ()-[r:RelatesTo]->()
-            WHERE r.id = $id AND r.tenant_id = $tenant_id AND r.project_id = $project_id
-            DELETE r
-            """,
-            {"id": rel.id, "tenant_id": rel.tenant_id, "project_id": rel.project_id},
-        )
-
-        self._execute(
-            """
-            MATCH (a:Entity {id: $src_id}), (b:Entity {id: $dst_id})
-            WHERE a.tenant_id = $tenant_id AND a.project_id = $project_id
-              AND b.tenant_id = $tenant_id AND b.project_id = $project_id
-            CREATE (a)-[:RelatesTo {
-                id: $id,
-                kind: $kind,
-                tenant_id: $tenant_id,
-                project_id: $project_id,
-                source: $source,
-                confidence: $conf,
-                provenance: $provenance,
-                created_at: $cat,
-                updated_at: $uat
-            }]->(b)
-            """,
-            {
-                "src_id": rel.source_id,
-                "dst_id": rel.target_id,
-                "id": rel.id,
-                "kind": rel.kind,
-                "tenant_id": rel.tenant_id,
-                "project_id": rel.project_id,
-                "source": rel.source,
-                "conf": float(rel.confidence),
-                "provenance": rel.provenance,
-                "cat": created_at,
-                "uat": updated_at,
-            },
-        )
-        rel.created_at = created_at
-        rel.updated_at = updated_at
-        return rel
+            rel.created_at = created_at
+            rel.updated_at = updated_at
+            return rel
 
     def _get_relationships_sync(
         self,
@@ -986,8 +1040,12 @@ class LadybugGraphAdapter:
     async def delete_relationship(self, tenant_id: str, project_id: str, rel_id: str) -> bool:
         return await asyncio.to_thread(self._delete_relationship_sync, tenant_id, project_id, rel_id)
 
+    async def delete_entities_by_source(self, tenant_id: str, project_id: str, source_pattern: str) -> int:
+        return await asyncio.to_thread(self._delete_entities_by_source_sync, tenant_id, project_id, source_pattern)
+
     async def get_stats(self, tenant_id: str, project_id: str) -> GraphStats:
         return await asyncio.to_thread(self._get_stats_sync, tenant_id, project_id)
+
 
 
 class contextlib_suppress:

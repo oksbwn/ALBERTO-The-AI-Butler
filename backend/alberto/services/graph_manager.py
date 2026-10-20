@@ -432,3 +432,61 @@ class GraphManagerService:
             "requires_review": False,
             "review_reasons": [],
         }
+
+    @classmethod
+    async def sweep_orphaned_entities(cls) -> int:
+        """Scan Knowledge Graph and prune:
+        1. Entities from deleted MCP integrations (source starts with mcp:<client_id> where client_id is not in DB).
+        2. Entities from deleted Tools (source starts with tool:<tool_id> where tool_id is not in DB).
+        3. Capability entities whose name is an exact match for a tool's name (self-referencing duplicate capability nodes).
+        4. Redundant prefix capability nodes (e.g. 'HA: ha_config_get_scene').
+        """
+        from alberto.db.base import SessionLocal
+        from alberto.models import McpClient, Tool
+        from alberto.knowledge.graph import get_graph_adapter
+        from sqlalchemy import select
+
+        adapter = get_graph_adapter()
+        purged = 0
+
+        async with SessionLocal() as s:
+            active_mcp_ids = set((await s.execute(select(McpClient.id))).scalars().all())
+            active_tool_ids = set((await s.execute(select(Tool.id))).scalars().all())
+            active_tool_names = set((await s.execute(select(Tool.name))).scalars().all())
+
+            # Query all entities
+            res = adapter._execute("MATCH (e:Entity) RETURN e.id, e.tenant_id, e.project_id, e.kind, e.name, e.source")
+            to_delete: list[tuple[str, str, str]] = []
+            while res.has_next():
+                row = res.get_next()
+                eid, tid, pid, kind, name, source = row[0], row[1], row[2], row[3], row[4], str(row[5] or "")
+
+                # Check 1: Old MCP client
+                if source.startswith("mcp:"):
+                    parts = source.split(":")
+                    if len(parts) >= 2 and parts[1] not in active_mcp_ids:
+                        to_delete.append((tid, pid, eid))
+                        continue
+
+                # Check 2: Old tool
+                if source.startswith("tool:"):
+                    parts = source.split(":")
+                    if len(parts) >= 2 and parts[1] not in active_tool_ids:
+                        to_delete.append((tid, pid, eid))
+                        continue
+
+                # Check 3: Redundant capability node that shares the exact same name as a tool
+                if kind == "capability" and name in active_tool_names:
+                    to_delete.append((tid, pid, eid))
+                    continue
+
+                # Check 4: Redundant prefix capability (e.g. "HA: ha_config_get_scene" or "Home Assistant: ...")
+                if kind == "capability" and any(name.endswith(f": {tname}") for tname in active_tool_names):
+                    to_delete.append((tid, pid, eid))
+                    continue
+
+            for tid, pid, eid in to_delete:
+                if await adapter.delete_entity(tid, pid, eid):
+                    purged += 1
+
+        return purged

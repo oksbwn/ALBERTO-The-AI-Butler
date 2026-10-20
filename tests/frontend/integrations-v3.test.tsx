@@ -27,6 +27,7 @@ vi.mock("@/lib/api", async () => {
 
 import { IntegrationsScreen } from "@/components/screens/integrations";
 import { IntegrationsPlaygroundScreen } from "@/components/screens/integrations-playground";
+import { AuthCredentialsScreen } from "@/components/screens/auth-credentials";
 import { api } from "@/lib/api";
 
 const apiMock = vi.mocked(api);
@@ -69,14 +70,13 @@ describe("Integrations v3 Frontend Test Suite", () => {
     apiMock.listPendingApprovals.mockResolvedValue([]);
   });
 
-  it("renders Integrations Hub tabs including My Integrations, Explore, Custom, and Advanced Settings", async () => {
+  it("renders Integrations Hub tabs including My Integrations, Explore, and Custom", async () => {
     render(<IntegrationsScreen project={{ id: "p1" }} />);
 
     await waitFor(() => {
       expect(screen.getByText(/My Integrations/i)).toBeInTheDocument();
       expect(screen.getByText(/Explore/i)).toBeInTheDocument();
       expect(screen.getByText(/Custom/i)).toBeInTheDocument();
-      expect(screen.getByText(/Advanced Settings/i)).toBeInTheDocument();
     });
   });
 
@@ -89,16 +89,13 @@ describe("Integrations v3 Frontend Test Suite", () => {
     });
   });
 
-  it("navigates to Advanced Settings and switches to Shared OAuth configuration", async () => {
+  it("renders Auth & Credentials and switches to Shared OAuth configuration", async () => {
     const user = userEvent.setup();
-    render(<IntegrationsScreen project={{ id: "p1" }} />);
+    render(<AuthCredentialsScreen project={{ id: "p1" }} />);
 
-    await waitFor(() => expect(screen.getByText(/Advanced Settings/i)).toBeInTheDocument());
-    await user.click(screen.getByText(/Advanced Settings/i));
-
-    expect(screen.getByText("Advanced Integration Settings")).toBeInTheDocument();
+    expect(screen.getByText("Auth & Credentials")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Auth Providers/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Shared OAuth/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Advanced MCP/i })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Shared OAuth/i }));
     expect(screen.getByText("Shared OAuth 2.0 Client Configuration")).toBeInTheDocument();

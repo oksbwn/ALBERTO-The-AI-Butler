@@ -142,17 +142,29 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list, curren
     from langchain_core.tools import StructuredTool
 
     async def list_resources() -> str:
-        """List everything in this project: tools, workflows, agents, auth providers, knowledge sources, and Q&A pairs. Use this to answer 'what do I have' and before deciding what to build."""
+        """List everything in this project: MCP integrations, connectors, tools, workflows, agents, auth providers, knowledge sources, and Q&A pairs. Use this to answer 'what do I have' and before deciding what to build."""
+        from alberto.models import ConnectorInstall, McpClient
         async with SessionLocal() as s:
             def names(rows, attr="name"):
                 return [getattr(r, attr) for r in rows] or ["(none)"]
+            mcps = (await s.execute(select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.project_id == project_id))).scalars().all()
+            conns = (await s.execute(select(ConnectorInstall).where(ConnectorInstall.tenant_id == tenant_id, ConnectorInstall.project_id == project_id))).scalars().all()
             tools = (await s.execute(select(Tool).where(Tool.tenant_id == tenant_id, Tool.project_id == project_id))).scalars().all()
             wfs = (await s.execute(select(Workflow).where(Workflow.tenant_id == tenant_id, Workflow.project_id == project_id))).scalars().all()
             agents = (await s.execute(select(Agent).where(Agent.tenant_id == tenant_id, Agent.project_id == project_id))).scalars().all()
             aps = (await s.execute(select(AuthProvider).where(AuthProvider.tenant_id == tenant_id, AuthProvider.project_id == project_id))).scalars().all()
             srcs = (await s.execute(select(KbSource).where(KbSource.tenant_id == tenant_id, KbSource.project_id == project_id))).scalars().all()
             qas = (await s.execute(select(QaPair).where(QaPair.tenant_id == tenant_id, QaPair.project_id == project_id))).scalars().all()
+            mcp_items = []
+            for m in mcps:
+                is_ha = "8123" in (m.url or "") or m.name.upper() == "HA" or "homeassistant" in (m.url or "").lower()
+                label = f"{m.name} (Home Assistant)" if is_ha else m.name
+                status_str = "enabled" if m.enabled else "disabled"
+                mcp_items.append(f"{label} ({m.transport}, {m.url or 'local'}) [{status_str}]")
+            conn_items = [f"{c.name or c.slug} [{c.status}] (version {c.version})" for c in conns] or ["(none)"]
             return json.dumps({
+                "mcp_integrations": mcp_items or ["(none)"],
+                "connectors": conn_items,
                 "tools": [f"{t.name} ({t.kind})" for t in tools] or ["(none)"],
                 "workflows": [f"{w.name} [{w.status}]" for w in wfs] or ["(none)"],
                 "agents": names(agents), "auth_providers": [f"{a.name} ({a.kind})" for a in aps] or ["(none)"],
@@ -986,14 +998,17 @@ class AssistantService:
                 if retrieval_meta:
                     trace_meta["retrieval"] = retrieval_meta
                 is_curator = persona == "memory_curator"
+                is_mgr = persona in ("tool_manager", "integration_manager")
+                trace_name = "memory_curator" if is_curator else ("tool_manager" if is_mgr else "assistant")
+                actor_name = "Memory Curator" if is_curator else ("Integration Manager" if is_mgr else "System")
                 trace = Trace(
                     tenant_id=tenant_id, project_id=project_id, workflow_id=None,
                     run_id=f"assistant-{_uuid.uuid4()}", thread_id=thread_id,
-                    name="memory_curator" if is_curator else "assistant", status=status,
+                    name=trace_name, status=status,
                     started_at=datetime.utcnow(), ended_at=datetime.utcnow(),
                     latency_ms=latency_ms, total_tokens=tokens, total_cost_usd=cost,
-                    source="memory_curator" if is_curator else "assistant",
-                    actor="Memory Curator" if is_curator else "System",
+                    source=trace_name,
+                    actor=actor_name,
                     user_message=(user_message or None), ai_response=(ai_response or None),
                     error=(error or None),
                     meta=trace_meta,
@@ -1100,14 +1115,49 @@ class AssistantService:
             user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") in ("user", "human")), "")
             user_lower = user_msg.lower()
 
-            # Hermes-style on-demand tool injection:
-            # Only inject tools when query asks for project resources/automations
+            # Hermes-style on-demand tool injection & integration context
+            is_tool_mgr = persona in ("tool_manager", "integration_manager")
+            is_integration_query = any(w in user_lower for w in (
+                "what workflow", "what automation", "list workflow", "list resource", "what do i have",
+                "my tools", "my agents", "run tool", "call tool", "execute tool", "delegate",
+                "integration", "integrat", "mcp", "connector", "home assistant", "homeassistant", "ha",
+                "device", "sensor", "entity", "service", "connected", "connect",
+            ))
+
             tools_to_bind = []
-            if any(w in user_lower for w in ("what workflow", "what automation", "list workflow", "list resource", "what do i have", "my tools", "my agents", "run tool", "call tool", "execute tool", "delegate")):
+            if is_tool_mgr or is_integration_query:
                 all_tools = build_assistant_tools(tenant_id, project_id, [], current_user=current_user)
                 tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow", "delegate_tool_execution")]
 
             runnable = model_inst.bind_tools(tools_to_bind) if tools_to_bind else model_inst
+
+            integration_context = ""
+            if is_tool_mgr or is_integration_query:
+                try:
+                    from alberto.models import ConnectorInstall, McpClient, Tool
+                    mcps = (await s.execute(select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.project_id == project_id))).scalars().all()
+                    conns = (await s.execute(select(ConnectorInstall).where(ConnectorInstall.tenant_id == tenant_id, ConnectorInstall.project_id == project_id))).scalars().all()
+                    tools = (await s.execute(select(Tool).where(Tool.tenant_id == tenant_id, Tool.project_id == project_id))).scalars().all()
+
+                    mcp_lines = []
+                    for m in mcps:
+                        is_ha = "8123" in (m.url or "") or m.name.upper() == "HA" or "homeassistant" in (m.url or "").lower()
+                        label = f"{m.name} (Home Assistant)" if is_ha else m.name
+                        status = "enabled" if m.enabled else "disabled"
+                        m_tools = [t.name for t in tools if t.kind == "mcp" and (t.name.startswith("ha_") if is_ha else True)]
+                        tool_sample = ", ".join(m_tools[:8]) + (f" (+{len(m_tools) - 8} more)" if len(m_tools) > 8 else "")
+                        mcp_lines.append(f"- MCP Client: {label} [{status}] | Transport: {m.transport} | URL: {m.url or '(none)'} | Registered Tools ({len(m_tools)}): {tool_sample or '(none)'}")
+
+                    conn_lines = [f"- Connector: {c.name or c.slug} [{c.status}] (version {c.version})" for c in conns]
+
+                    integration_context = (
+                        "\n\n[PROJECT REGISTERED INTEGRATIONS & MCP REGISTRY]\n"
+                        f"Active MCP Servers ({len(mcps)}):\n" + ("\n".join(mcp_lines) if mcp_lines else "None\n") +
+                        f"\nInstalled Connectors ({len(conns)}):\n" + ("\n".join(conn_lines) if conn_lines else "None\n") +
+                        f"\nTotal Registered Tools in Registry: {len(tools)}"
+                    )
+                except Exception as ie:
+                    log.warning("Failed to build live integration context: %s", ie)
 
             if persona == "memory_curator":
                 fast_sys_prompt = (
@@ -1130,6 +1180,15 @@ class AssistantService:
                     "Your duty is to classify user queries, analyze user requests, and explain how intents are routed across Alberto's tools and workflows. "
                     "Be clear, precise, and concise."
                 )
+            elif persona in ("tool_manager", "integration_manager"):
+                fast_sys_prompt = (
+                    "You are Alberto's Integration Manager Sub-Agent. "
+                    "Your duty is to inspect, manage, and explain tools, MCP servers, connectors, "
+                    "communication channels, and execution policies. "
+                    "You help users test tool parameters, diagnose connectivity issues, verify authentication, "
+                    "and understand Human-In-The-Loop approval requirements. "
+                    "Be clear, precise, and technically accurate. Check the registered integrations and MCP servers list before answering."
+                )
             elif persona and persona != "assistant":
                 clean_name = persona.replace("_", " ").title()
                 fast_sys_prompt = (
@@ -1145,6 +1204,9 @@ class AssistantService:
                     "If the user asks for multi-step automation design or deep reasoning, "
                     "mention they can toggle Deep Thinking mode or ask you to execute it."
                 )
+
+            if integration_context:
+                fast_sys_prompt = f"{fast_sys_prompt}{integration_context}"
 
             # 1. Unified Knowledge & Memory Recall
             recalled_block = ""
