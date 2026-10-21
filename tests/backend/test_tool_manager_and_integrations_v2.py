@@ -40,7 +40,7 @@ async def test_tool_manager_system_agent_provisioned_and_protected(sample_projec
         sys_agents = await AgentService.ensure_system_agents(
             session, sample_project.tenant_id, sample_project.id
         )
-        assert len(sys_agents) == 4
+        assert len(sys_agents) == 5
         keys = {a.system_key for a in sys_agents}
         assert "tool_manager" in keys
 

@@ -51,7 +51,7 @@ WRITE_VERBS = {
 }
 
 DELETE_VERBS = {
-    "delete", "remove", "drop", "destroy", "purge", "clear", "wipe",
+    "delete", "deletion", "remove", "drop", "destroy", "purge", "clear", "wipe",
     "format", "reset", "erase", "cancel", "kill", "unlink", "disconnect",
     "uninstall",
 }
@@ -692,12 +692,12 @@ class ToolManagerService:
                 "auth_provider_id": tool_row.auth_provider_id or (tool_row.config or {}).get("auth_provider_id"),
             }
             ctx = {"end_user_id": user_context.get("id"), **(user_context.get("context") or {})}
-            res = await ToolService.test(tenant_id, project_id, cfg, parameters, ctx)
+            res = await ToolService.execute(tenant_id, project_id, cfg, parameters, ctx)
             return {
                 "ok": res.get("ok", False),
                 "tool_id": tool_row.id,
                 "tool_name": tool_row.name,
-                "result": res.get("projected") if res.get("ok") else None,
+                "result": res.get("result") if res.get("ok") else None,
                 "error": res.get("error"),
                 "status": res.get("status"),
             }

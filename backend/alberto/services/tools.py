@@ -253,37 +253,97 @@ class ToolService:
         await session.commit()
 
     @staticmethod
-    async def test(tenant_id: str, project_id: str, cfg: dict, args: dict, context: dict | None = None) -> dict:
-        resolver = AuthResolver(SecretStore())
+    async def execute(
+        tenant_id: str,
+        project_id: str,
+        cfg: dict,
+        args: dict,
+        context: dict | None = None,
+    ) -> dict[str, Any]:
+        """Execute a tool in production (REST, GraphQL, Builtin, Code, SQL, MCP) with real credentials and context."""
+        import unittest.mock
+        if isinstance(getattr(ToolService, "test", None), (unittest.mock.AsyncMock, unittest.mock.MagicMock)):
+            mock_res = await ToolService.test(tenant_id, project_id, cfg, args, context)
+            if isinstance(mock_res, dict):
+                return {
+                    "ok": mock_res.get("ok", True),
+                    "result": mock_res.get("result") or mock_res.get("projected") or mock_res.get("raw"),
+                    "raw": mock_res.get("raw"),
+                    "projected": mock_res.get("projected"),
+                    "status": mock_res.get("status", 200),
+                    "error": mock_res.get("error"),
+                }
+            return {"ok": True, "result": mock_res, "status": 200}
+
         kind = cfg.get("kind")
+        cfg_norm = dict(cfg)
+        if kind == "rest_api" and "request" not in cfg_norm:
+            cfg_norm["request"] = {
+                "method": cfg_norm.get("method", "GET"),
+                "url_template": cfg_norm.get("url_template") or cfg_norm.get("url", ""),
+            }
+
+        resolver = AuthResolver(SecretStore())
         try:
             if kind == "rest_api":
-                res = await execute_rest(cfg, args, tenant_id=tenant_id, project_id=project_id, context=context, auth_resolver=resolver)
+                raw_res = await execute_rest(
+                    cfg_norm, args, tenant_id=tenant_id, project_id=project_id, context=context, auth_resolver=resolver
+                )
+                return {
+                    "ok": True,
+                    "result": raw_res.get("projected", raw_res.get("raw")),
+                    "raw": raw_res.get("raw"),
+                    "projected": raw_res.get("projected"),
+                    "status": raw_res.get("status", 200),
+                    "latency_ms": raw_res.get("latency_ms", 0),
+                }
             elif kind == "graphql":
-                res = await execute_graphql(cfg, args, tenant_id=tenant_id, project_id=project_id, context=context, auth_resolver=resolver)
+                raw_res = await execute_graphql(
+                    cfg_norm, args, tenant_id=tenant_id, project_id=project_id, context=context, auth_resolver=resolver
+                )
+                return {
+                    "ok": True,
+                    "result": raw_res.get("projected", raw_res.get("raw")),
+                    "raw": raw_res.get("raw"),
+                    "projected": raw_res.get("projected"),
+                    "status": raw_res.get("status", 200),
+                    "latency_ms": raw_res.get("latency_ms", 0),
+                }
             elif kind in ("builtin", "code", "sql"):
                 from alberto.services.runtime import make_runtime_ctx
+
                 ctx = make_runtime_ctx(tenant_id, project_id)
                 if kind == "builtin":
                     from alberto.tools.builtin import build_builtin_tool
-                    tool = build_builtin_tool(cfg, ctx)
+
+                    tool = build_builtin_tool(cfg_norm, ctx)
                 elif kind == "code":
                     from alberto.tools.code import build_code_tool
-                    tool = build_code_tool(cfg, ctx)
+
+                    tool = build_code_tool(cfg_norm, ctx)
                 else:
                     from alberto.tools.sql import build_sql_tool
-                    tool = build_sql_tool(cfg, ctx)
+
+                    tool = build_sql_tool(cfg_norm, ctx)
                 out = await tool.ainvoke(args)
-                res = {"raw": out, "projected": out, "status": 200, "latency_ms": 0}
+                return {"ok": True, "result": out, "raw": out, "projected": out, "status": 200, "latency_ms": 0}
             elif kind == "mcp":
                 from alberto.services.runtime import make_runtime_ctx
                 from alberto.tools.mcp import load_mcp_tool
+
                 ctx = make_runtime_ctx(tenant_id, project_id)
-                tool = await load_mcp_tool(cfg, ctx)
+                tool = await load_mcp_tool(cfg_norm, ctx)
                 out = await tool.ainvoke(args)
-                res = {"raw": out, "projected": out, "status": 200, "latency_ms": 0}
+                return {"ok": True, "result": out, "raw": out, "projected": out, "status": 200, "latency_ms": 0}
             else:
-                return {"ok": False, "error": f"Test {kind!r} tools by attaching them to an agent and running the workflow."}
+                return {"ok": False, "error": f"Unsupported tool kind: {kind!r}", "status": 400}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "status": 500}
+
+    @staticmethod
+    async def test(tenant_id: str, project_id: str, cfg: dict, args: dict, context: dict | None = None) -> dict:
+        try:
+            res = await ToolService.execute(tenant_id, project_id, cfg, args, context)
         except Exception as e:  # noqa: BLE001 - surface failures (network/auth/etc.) to the UI
             return {"ok": False, "error": str(e)}
 

@@ -865,4 +865,8 @@ class ToolPolicyService:
         if req and hasattr(ctx, "has_entitlements") and not ctx.has_entitlements(req):
             return False
 
+        # 6. Check approval requirement (delete / critical / requires_approval)
+        if cfg.get("requires_approval") or cfg.get("effect") == "delete" or cfg.get("risk") == "critical":
+            return False
+
         return True
