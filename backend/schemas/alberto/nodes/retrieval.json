@@ -3,6 +3,8 @@
   "$id": "forge/nodes/retrieval",
   "type": "object",
   "properties": {
+    "include_memory": { "type": "boolean", "default": true, "x-ui": { "effect": "Include Memory Curator facts and user preferences from Unified Memory." } },
+    "include_graph": { "type": "boolean", "default": true, "x-ui": { "effect": "Include verified Knowledge Graph entities and relations from LadybugDB." } },
     "include_docs": { "type": "boolean", "default": true, "x-ui": { "effect": "Search the knowledge-base DOCUMENTS (RAG). Turn off for a Q&A-only node that pulls only curated FAQ pairs." } },
     "top_k": { "type": "integer", "default": 5, "description": "How many knowledge-base document chunks to retrieve (only when include_docs is true)." },
     "hybrid": { "type": "boolean", "default": false, "x-ui": { "effect": "Hybrid search: blend lexical BM25 keyword matching with semantic vectors (RRF). Catches exact terms - codes, names, SKUs - that pure vector search can miss." } },
