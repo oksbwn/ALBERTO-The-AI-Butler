@@ -243,12 +243,12 @@ export const SYSTEM_SUB_AGENTS: Agent[] = [
     config: { description: "Inspects and explains entities, relationships, and ontology mappings in Alberto's graph." },
   },
   {
-    id: "intent_router",
+    id: "automation_manager",
     project_id: "",
-    name: "Intent Router",
-    system_key: "intent_router",
+    name: "Automation Manager",
+    system_key: "automation_manager",
     is_system: true,
-    config: { description: "Analyzes user requests, classifies intents, and determines automation routing." },
+    config: { description: "Designs, generates, validates, tests, and optimizes workflows and automation pipelines." },
   },
 ];
 
@@ -304,6 +304,8 @@ export function ChatScreen({
     ? "memory_curator"
     : persona === "tool_manager" || persona === "integration_manager"
     ? "tool_manager"
+    : persona === "automation_manager"
+    ? "automation_manager"
     : isAgent
     ? (selectedAgent?.system_key || selectedAgent?.name?.toLowerCase().replace(/\s+/g, "_") || "agent")
     : "assistant";
@@ -312,6 +314,7 @@ export function ChatScreen({
   const isGraphManager = activePersona === "graph_manager";
   const isIntentRouter = activePersona === "intent_router";
   const isToolManager = activePersona === "tool_manager" || activePersona === "integration_manager";
+  const isAutomationManager = activePersona === "automation_manager";
 
   const [agentDropdownOpen, setAgentDropdownOpen] = useState(false);
   const agentDropdownRef = useRef<HTMLDivElement>(null);
@@ -335,6 +338,14 @@ export function ChatScreen({
         name: selectedWf?.name || "Workflow",
         badge: "WORKFLOW",
         icon: "workflow",
+        color: "var(--accent)",
+      };
+    }
+    if (isAutomationManager) {
+      return {
+        name: "Automation Manager",
+        badge: "SUB-AGENT",
+        icon: "workflows",
         color: "var(--accent)",
       };
     }
@@ -384,7 +395,7 @@ export function ChatScreen({
       icon: "sparkles",
       color: "var(--accent)",
     };
-  }, [isWorkflow, isToolManager, isCurator, isGraphManager, isIntentRouter, isAgent, selectedWf, selectedAgent]);
+  }, [isWorkflow, isAutomationManager, isToolManager, isCurator, isGraphManager, isIntentRouter, isAgent, selectedWf, selectedAgent]);
 
   const models = useModels();
   const [selectedModel, setSelectedModel] = useState<string>("");
@@ -974,7 +985,12 @@ export function ChatScreen({
     }
   }, [target]);
 
-  const starters = isToolManager ? [
+  const starters = isAutomationManager ? [
+    { label: "Design Workflow", prompt: "Design an automated customer onboarding and notification workflow." },
+    { label: "Analyze Risks", prompt: "Audit our existing workflows for security risks and tool failure modes." },
+    { label: "Propose Specialist", prompt: "What specialist agents should we create for data extraction and alerting?" },
+    { label: "Optimize Pipeline", prompt: "Suggest performance and reliability optimizations for our active workflows." },
+  ] : isToolManager ? [
     { label: "Audit Tools", prompt: "Audit all registered tools, their risk levels, and approval policies." },
     { label: "Diagnose Errors", prompt: "Diagnose recent execution errors and connection failures." },
     { label: "Check MCP Servers", prompt: "Explain the active MCP servers and the tools they expose." },
@@ -1005,7 +1021,9 @@ export function ChatScreen({
     { label: "Test Edge Cases", prompt: "Provide edge case inputs to test this automation graph." },
   ];
 
-  const heroBg = isToolManager
+  const heroBg = isAutomationManager
+    ? "linear-gradient(135deg, var(--accent, #6366f1), #8b5cf6)"
+    : isToolManager
     ? "linear-gradient(135deg, var(--accent, #6366f1), #4f46e5)"
     : isCurator
     ? "linear-gradient(135deg, #a855f7, #6366f1)"
@@ -1033,7 +1051,9 @@ export function ChatScreen({
     ? "0 6px 20px rgba(16, 185, 129, 0.25)"
     : "0 6px 20px rgba(99, 102, 241, 0.25)";
 
-  const heroIcon = isToolManager
+  const heroIcon = isAutomationManager
+    ? "workflows"
+    : isToolManager
     ? "tools"
     : isCurator
     ? "brain"
@@ -1047,7 +1067,9 @@ export function ChatScreen({
     ? "workflow"
     : "sparkles";
 
-  const heroTitle = isToolManager
+  const heroTitle = isAutomationManager
+    ? "Automation Manager Sub-Agent"
+    : isToolManager
     ? "Integration Manager Sub-Agent"
     : isCurator
     ? "Memory Curator Sub-Agent"
@@ -1061,7 +1083,9 @@ export function ChatScreen({
     ? `Ready to run ${selectedWf?.name || "workflow"}`
     : "How can I help you today?";
 
-  const heroDesc = isToolManager
+  const heroDesc = isAutomationManager
+    ? "Designs, validates, tests, and optimizes automation pipelines and specialist agents. Safe-tests changes and prepares workflows for approval."
+    : isToolManager
     ? "Inspects, tests, and manages tools, MCP clients, connectors, and communication channels. Helps diagnose execution policies and HITL gates."
     : isCurator
     ? "Curates, audits, and organizes your long-term memories and knowledge graph. Chats here also train Alberto's background memory."
@@ -1184,7 +1208,40 @@ export function ChatScreen({
         {/* Left: Target & Model */}
         <div className="row gap2" style={{ alignItems: "center", minWidth: 0 }}>
           {/* Target Selector / Persona Badge */}
-          {persona === "memory_curator" ? (
+          {persona === "automation_manager" ? (
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                height: 26,
+                padding: "0 10px",
+                fontSize: 12,
+                fontWeight: 600,
+                background: "rgba(99, 102, 241, 0.1)",
+                border: "1px solid rgba(99, 102, 241, 0.3)",
+                borderRadius: 5,
+                color: "var(--accent, #6366f1)",
+              }}
+              title="Automation Manager Sub-Agent: designs, tests, and optimizes workflows"
+            >
+              <Icon name="workflows" size={13} style={{ color: "var(--accent, #6366f1)" }} />
+              <span>Automation Manager</span>
+              <span
+                style={{
+                  fontSize: 9.5,
+                  fontWeight: 700,
+                  padding: "1px 5px",
+                  borderRadius: 4,
+                  background: "rgba(99, 102, 241, 0.2)",
+                  color: "var(--accent, #6366f1)",
+                  letterSpacing: "0.04em",
+                }}
+              >
+                SUB-AGENT
+              </span>
+            </div>
+          ) : persona === "memory_curator" ? (
             <div
               style={{
                 display: "inline-flex",
@@ -1397,10 +1454,10 @@ export function ChatScreen({
                   {effectiveAgents.map((a) => {
                     const aKey = a.system_key || a.id;
                     const targetVal = `agent:${aKey}`;
-                    const isSelected = target === targetVal || (aKey === "memory_curator" && isCurator) || (aKey === "graph_manager" && isGraphManager) || (aKey === "intent_router" && isIntentRouter);
-                    const iconName = aKey === "memory_curator" ? "brain" : aKey === "graph_manager" ? "workflows" : aKey === "intent_router" ? "tools" : "bot";
-                    const iconColor = aKey === "memory_curator" ? "#a855f7" : aKey === "graph_manager" ? "#06b6d4" : aKey === "intent_router" ? "#f59e0b" : "var(--io-control)";
-                    const desc = a.config?.description || (aKey === "memory_curator" ? "Curates durable facts & audits conflicts" : aKey === "graph_manager" ? "Knowledge graph ontology & relations" : aKey === "intent_router" ? "Query classification & intent routing" : "Custom project sub-agent");
+                    const isSelected = target === targetVal || (aKey === "automation_manager" && isAutomationManager) || (aKey === "memory_curator" && isCurator) || (aKey === "graph_manager" && isGraphManager) || (aKey === "intent_router" && isIntentRouter);
+                    const iconName = aKey === "automation_manager" ? "workflows" : aKey === "memory_curator" ? "brain" : aKey === "graph_manager" ? "workflows" : aKey === "intent_router" ? "tools" : "bot";
+                    const iconColor = aKey === "automation_manager" ? "var(--accent)" : aKey === "memory_curator" ? "#a855f7" : aKey === "graph_manager" ? "#06b6d4" : aKey === "intent_router" ? "#f59e0b" : "var(--io-control)";
+                    const desc = a.config?.description || (aKey === "automation_manager" ? "Designs, validates, tests, and optimizes workflows" : aKey === "memory_curator" ? "Curates durable facts & audits conflicts" : aKey === "graph_manager" ? "Knowledge graph ontology & relations" : aKey === "intent_router" ? "Query classification & intent routing" : "Custom project sub-agent");
 
                     return (
                       <div
@@ -1934,7 +1991,7 @@ export function ChatScreen({
                   <span className="typing-dot" />
                 </div>
                 <span className="fg-2" style={{ fontSize: 12, fontWeight: 500 }}>
-                  {currentTool ? `Running ${currentTool}…` : isCurator ? "Auditing memory…" : isGraphManager ? "Traversing graph…" : isIntentRouter ? "Routing intent…" : !isWorkflow ? "Thinking…" : "Executing automation…"}
+                  {currentTool ? `Running ${currentTool}…` : isAutomationManager ? "Designing automation…" : isCurator ? "Auditing memory…" : isGraphManager ? "Traversing graph…" : isIntentRouter ? "Routing intent…" : !isWorkflow ? "Thinking…" : "Executing automation…"}
                   {busySecs > 1 && <span style={{ opacity: 0.65, marginLeft: 6 }}>({busySecs}s)</span>}
                 </span>
               </div>

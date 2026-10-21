@@ -31,9 +31,9 @@ import { AuthGate } from "@/components/login";
 type View = { screen: string };
 
 const SCREEN_LABEL: Record<string, string> = {
-  home: "Home", chat: "Home", overview: "Analytics", workflows: "Workflows", "workflow-canvas": "Workflow Canvas",
+  home: "Home", chat: "Home", overview: "Analytics", automate: "Automate Playground", workflows: "Workflows", "workflow-canvas": "Workflow Canvas",
   agents: "Agents", "agent-config": "Agent Config", tools: "Tools", "tool-builder": "Tool Builder", components: "Components", "component-builder": "Component Builder",
-  auth: "Auth & Credentials", knowledge: "Knowledge", playground: "Playground", traces: "Traces",
+  auth: "Auth & Credentials", knowledge: "Knowledge", playground: "Automate Playground", traces: "Executions & Traces",
   integrations: "Integrations", "integrations-playground": "Integrations Playground", connectors: "Integrations", mcp: "Integrations", settings: "Settings",
   channels: "Channels", triggers: "Triggers", datasets: "Evaluations", handoff: "Agent Inbox",
   "knowledge-playground": "Playground", "knowledge-docs": "Documents", "knowledge-vector": "Vector Store",
@@ -41,7 +41,11 @@ const SCREEN_LABEL: Record<string, string> = {
   "knowledge-explorer": "Playground",
 };
 const PARENT: Record<string, [string, string]> = {
-  "workflow-canvas": ["workflows", "Workflows"], "agent-config": ["agents", "Agents"], "tool-builder": ["tools", "Tools"], "component-builder": ["components", "Components"],
+  "workflow-canvas": ["workflows", "Workflows"],
+  "agent-config": ["agents", "Agents"],
+  "tool-builder": ["tools", "Tools"],
+  "component-builder": ["components", "Components"],
+  "workflows": ["playground", "Automate"],
   auth: ["integrations", "Integrations"],
   "integrations-playground": ["integrations", "Integrations"],
   "knowledge-playground": ["knowledge-playground", "Knowledge"], "knowledge-docs": ["knowledge-playground", "Knowledge"],
@@ -155,8 +159,9 @@ function App() {
       case "chat":
         return <HomeScreen project={project} onNav={navScreen} onMutate={() => setRefreshNonce((n) => n + 1)} />;
       case "overview": return <AnalyticsScreen project={project} onNav={navScreen} />;
-      case "playground": return <PlaygroundScreen project={project} />;
-      case "workflows": return <WorkflowsScreen project={project} onOpen={(w) => { setSelWorkflow(w); navScreen("workflow-canvas"); }} />;
+      case "automate":
+      case "playground": return <PlaygroundScreen project={project} onOpenWorkflow={(w: Workflow) => { setSelWorkflow(w); navScreen("workflow-canvas"); }} onNav={navScreen} />;
+      case "workflows": return <WorkflowsScreen project={project} onOpen={(w) => { setSelWorkflow(w); navScreen("workflow-canvas"); }} onNav={navScreen} />;
       case "workflow-canvas": return <WorkflowCanvas project={project} workflowId={selWorkflow?.id} onWorkflowChange={setSelWorkflow} onBack={() => navScreen("workflows")} onRun={() => navScreen("playground")} onRegisterFlush={(fn) => { canvasFlushRef.current = fn; }} />;
       case "agents": return <AgentsScreen project={project} onOpen={(a) => { setSelAgent(a); navScreen("agent-config"); }} />;
       case "agent-config": return <AgentConfigScreen project={project} agentId={selAgent?.id} onBack={() => navScreen("agents")} />;
@@ -196,6 +201,7 @@ function App() {
     view.screen === "knowledge-explorer" ? "knowledge-playground" :
     view.screen === "auth" ? "auth" :
     view.screen === "channels" ? "integrations" :
+    view.screen === "automate" ? "playground" :
     (view.screen || "home");
 
   return (

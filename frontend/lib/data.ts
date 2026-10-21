@@ -366,12 +366,13 @@ export const PROJECT_NAV: NavEntry[] = [
     id: "automate",
     section: "Automate",
     icon: "workflow",
-    help: "Workflows, agents, and custom components.",
+    help: "Conversational workflow engineering with Automation Manager, visual workflows, agents, and components.",
     items: [
+      { id: "playground", label: "Playground", icon: "playground", help: "AI Automation Manager Studio: conversational design, safe testing, and execution." },
       { id: "workflows", label: "Workflows", icon: "workflow", countKey: "workflows", help: "Visual workflow builder & graph canvas." },
       { id: "agents", label: "Agents", icon: "bot", countKey: "agents", help: "Autonomous agent presets and prompts." },
       { id: "components", label: "Components", icon: "grid", countKey: "components", help: "Interactive UI chat widgets." },
-      { id: "playground", label: "Playground", icon: "playground", help: "Test workflows live with token metering." },
+      { id: "traces", label: "Executions", icon: "activity", help: "Execution traces, monitoring, and troubleshooting." },
     ],
   },
   {

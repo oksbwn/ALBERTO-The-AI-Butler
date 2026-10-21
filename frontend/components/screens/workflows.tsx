@@ -116,7 +116,7 @@ function EditableName({
 }
 
 /* ============ WORKFLOWS LIST ============ */
-export function WorkflowsScreen({ project, onOpen }: { project: any; onOpen: (w: Workflow) => void }) {
+export function WorkflowsScreen({ project, onOpen, onNav }: { project: any; onOpen: (w: Workflow) => void; onNav?: (screen: string) => void }) {
   const [wfs, setWfs] = useState<Workflow[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -173,6 +173,11 @@ export function WorkflowsScreen({ project, onOpen }: { project: any; onOpen: (w:
             <div className="fg-1" style={{ marginTop: 3 }}>Visual graphs compiled to LangGraph. Build agents, routers, tools, and HITL on the canvas.</div>
           </div>
           <div className="row gap2">
+            {onNav && (
+              <button className="btn btn-secondary" onClick={() => onNav("playground")}>
+                <Icon name="sparkles" size={15} /> AI Studio
+              </button>
+            )}
             <ImportExport project={project} type="workflow" typeLabel="workflow" size="md" onImported={reload}
               items={wfs.map((w) => ({ id: w.id, name: w.name || "Untitled workflow", sub: `${(w.executable?.nodes || []).length} nodes` }))} />
             <button className="btn btn-primary" onClick={create} disabled={busy}><Icon name="plus" size={15} />{busy ? "Creating…" : "New workflow"}</button>

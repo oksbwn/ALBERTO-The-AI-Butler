@@ -471,6 +471,127 @@ export interface OntologyRelationshipType {
   updated_at?: string | null;
 }
 
+export interface DiscoveredAgent {
+  id: string;
+  name: string;
+  description?: string | null;
+  system_key?: string | null;
+  is_system: boolean;
+  model?: string | null;
+  tools: string[];
+}
+
+export interface DiscoveredTool {
+  id: string;
+  name: string;
+  description?: string | null;
+  kind: string;
+  effect_type: string;
+  risk_level: string;
+  requires_approval: boolean;
+  read_only: boolean;
+}
+
+export interface CapabilityDiscoveryResult {
+  project_id: string;
+  workflows: any[];
+  specialist_agents: DiscoveredAgent[];
+  system_agents: DiscoveredAgent[];
+  node_catalog: any[];
+  tools: DiscoveredTool[];
+  tool_sets: any[];
+  integrations: any[];
+  channels: any[];
+  models: { default_model: string; registered_models: string[]; servers: string[] };
+}
+
+export interface AgentProposal {
+  name: string;
+  responsibility: string;
+  system_prompt: string;
+  model?: string | null;
+  tools: string[];
+  tool_sets: string[];
+  input_contract?: string | null;
+  output_contract?: string | null;
+  tool_permissions: string[];
+  risk_info: Record<string, any>;
+  intended_workflow_association?: string | null;
+}
+
+export interface SafeTestCheck {
+  name: string;
+  status: "passed" | "failed" | "warning";
+  detail: string;
+}
+
+export interface SafeTestResult {
+  session_id: string;
+  valid: boolean;
+  status: "passed" | "failed" | "warning";
+  checks: SafeTestCheck[];
+  risks_identified: string[];
+  side_effects: string[];
+  tested_at: string;
+}
+
+export interface WorkflowProposal {
+  title: string;
+  strategy: "deterministic" | "single_agent" | "multi_agent" | "hybrid";
+  description: string;
+  executable: Record<string, any>;
+  canvas: Record<string, any>;
+  proposed_agents: AgentProposal[];
+  reused_agents: string[];
+  reused_tools: string[];
+  explanation: string;
+  validation: { valid: boolean; errors: any[] };
+  safe_test_results?: SafeTestResult;
+  workflow_id?: string;
+}
+
+export interface AuthoringSession {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  user_id?: string | null;
+  title: string;
+  requirement: string;
+  status: string;
+  clarifications: { role: string; content: string; timestamp: string }[];
+  current_plan?: Record<string, any> | null;
+  proposal?: WorkflowProposal | null;
+  proposed_agents: AgentProposal[];
+  validation_status: string;
+  validation_errors: any[];
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AuthoringStepResult {
+  action: "clarify" | "plan" | "error";
+  session_id: string;
+  revision: number;
+  questions: string[];
+  proposal?: WorkflowProposal | null;
+  validation_status: string;
+  validation_errors: any[];
+  error_message?: string | null;
+}
+
+export interface ApprovalResult {
+  session_id: string;
+  status: string;
+  revision: number;
+  workflow_id: string;
+  workflow_name: string;
+  created_agent_ids: string[];
+  activated: boolean;
+  approved_by?: string | null;
+  message: string;
+}
+
 export interface StatRollup { runs: number; tokens: number; cost_usd: number; avg_latency_ms: number; errors?: number; error_rate?: number; }
 export interface ReportRow extends StatRollup { label: string; kind: "workflow" | "assistant" | "other"; }
 
@@ -687,6 +808,19 @@ export const api = {
     json<Workflow>(`/v1/projects/${pid}/workflows/${wid}/publish`, { method: "POST" }),
   deleteWorkflow: (pid: string, wid: string) =>
     notifyCounts(fetch(`${BASE}/v1/projects/${pid}/workflows/${wid}`, { method: "DELETE", headers: authHeader() })),
+  // Automate / Automation Manager
+  listAutomationSessions: (pid: string) => json<AuthoringSession[]>(`/v1/projects/${pid}/automate/sessions`),
+  getAutomationSession: (pid: string, sid: string) => json<AuthoringSession>(`/v1/projects/${pid}/automate/sessions/${sid}`),
+  createAutomationSession: (pid: string, body: { requirement: string; title?: string }) =>
+    json<AuthoringSession>(`/v1/projects/${pid}/automate/sessions`, { method: "POST", body: JSON.stringify(body) }),
+  sendAutomationMessage: (pid: string, sid: string, body: { message: string; expected_revision?: number }) =>
+    json<AuthoringStepResult>(`/v1/projects/${pid}/automate/sessions/${sid}/messages`, { method: "POST", body: JSON.stringify(body) }),
+  testAutomationProposal: (pid: string, sid: string) =>
+    json<SafeTestResult>(`/v1/projects/${pid}/automate/sessions/${sid}/test`, { method: "POST" }),
+  approveAutomationProposal: (pid: string, sid: string, body: { revision: number; create_agents?: boolean; activate?: boolean }) =>
+    json<ApprovalResult>(`/v1/projects/${pid}/automate/sessions/${sid}/approve`, { method: "POST", body: JSON.stringify(body) }),
+  discoverAutomationCapabilities: (pid: string) =>
+    json<CapabilityDiscoveryResult>(`/v1/projects/${pid}/automate/capabilities`),
   dashboardStats: () => json<DashboardStats>("/v1/stats/dashboard"),
   projectStats: (pid: string) => json<ProjectStats>(`/v1/stats/projects/${pid}`),
   projectAnalytics: (pid: string, days = 30) => json<Analytics>(`/v1/stats/projects/${pid}/analytics?days=${days}`),

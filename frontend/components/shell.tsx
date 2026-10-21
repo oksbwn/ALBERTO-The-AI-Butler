@@ -425,11 +425,16 @@ export function ProjectSidebar({
                       hoverTimerRef.current = setTimeout(() => setHoveredGroup(null), 180);
                     }}
                     onClick={(e) => {
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      setFlyoutPos({ top: Math.max(10, Math.min(window.innerHeight - 340, rect.top)) });
-                      setHoveredGroup((prev) => (prev === entry.id ? null : entry.id));
+                      if (entry.items.length > 0) {
+                        onNav(entry.items[0].id);
+                        setHoveredGroup(null);
+                      } else {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setFlyoutPos({ top: Math.max(10, Math.min(window.innerHeight - 340, rect.top)) });
+                        setHoveredGroup((prev) => (prev === entry.id ? null : entry.id));
+                      }
                     }}
-                    title={`${entry.section} (Hover to fan out)`}
+                    title={`${entry.section} (Click to open, hover for items)`}
                     className={"iconbtn" + (isGroupActive ? " active" : "")}
                     style={{
                       width: 38,
@@ -471,7 +476,13 @@ export function ProjectSidebar({
             return (
               <div key={entry.id} style={{ marginBottom: 4 }}>
                 <button
-                  onClick={() => setOpenGroups((prev) => ({ ...prev, [entry.id]: !isOpen }))}
+                  onClick={() => {
+                    const nextOpen = !isOpen;
+                    setOpenGroups((prev) => ({ ...prev, [entry.id]: nextOpen }));
+                    if (nextOpen && entry.items.length > 0) {
+                      onNav(entry.items[0].id);
+                    }
+                  }}
                   className="row spread"
                   style={{
                     width: "100%",
