@@ -1429,6 +1429,22 @@ class RunService:
         except Exception:  # noqa: BLE001
             log.exception("failed to commit error state for run %s", run.id)
 
+        # Autonomous failure diagnosis trigger
+        try:
+            import asyncio
+            from alberto.services.automation_manager import AutomationManagerService
+            asyncio.create_task(
+                AutomationManagerService.on_run_failure(
+                    tenant_id=run.tenant_id,
+                    project_id=run.project_id or "",
+                    workflow_id=run.workflow_id or "",
+                    run_id=run.id,
+                    error=error,
+                )
+            )
+        except Exception as e:
+            log.debug("Could not spawn autonomous failure diagnosis: %s", e)
+
         try:
             from alberto.tracing import otel
 

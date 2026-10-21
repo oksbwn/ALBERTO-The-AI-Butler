@@ -74,6 +74,19 @@ SYSTEM_AGENT_SPECS: dict[str, dict[str, Any]] = {
             "status": "active",
         },
     },
+    "automation_manager": {
+        "name": "Automation Manager",
+        "system_key": "automation_manager",
+        "description": "Designs, generates, validates, tests, modifies, monitors, troubleshoots and optimises workflows through natural-language conversations.",
+        "config": {
+            "name": "automation_manager",
+            "description": "Designs, generates, validates, tests, modifies, monitors, troubleshoots and optimises workflows through natural-language conversations.",
+            "system_prompt": "You are Alberto's Automation Manager. You design, generate, validate, troubleshoot, and optimise workflows. You understand Alberto's nodes, triggers, agent registry, and tool capabilities. You choose the simplest execution strategy that satisfies the user's requirements.",
+            "tools": [],
+            "model": "",
+            "status": "active",
+        },
+    },
 }
 
 # Pre-v3 display names / prompts, used to migrate existing rows in place (never duplicating them).

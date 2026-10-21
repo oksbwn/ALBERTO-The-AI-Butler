@@ -26,6 +26,7 @@ from alberto.routers import (
     audit,
     auth,
     auth_providers,
+    automate,
     channels,
     components,
     connections,
@@ -340,6 +341,7 @@ def create_app() -> FastAPI:
         mcp_clients.router, versions.router,
         graph.router, memory.router,
         connectors.router, tool_manager.router, tool_manager.integration_router,
+        automate.router, automate.api_router,
     ):
         app.include_router(r)
     return app

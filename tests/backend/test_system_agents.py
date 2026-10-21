@@ -37,10 +37,10 @@ async def test_system_agents_provisioning(sample_project: Project):
         sys_agents = await AgentService.ensure_system_agents(
             session, sample_project.tenant_id, sample_project.id
         )
-        assert len(sys_agents) == 4
+        assert len(sys_agents) == 5
 
         keys = {a.system_key for a in sys_agents}
-        assert keys == {"intent_router", "memory_curator", "graph_manager", "tool_manager"}
+        assert keys == {"intent_router", "memory_curator", "graph_manager", "tool_manager", "automation_manager"}
 
         for a in sys_agents:
             assert a.is_system is True
@@ -74,7 +74,7 @@ async def test_system_agents_idempotency_and_preserve_overrides(sample_project: 
         after_reprovision = await AgentService.ensure_system_agents(
             session, sample_project.tenant_id, sample_project.id
         )
-        assert len(after_reprovision) == 4
+        assert len(after_reprovision) == 5
 
         reloaded = (
             await session.execute(
@@ -215,9 +215,9 @@ async def test_concurrent_system_agent_provisioning(sample_project: Project):
     # Launch 5 concurrent provisioning sessions
     results = await asyncio.gather(*(provision() for _ in range(5)))
     for res in results:
-        assert len(res) == 4
+        assert len(res) == 5
 
-    # Verify database state has exactly 4 system agents
+    # Verify database state has exactly 5 system agents
     async with SessionLocal() as session:
         all_agents = (
             await session.execute(
@@ -228,8 +228,8 @@ async def test_concurrent_system_agent_provisioning(sample_project: Project):
                 )
             )
         ).scalars().all()
-        assert len(all_agents) == 4
-        assert {a.system_key for a in all_agents} == {"intent_router", "memory_curator", "graph_manager", "tool_manager"}
+        assert len(all_agents) == 5
+        assert {a.system_key for a in all_agents} == {"intent_router", "memory_curator", "graph_manager", "tool_manager", "automation_manager"}
 
 
 @pytest.mark.asyncio
