@@ -15,7 +15,7 @@ from __future__ import annotations
 from alberto.engine.context import CompileContext
 from alberto.engine.registry import NodeSpec, Port, register
 
-TRIGGER_TYPES = ("webhook_in", "schedule", "email_in", "app_event")
+TRIGGER_TYPES = ("webhook_in", "schedule", "email_in", "app_event", "integration_event")
 
 
 def _passthrough_factory(config: dict, ctx: CompileContext):
@@ -50,4 +50,10 @@ register(NodeSpec(
     input_ports=[], output_ports=_out, factory=_passthrough_factory,
     category="triggers", label="App Event", description="Poll an external source; run once per new item.",
     summarize=lambda c: [str(c.get("poll_url", ""))[:32], f"every {c.get('interval_minutes', 5)} min"],
+))
+register(NodeSpec(
+    type="integration_event", schema_id="forge/nodes/trigger_app_event",
+    input_ports=[], output_ports=_out, factory=_passthrough_factory,
+    category="triggers", label="Integration Event", description="Run when an external integration emits an event.",
+    summarize=lambda c: [str(c.get("event_type") or c.get("source") or "event")[:32]],
 ))

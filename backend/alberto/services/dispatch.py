@@ -67,6 +67,8 @@ async def dispatch_trigger(run_service: RunService, trigger: Trigger, payload, *
             t = await s.get(Trigger, trigger.id)
             if t is not None:
                 t.last_fired_at = datetime.utcnow()
+                if (t.config or {}).get("run_at"):
+                    t.enabled = False
                 await s.commit()
     # Offload to the worker queue when configured (webhook/schedule need no synchronous
     # reply); otherwise run inline. Either way per-tenant concurrency is bounded (audit P1).
@@ -123,24 +125,59 @@ async def run_due_schedules(run_service: RunService) -> int:
 
     Each due trigger is CLAIMED atomically before running - re-fetch, re-check due, and stamp
     last_fired_at in one transaction - so a second scheduler tick or replica that also saw it
-    due finds it already claimed and skips it (no duplicate scheduled runs). Mirrors the
-    app_event poller's claim (audit F9); schedules previously stamped only inside dispatch."""
+    due finds it already claimed and skips it (no duplicate scheduled runs).
+    For one-time triggers (run_at), the Run record is created in the SAME transaction as the
+    claim, guaranteeing crash-safe durability without losing execution on restart.
+    """
     async with SessionLocal() as s:
         due = await TriggerService.due_schedule_triggers(s)
     fired = 0
     for trig in due:
+        run_id = None
+        is_one_time = False
         async with SessionLocal() as s:
             t = await s.get(Trigger, trig.id)
             if t is None or not TriggerService.is_due(t):
                 continue  # already claimed by a concurrent tick / no longer due
             t.last_fired_at = datetime.utcnow()
+            is_one_time = bool((t.config or {}).get("run_at"))
+            if is_one_time:
+                # Atomically claim trigger and create durable Run record in SQLite
+                run_input = TriggerService.build_input(t, None)
+                end_user = {"id": t.run_as_user_id} if t.run_as_user_id else None
+                run = await run_service.create_run(
+                    s,
+                    tenant_id=t.tenant_id,
+                    project_id=t.project_id,
+                    workflow_id=t.workflow_id,
+                    input=run_input,
+                    end_user=end_user,
+                    source="schedule",
+                )
+                run_id = run.id
+                t.enabled = False
+                t.meta = {
+                    **(t.meta or {}),
+                    "one_time_run_id": run_id,
+                    "dispatch_status": "dispatched",
+                    "dispatched_at": datetime.utcnow().isoformat(),
+                }
             await s.commit()
+
         try:
-            await dispatch_trigger(run_service, trig, None, stamp=False)
+            if is_one_time and run_id:
+                from alberto.queue import enqueue_run
+                if not await enqueue_run(run_id, trig.tenant_id, trig.project_id):
+                    await run_service.run_to_completion(
+                        run_id=run_id, tenant_id=trig.tenant_id, project_id=trig.project_id,
+                    )
+            else:
+                await dispatch_trigger(run_service, trig, None, stamp=False)
             fired += 1
         except Exception:  # noqa: BLE001 - one bad schedule must not stop the rest
             log.exception("schedule trigger %s failed", trig.id)
     return fired
+
 
 
 async def run_due_app_events(run_service: RunService) -> int:

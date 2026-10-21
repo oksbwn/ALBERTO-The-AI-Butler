@@ -150,6 +150,22 @@ class TriggerService:
         now = now or datetime.utcnow()
         cfg = trigger.config or {}
         last = trigger.last_fired_at
+
+        # One-time execution: run_at ISO-8601 timestamp
+        run_at_str = cfg.get("run_at")
+        if run_at_str:
+            if last is not None:
+                return False  # Already fired once; do not duplicate
+            try:
+                run_at = datetime.fromisoformat(run_at_str.replace("Z", "+00:00"))
+                if run_at.tzinfo is not None:
+                    # Compare timezone-aware
+                    now_tz = datetime.now(run_at.tzinfo)
+                    return run_at <= now_tz
+                return run_at <= now
+            except Exception:
+                return False
+
         every = cfg.get("every_minutes") or cfg.get("interval_minutes")
         if every:
             if last is None:

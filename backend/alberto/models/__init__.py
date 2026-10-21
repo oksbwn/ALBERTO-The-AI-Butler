@@ -4,6 +4,7 @@ from alberto.models.entities import (
     Agent,
     AuditLog,
     AuthProvider,
+    AutomationSession,
     Channel,
     ChannelEvent,
     ChannelIdentity,
@@ -39,6 +40,7 @@ from alberto.models.entities import (
     Trigger,
     User,
     Workflow,
+    WorkflowRepairAttempt,
 )
 
 # Eval history tables live in a separate module (append-isolated from entities.py); imported
@@ -55,6 +57,6 @@ __all__ = [
     "OntologyEntityType", "OntologyRelationshipType", "OntologyEntityMapping",
     "EntityVersion", "EvalRun", "EvalResult", "OAuthClient", "ConnectorInstall", "ConnectorInstallation",
     "ModelServer", "RegisteredModel", "ToolApprovalRequest", "ToolAnalysisJob",
-    "ChannelIdentity", "ChannelPairing", "ChannelEvent",
+    "ChannelIdentity", "ChannelPairing", "ChannelEvent", "AutomationSession", "WorkflowRepairAttempt",
 ]
 
