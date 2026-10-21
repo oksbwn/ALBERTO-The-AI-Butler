@@ -115,3 +115,65 @@ async def test_agent_task_prompt_and_structured_output_key():
     # 3. Verify messages contain the interpolated task_prompt
     human_msgs = [m for m in out["messages"] if isinstance(m, HumanMessage) or getattr(m, "type", None) == "human"]
     assert any("INC-402" in m.content and "exhausted" in m.content for m in human_msgs)
+
+
+@pytest.mark.asyncio
+async def test_bound_agent_preserves_task_prompt_and_structured_output_key():
+    """When a node references a saved agent preset (`agent_ref`), it mirrors the preset
+    persona/model/tools while preserving the pipeline step's task_prompt and output_key."""
+    ctx = make_runtime_ctx("t_bound", "p_bound")
+    ctx.checkpointer = InMemorySaver()
+    ctx.agent_presets = {
+        "sec_triage_preset": {
+            "flavor": "agent",
+            "model": 'fake:{"category": "security", "urgency": 5, "action": "block_ip"}',
+            "system_prompt": "You are a Tier-3 Security Analyst.",
+            "tools": [],
+        }
+    }
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "category": {"type": "string"},
+            "urgency": {"type": "integer"},
+            "action": {"type": "string"},
+        },
+    }
+
+    workflow_def = {
+        "id": "wf_bound_pipeline",
+        "version": 1,
+        "state": {
+            "messages": {"type": "list[message]", "reducer": "add_messages"},
+            "incident": {"type": "string"},
+            "verdict": {"type": "object"},
+        },
+        "entry_node": "agent_step",
+        "nodes": [
+            {
+                "id": "agent_step",
+                "type": "agent",
+                "config": {
+                    "agent_ref": "sec_triage_preset",
+                    "task_prompt": "Investigate incident {{state.incident}}",
+                    "output_key": "verdict",
+                    "response_format": {"mode": "structured", "schema": schema},
+                },
+            },
+            {"id": "end", "type": "end", "config": {}},
+        ],
+        "edges": [{"source": "agent_step", "target": "end"}],
+    }
+
+    graph = compile_workflow(workflow_def, ctx)
+    out = await graph.ainvoke(
+        {"messages": [], "incident": "Brute-force SSH attack detected on bastion"},
+        {"configurable": {"thread_id": "th_bound_1"}},
+    )
+
+    # Output unpacked into verdict state key
+    assert out.get("verdict") == {"category": "security", "urgency": 5, "action": "block_ip"}
+    # Task prompt rendered dynamically
+    human_msgs = [m for m in out["messages"] if isinstance(m, HumanMessage) or getattr(m, "type", None) == "human"]
+    assert any("Brute-force SSH attack" in m.content for m in human_msgs)

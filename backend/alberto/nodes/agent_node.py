@@ -660,13 +660,19 @@ def _common_kwargs(config: dict, ctx: CompileContext) -> dict:
 
 def _resolve_config(config: dict, ctx: CompileContext) -> dict:
     """If the node mirrors a saved agent (`agent_ref`), the live preset drives it - so
-    edits in the Agents tab take effect without re-saving the workflow. Falls back to the
-    node's own (snapshot) config when the preset is missing/unresolved."""
+    edits in the Agents tab take effect without re-saving the workflow. Preserves pipeline-specific
+    node invocation parameters (task_prompt, output_key, response_format) configured on this
+    specific workflow step. Falls back to the node's own config when preset is missing."""
     ref = config.get("agent_ref")
     if ref:
         preset = (getattr(ctx, "agent_presets", None) or {}).get(ref)
         if preset:
-            return dict(preset)
+            merged = dict(preset)
+            merged["agent_ref"] = ref
+            for key in ("task_prompt", "output_key", "response_format", "output_schema", "structured_output"):
+                if key in config and config[key] is not None:
+                    merged[key] = config[key]
+            return merged
     return config
 
 
