@@ -63,7 +63,7 @@ describe("Forge console smoke coverage", () => {
 
   it("Playground reset clears the server-side thread handle", async () => {
     const user = userEvent.setup();
-    render(<PlaygroundScreen project={{ id: "p1" }} />);
+    render(<PlaygroundScreen project={{ id: "p1" }} defaultTab="workflow_test" />);
 
     const composer = await screen.findByPlaceholderText("Message the workflow…");
     await user.type(composer, "first turn");

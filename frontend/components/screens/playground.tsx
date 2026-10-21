@@ -45,10 +45,12 @@ export function PlaygroundScreen({
   project,
   onOpenWorkflow,
   onNav,
+  defaultTab = "ai_authoring",
 }: {
   project: any;
   onOpenWorkflow?: (w: Workflow) => void;
   onNav?: (screen: string) => void;
+  defaultTab?: "ai_authoring" | "workflow_test";
 }) {
   // Draggable split percentage: defaults to 50% (half half), identical to Knowledge and Integrations Playgrounds
   const [splitPct, setSplitPct] = useState(50);
@@ -86,7 +88,7 @@ export function PlaygroundScreen({
   // Cross-panel communication: sends prompts from Workbench into the ChatScreen on the right
   const [externalChatInput, setExternalChatInput] = useState<string>("");
 
-  const [activeTab, setActiveTab] = useState<"ai_authoring" | "workflow_test">("ai_authoring");
+  const [activeTab, setActiveTab] = useState<"ai_authoring" | "workflow_test">(defaultTab);
 
   // AI Authoring workbench state
   const [sessions, setSessions] = useState<AuthoringSession[]>([]);
@@ -811,7 +813,7 @@ export function PlaygroundScreen({
               <div className="row gap2">
                 <input
                   className="input grow"
-                  placeholder="Send input to workflow runner…"
+                  placeholder="Message the workflow…"
                   value={testInput}
                   onChange={(e) => setTestInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -823,6 +825,17 @@ export function PlaygroundScreen({
                   disabled={testRunning}
                   style={{ height: 32, fontSize: 12.5 }}
                 />
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => {
+                    threadRef.current = null;
+                    setTestMsgs([]);
+                  }}
+                  style={{ height: 32 }}
+                >
+                  Reset
+                </button>
                 {testRunning ? (
                   <button
                     className="btn btn-secondary btn-sm"
