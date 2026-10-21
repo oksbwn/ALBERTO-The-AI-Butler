@@ -10,7 +10,7 @@ is exposed as the `meta` attribute (DB column name "metadata").
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
@@ -935,7 +935,7 @@ class WorkflowRepairAttempt(PkTimestamp, Base):
     source_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=1)
     repair_status: Mapped[str] = mapped_column(String(50), default="attempted")  # attempted | repaired | blocked | failed
-    last_attempt_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+    last_attempt_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
     repair_outcome: Mapped[dict] = mapped_column(JSON, default=dict)
 
 

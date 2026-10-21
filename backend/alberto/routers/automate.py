@@ -209,7 +209,7 @@ async def test_session_proposal(
             session_id=session_id,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/sessions/{session_id}/approve", response_model=ApprovalResultOut)
@@ -240,10 +240,10 @@ async def approve_session_proposal(
     except ValueError as e:
         msg = str(e)
         if "Conflict" in msg:
-            raise HTTPException(status_code=409, detail=msg)
+            raise HTTPException(status_code=409, detail=msg) from e
         if "not found" in msg:
-            raise HTTPException(status_code=404, detail=msg)
-        raise HTTPException(status_code=400, detail=msg)
+            raise HTTPException(status_code=404, detail=msg) from e
+        raise HTTPException(status_code=400, detail=msg) from e
 
 
 @router.get("/monitoring", response_model=WorkflowMonitoringReport)
@@ -282,7 +282,7 @@ async def diagnose_run_failure(
             run_id=run_id,
         )
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 @router.get("/workflows/{workflow_id}/optimise", response_model=WorkflowOptimisationReport)
@@ -303,7 +303,7 @@ async def get_workflow_optimisation(
             workflow_id=workflow_id,
         )
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 @router.post("/workflows/{workflow_id}/repair")
@@ -324,4 +324,4 @@ async def repair_workflow(
             workflow_id=workflow_id,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e

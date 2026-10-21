@@ -10,7 +10,7 @@ Defines validated data structures for:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -192,7 +192,7 @@ class SafeTestResult(BaseModel):
     checks: list[SafeTestCheck] = Field(default_factory=list)
     risks_identified: list[str] = Field(default_factory=list)
     side_effects: list[str] = Field(default_factory=list)
-    tested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    tested_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ApprovalRequestIn(BaseModel):

@@ -372,6 +372,7 @@ def _wrap_tool_for_agent(
     """
     from langchain.tools import ToolRuntime
     from langchain_core.tools import StructuredTool
+
     from alberto.tools.materialize import _accepts_runtime
 
     inner_coro = getattr(inner_tool, "coroutine", None)
@@ -730,6 +731,7 @@ def agent_factory(config: dict, ctx: CompileContext):
 
     async def _pipeline_node(state: dict) -> dict:
         from langchain_core.messages import HumanMessage
+
         from alberto.auth_providers.templates import render_template
 
         agent_state = dict(state or {})

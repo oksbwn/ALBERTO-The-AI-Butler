@@ -18,14 +18,12 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-log = logging.getLogger(__name__)
-
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import alberto.nodes  # noqa: F401 (ensure all node types are registered in NODE_REGISTRY)
 from alberto.engine.models import resolve_model
-from alberto.engine.registry import NODE_REGISTRY, NodeSpec
+from alberto.engine.registry import NODE_REGISTRY
 from alberto.models import (
     Agent,
     AutomationSession,
@@ -41,7 +39,6 @@ from alberto.models import (
     ToolSet,
     Trace,
     Trigger,
-    Workflow,
 )
 from alberto.schemas.automation_manager import (
     AgentProposal,
@@ -65,13 +62,13 @@ from alberto.schemas.automation_manager import (
     WorkflowOptimisationReport,
     WorkflowProposal,
 )
-from alberto.services.agents import AgentService, SYSTEM_AGENT_SPECS
+from alberto.services.agents import AgentService
 from alberto.services.runtime import make_runtime_ctx
-from alberto.services.tool_policy import ToolPolicyService
 from alberto.services.validation import validate_workflow
 from alberto.services.workflows import WorkflowService
 
 logger = logging.getLogger("alberto.services.automation_manager")
+log = logger
 
 MAX_SELF_CORRECTION_ATTEMPTS = 3
 
@@ -152,7 +149,7 @@ class AutomationManagerService:
 
         # 3. Available Workflow Node Catalog & Schemas
         node_catalog: list[DiscoveredNode] = []
-        for ntype, spec in sorted(NODE_REGISTRY.items()):
+        for _ntype, spec in sorted(NODE_REGISTRY.items()):
             in_ports = [
                 {"id": p.id, "io_type": p.io_type, "direction": p.direction, "required": p.required}
                 for p in spec.input_ports
@@ -1571,7 +1568,6 @@ class AutomationManagerService:
         if trace_refs:
             spans = list((await session.execute(select(Span).where(Span.trace_id.in_(trace_refs)))).scalars())
 
-        failed_spans = [s for s in spans if s.error or s.name.endswith("_error")]
         longest_span = max(spans, key=lambda s: s.latency_ms) if spans else None
         longest_dict = (
             {"name": longest_span.name, "latency_ms": longest_span.latency_ms, "kind": longest_span.kind}
@@ -1839,6 +1835,7 @@ class AutomationManagerService:
         """Asynchronously analyze run failure, persist diagnosis, and perform bounded safe self-repair if permitted."""
         try:
             import hashlib
+
             from alberto.db.base import SessionLocal
             from alberto.models import Workflow
 

@@ -1435,6 +1435,7 @@ class RunService:
         # Autonomous failure diagnosis trigger
         try:
             import asyncio
+
             from alberto.services.automation_manager import AutomationManagerService
             asyncio.create_task(
                 AutomationManagerService.on_run_failure(
