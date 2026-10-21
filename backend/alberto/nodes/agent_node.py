@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain.tools import ToolRuntime
 
 from alberto.engine.context import CompileContext
 from alberto.engine.middleware_compiler import build_middleware
@@ -370,7 +371,6 @@ def _wrap_tool_for_agent(
     HITL approval checks (e.g. for delete or critical risk operations) are strictly evaluated
     before the agent executes the underlying tool.
     """
-    from langchain.tools import ToolRuntime
     from langchain_core.tools import StructuredTool
 
     from alberto.tools.materialize import _accepts_runtime

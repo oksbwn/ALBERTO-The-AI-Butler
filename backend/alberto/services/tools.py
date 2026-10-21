@@ -296,6 +296,8 @@ class ToolService:
                     "projected": raw_res.get("projected"),
                     "status": raw_res.get("status", 200),
                     "latency_ms": raw_res.get("latency_ms", 0),
+                    "redirect": raw_res.get("redirect"),
+                    "final_url": raw_res.get("final_url"),
                 }
             elif kind == "graphql":
                 raw_res = await execute_graphql(
@@ -308,6 +310,8 @@ class ToolService:
                     "projected": raw_res.get("projected"),
                     "status": raw_res.get("status", 200),
                     "latency_ms": raw_res.get("latency_ms", 0),
+                    "redirect": raw_res.get("redirect"),
+                    "final_url": raw_res.get("final_url"),
                 }
             elif kind in ("builtin", "code", "sql"):
                 from alberto.services.runtime import make_runtime_ctx
