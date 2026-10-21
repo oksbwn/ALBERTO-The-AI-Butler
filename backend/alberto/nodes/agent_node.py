@@ -717,9 +717,70 @@ def agent_factory(config: dict, ctx: CompileContext):
 
         kwargs: dict[str, Any] = dict(common)
         kwargs["middleware"] = middleware
-        return create_agent(**kwargs)
+        raw_agent = create_agent(**kwargs)
+    else:
+        raw_agent = create_agent(**common)
 
-    return create_agent(**common)
+    task_prompt = config.get("task_prompt") or config.get("prompt")
+    rf = config.get("response_format") or {}
+    output_key = config.get("output_key") or (rf.get("output_key") if rf.get("mode") == "structured" else None)
+
+    if not task_prompt and not output_key:
+        return raw_agent
+
+    async def _pipeline_node(state: dict) -> dict:
+        from langchain_core.messages import HumanMessage
+        from alberto.auth_providers.templates import render_template
+
+        agent_state = dict(state or {})
+        if task_prompt:
+            rendered = render_template(task_prompt, {"state": dict(state or {})})
+            if rendered is not None and not isinstance(rendered, str):
+                rendered = str(rendered)
+            if rendered:
+                existing_msgs = list(agent_state.get("messages") or [])
+                agent_state["messages"] = [*existing_msgs, HumanMessage(content=rendered)]
+
+        result = await raw_agent.ainvoke(agent_state)
+        out: dict[str, Any] = dict(result or {})
+        if output_key:
+            parsed = _extract_structured_data(result)
+            if parsed is not None:
+                out[output_key] = parsed
+        return out
+
+    return _pipeline_node
+
+
+def _extract_structured_data(res: dict) -> Any:
+    """Extract structured data from an agent execution result dictionary."""
+    msgs = res.get("messages") or []
+    if not msgs:
+        return None
+    last = msgs[-1]
+    sr = getattr(last, "structured_response", None)
+    if sr is not None:
+        return sr
+    content = getattr(last, "content", None)
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, str):
+        text = content.strip()
+        import json
+        import re
+
+        m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+        if m:
+            text = m.group(1).strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+    for tc in getattr(last, "tool_calls", []) or []:
+        args = tc.get("args")
+        if isinstance(args, dict):
+            return args
+    return None
 
 
 def _summary(config: dict) -> list[str]:
@@ -740,6 +801,10 @@ def _summary(config: dict) -> list[str]:
         line2 += f" · MCP {n_mcp}"
     if flavor == "deep_agent":
         line2 += f" · subagents {len(config.get('subagents', []) or [])}"
+    rf = config.get("response_format") or {}
+    out_k = config.get("output_key") or (rf.get("output_key") if rf.get("mode") == "structured" else None)
+    if out_k:
+        line2 += f" · out: {out_k}"
     return [str(model), line2]
 
 

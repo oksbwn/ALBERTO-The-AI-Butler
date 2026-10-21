@@ -34,6 +34,8 @@
       }
     },
     "system_prompt": { "type": "string", "x-ui": { "widget": "textarea", "section": "Instructions", "order": 3, "modelView": true } },
+    "task_prompt": { "type": "string", "description": "Task prompt / instruction template for pipeline execution. Supports {{state.<var>}} syntax.", "x-ui": { "widget": "textarea", "section": "Instructions", "order": 3.5 } },
+    "output_key": { "type": "string", "description": "State key to write structured output data into for downstream pipeline nodes.", "x-ui": { "section": "Output" } },
     "dynamic_prompt": {
       "type": "object",
       "x-ui": { "section": "Instructions", "advanced": true },
@@ -114,7 +116,7 @@
     "ResponseFormat": {
       "oneOf": [
         { "type": "object", "properties": { "mode": { "const": "freeform" } } },
-        { "type": "object", "required": ["mode", "schema"], "properties": { "mode": { "const": "structured" }, "strategy": { "type": "string", "enum": ["auto", "provider", "tool"], "default": "auto" }, "schema": { "type": "object", "description": "JSON Schema of the desired structured output." } } }
+        { "type": "object", "required": ["mode", "schema"], "properties": { "mode": { "const": "structured" }, "strategy": { "type": "string", "enum": ["auto", "provider", "tool"], "default": "auto" }, "output_key": { "type": "string", "description": "State key to write the parsed structured object into for downstream nodes." }, "schema": { "type": "object", "description": "JSON Schema of the desired structured output." } } }
       ],
       "x-ui": { "widget": "kind-switcher", "discriminator": "mode" }
     },

@@ -396,8 +396,11 @@ def _internal_message_nodes(nodes: list) -> set[str]:
         if not isinstance(n, dict) or not n.get("id"):
             continue  # a null id would match tokens with no `langgraph_node` and drop answers
         ntype = n.get("type")
-        structured_llm = ntype == "llm" and ((n.get("config") or {}).get("response_format") or {}).get("mode") == "structured"
-        if ntype in ("classifier", "router", "start", "end") or structured_llm:
+        cfg = n.get("config") or {}
+        rf = cfg.get("response_format") or {}
+        structured_llm = ntype == "llm" and rf.get("mode") == "structured"
+        structured_agent = ntype in ("agent", "deep_agent") and (rf.get("mode") == "structured" or bool(cfg.get("output_key")))
+        if ntype in ("classifier", "router", "start", "end") or structured_llm or structured_agent:
             out.add(n["id"])
     return out
 

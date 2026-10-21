@@ -17,10 +17,10 @@ const CAT_COLOR: Record<string, string> = {
 function summarize(type: string, c: Record<string, any>): string[] {
   switch (type) {
     case "agent":
-    case "deep_agent":
-      // Show only the model on the card - tools / middleware / components / knowledge are
-      // all partial here; the right-hand inspector shows the full config.
-      return [String(c.model || "-")];
+    case "deep_agent": {
+      const outKey = c.output_key || c.response_format?.output_key;
+      return outKey ? [String(c.model || "-"), `→ ${outKey}`] : [String(c.model || "-")];
+    }
     case "router":
       return [`expr · ${c.expression || "-"}`, Object.keys(c.cases || {}).concat(c.default ? ["default"] : []).join(" · ")];
     case "llm":
@@ -32,10 +32,12 @@ function summarize(type: string, c: Record<string, any>): string[] {
     case "tool_call":
       return [String(c.tool_id || "-")];
     case "retrieval": {
-      const lines: string[] = [];
-      if (c.include_docs !== false) lines.push(`docs top_k ${c.top_k ?? 5}${c.hybrid ? " · hybrid" : ""}${c.rerank ? " · rerank" : ""}`);
-      if (c.include_qa) lines.push(`Q&A top_k ${c.qa_top_k ?? 3}`);
-      return lines.length ? lines : ["no sources"];
+      const parts: string[] = [];
+      if (c.include_memory !== false) parts.push("memory");
+      if (c.include_graph !== false) parts.push("graph");
+      if (c.include_docs !== false) parts.push("docs");
+      if (c.include_qa) parts.push("Q&A");
+      return [parts.join(" + ") || "no sources"];
     }
     case "human_input":
       return [(c.prompt || "").slice(0, 34), (c.allowed_decisions || ["approve", "reject"]).join(" · ")];

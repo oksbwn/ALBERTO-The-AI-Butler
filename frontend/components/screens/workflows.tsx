@@ -1185,8 +1185,24 @@ function stateWriters(nodes: FlowNode[]): { key: string; values: string[]; from:
 function RetrievalForm({ c, set, folders, kinds }: { c: Record<string, any>; set: (p: Record<string, any>) => void; folders: string[]; kinds: string[] }) {
   const ragOn = c.include_docs !== false; // RAG on unless explicitly turned off
   const qaOn = !!c.include_qa;
+  const memoryOn = c.include_memory !== false;
+  const graphOn = c.include_graph !== false;
   return (
     <div className="col" style={{ gap: 18 }}>
+      <CollapsibleSection label="Unified Memory" badge={memoryOn || graphOn ? "active" : undefined}
+        hint="Automatically ground workflow steps with curated facts from Memory Curator and entity relations from Knowledge Graph.">
+        <div className="col gap2">
+          <label className="row gap2" style={{ cursor: "pointer" }}>
+            <Toggle on={memoryOn} onChange={(on) => set({ include_memory: on })} />
+            <span className="t-body-sm">Include Curated Memories (Facts &amp; Preferences)</span>
+          </label>
+          <label className="row gap2" style={{ cursor: "pointer" }}>
+            <Toggle on={graphOn} onChange={(on) => set({ include_graph: on })} />
+            <span className="t-body-sm">Include Knowledge Graph (Entities &amp; Relations)</span>
+          </label>
+        </div>
+      </CollapsibleSection>
+
       <CollapsibleSection label="Knowledge" badge={ragOn ? "enabled" : undefined}
         hint="Pull the most relevant document chunks from your knowledge base into context for a grounded agent.">
         <div className="col gap2">

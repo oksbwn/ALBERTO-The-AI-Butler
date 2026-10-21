@@ -55,8 +55,9 @@ def make_router_path(config: dict):
     multi = bool(config.get("multi", False))
 
     def _one(val: Any) -> str | None:
-        # match by string key first (JSON object keys are strings), then raw value
         target = cases.get(str(val))
+        if target is None and isinstance(val, bool):
+            target = cases.get(str(val).lower())
         if target is None and not isinstance(val, str) and val in cases:
             target = cases[val]
         return target
