@@ -799,6 +799,30 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list, curren
         )
         return json.dumps(res)
 
+    async def delegate_automation_management(requirement: str, session_id: str = "") -> str:
+        """Delegate workflow design, authoring, validation, or troubleshooting to the Automation Manager system subagent.
+        Automation Manager discovers project capabilities, structures multi-agent or deterministic pipelines,
+        proposes specialist agents, and validates low-code graph schemas."""
+        from alberto.services.automation_manager import AutomationManagerService
+        async with SessionLocal() as s:
+            if not session_id:
+                auth_sess = await AutomationManagerService.create_session(
+                    session=s,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    user_id=getattr(current_user, "id", None),
+                    requirement=requirement,
+                )
+                session_id = auth_sess.id
+            result = await AutomationManagerService.process_message(
+                session=s,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                session_id=session_id,
+                message=requirement,
+            )
+            return json.dumps(result.model_dump())
+
     def mk(fn, name):
         return StructuredTool.from_function(coroutine=fn, name=name, parse_docstring=False)
 
@@ -827,6 +851,7 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list, curren
         mk(evaluate_build, "evaluate_build"),
         mk(delete_workflow, "delete_workflow"),
         mk(delegate_tool_execution, "delegate_tool_execution"),
+        mk(delegate_automation_management, "delegate_automation_management"),
     ]
 
 
@@ -999,8 +1024,9 @@ class AssistantService:
                     trace_meta["retrieval"] = retrieval_meta
                 is_curator = persona == "memory_curator"
                 is_mgr = persona in ("tool_manager", "integration_manager")
-                trace_name = "memory_curator" if is_curator else ("tool_manager" if is_mgr else "assistant")
-                actor_name = "Memory Curator" if is_curator else ("Integration Manager" if is_mgr else "System")
+                is_auto_mgr = persona == "automation_manager"
+                trace_name = "memory_curator" if is_curator else ("tool_manager" if is_mgr else ("automation_manager" if is_auto_mgr else "assistant"))
+                actor_name = "Memory Curator" if is_curator else ("Integration Manager" if is_mgr else ("Automation Manager" if is_auto_mgr else "System"))
                 trace = Trace(
                     tenant_id=tenant_id, project_id=project_id, workflow_id=None,
                     run_id=f"assistant-{_uuid.uuid4()}", thread_id=thread_id,
@@ -1114,12 +1140,13 @@ class AssistantService:
 
             user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") in ("user", "human")), "")
 
-            # Fast mode tool binding & live integration context
+            # Fast mode tool binding & live integration / workflow context
             is_tool_mgr = persona in ("tool_manager", "integration_manager")
             is_assistant = persona in (None, "", "assistant")
+            is_auto_mgr = persona == "automation_manager"
 
             tools_to_bind = []
-            if is_tool_mgr or is_assistant:
+            if is_tool_mgr or is_assistant or is_auto_mgr:
                 all_tools = build_assistant_tools(tenant_id, project_id, [], current_user=current_user)
                 tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow", "delegate_tool_execution")]
 
@@ -1153,6 +1180,23 @@ class AssistantService:
                 except Exception as ie:
                     log.warning("Failed to build live integration context: %s", ie)
 
+            workflow_context = ""
+            if is_auto_mgr or is_assistant:
+                try:
+                    from alberto.models import Workflow
+                    wfs = (await s.execute(select(Workflow).where(Workflow.tenant_id == tenant_id, Workflow.project_id == project_id))).scalars().all()
+                    wf_lines = [
+                        f"- Workflow '{w.name}' (ID: {w.id}) | Status: {w.status} | Version: {w.active_version or 1} | Nodes: {len((w.executable or {}).get('nodes', []))}"
+                        for w in wfs
+                    ]
+                    workflow_context = (
+                        "\n\n[PROJECT WORKFLOW REGISTRY]\n"
+                        f"Total Workflows in this Project: {len(wfs)}\n"
+                        + ("\n".join(wf_lines) if wf_lines else "No workflows exist in this project yet.\n")
+                    )
+                except Exception as we:
+                    log.warning("Failed to build live workflow context: %s", we)
+
             if persona == "memory_curator":
                 fast_sys_prompt = (
                     "You are Alberto's Memory Curator Sub-Agent. "
@@ -1183,6 +1227,16 @@ class AssistantService:
                     "and understand Human-In-The-Loop approval requirements. "
                     "Be clear, precise, and technically accurate. Check the registered integrations and MCP servers list before answering."
                 )
+            elif persona == "automation_manager":
+                fast_sys_prompt = (
+                    "You are Alberto's Automation Manager Sub-Agent. "
+                    "Your duty is to design, generate, validate, troubleshoot, and optimize workflows and automations. "
+                    "You understand Alberto's low-code designer schemas, node catalogs, triggers, specialist agents, and tools. "
+                    "You have direct access to the project's workflow registry and capabilities. "
+                    "Answer questions about existing workflows, workflow counts, execution states, and automation designs directly and factually using the provided Project Workflow Registry. "
+                    "You choose the simplest execution strategy that satisfies the user's requirements. "
+                    "Be clear, precise, and technically accurate."
+                )
             elif persona and persona != "assistant":
                 clean_name = persona.replace("_", " ").title()
                 fast_sys_prompt = (
@@ -1204,6 +1258,8 @@ class AssistantService:
 
             if integration_context:
                 fast_sys_prompt = f"{fast_sys_prompt}{integration_context}"
+            if workflow_context:
+                fast_sys_prompt = f"{fast_sys_prompt}{workflow_context}"
 
             # 1. Unified Knowledge & Memory Recall
             recalled_block = ""

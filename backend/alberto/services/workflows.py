@@ -51,6 +51,7 @@ class WorkflowService:
         await session.refresh(wf)
         if wf.executable:
             await WorkflowService._sync_triggers(session, wf)
+            await WorkflowService._sync_knowledge_graph(session, wf)
         return wf
 
     @staticmethod
@@ -72,6 +73,15 @@ class WorkflowService:
         await session.delete(wf)
         await session.commit()
 
+        # Clean up entity in LadybugDB Knowledge Graph (best-effort)
+        try:
+            from alberto.knowledge.graph import get_graph_adapter, make_entity_id
+            adapter = get_graph_adapter()
+            wf_entity_id = make_entity_id(wf.tenant_id, wf.project_id, "workflow", wf.name)
+            await adapter.delete_entity(wf.tenant_id, wf.project_id, wf_entity_id)
+        except Exception:
+            pass
+
     @staticmethod
     async def update(
         session: AsyncSession,
@@ -86,6 +96,7 @@ class WorkflowService:
             wf.description = description
         await session.commit()
         await session.refresh(wf)
+        await WorkflowService._sync_knowledge_graph(session, wf)
         return wf
 
     @staticmethod
@@ -103,6 +114,7 @@ class WorkflowService:
             await session.commit()
             await session.refresh(wf)
             await WorkflowService._sync_triggers(session, wf, owner=owner, scope=scope)
+            await WorkflowService._sync_knowledge_graph(session, wf)
         return result
 
     @staticmethod
@@ -118,9 +130,11 @@ class WorkflowService:
         result = validate_workflow(executable)
         wf.canvas = canvas
         wf.executable = executable
+        wf.active_version = (wf.active_version or 1) + 1
         await session.commit()
         await session.refresh(wf)
         await WorkflowService._sync_triggers(session, wf, owner=owner, scope=scope)
+        await WorkflowService._sync_knowledge_graph(session, wf)
         return result
 
     @staticmethod
@@ -138,4 +152,123 @@ class WorkflowService:
 
             await TriggerService.sync_from_workflow(session, wf, owner=owner, scope=scope)
         except Exception:  # noqa: BLE001 - trigger sync must not block saving a workflow
+            pass
+
+    @staticmethod
+    async def _sync_knowledge_graph(session: AsyncSession, wf: Workflow) -> None:
+        """Mirror workflow and its component associations into LadybugDB Knowledge Graph (best-effort)."""
+        try:
+            from alberto.knowledge.graph import (
+                GraphEntity,
+                GraphRelationship,
+                get_graph_adapter,
+                make_entity_id,
+                make_relationship_id,
+            )
+
+            adapter = get_graph_adapter()
+            exec_data = wf.executable or {}
+            nodes = exec_data.get("nodes", [])
+
+            trigger_types = [
+                n.get("type", "")
+                for n in nodes
+                if "trigger" in n.get("type", "").lower() or n.get("type") in ("webhook", "schedule")
+            ]
+            agent_names = [
+                (n.get("config") or {}).get("name") or n.get("id")
+                for n in nodes
+                if n.get("type") == "agent" and ((n.get("config") or {}).get("name") or n.get("id"))
+            ]
+            tool_names = [
+                (n.get("config") or {}).get("tool") or (n.get("config") or {}).get("name")
+                for n in nodes
+                if n.get("type") == "tool" and ((n.get("config") or {}).get("tool") or (n.get("config") or {}).get("name"))
+            ]
+
+            desc_parts = [
+                f"Workflow '{wf.name}' [Status: {wf.status}, Version: {wf.active_version or 1}].",
+                f"Triggers: {', '.join(trigger_types) or 'manual'}.",
+                f"Nodes ({len(nodes)}): {', '.join(str(n.get('type', '')) for n in nodes)}.",
+            ]
+            if wf.description:
+                desc_parts.append(wf.description)
+
+            wf_entity_id = make_entity_id(wf.tenant_id, wf.project_id, "workflow", wf.name)
+            wf_entity = GraphEntity(
+                id=wf_entity_id,
+                tenant_id=wf.tenant_id,
+                project_id=wf.project_id,
+                kind="workflow",
+                name=wf.name,
+                canonical_name=wf.name.lower(),
+                description=" ".join(desc_parts),
+                source="workflow_engine",
+                confidence=1.0,
+            )
+            await adapter.create_or_update_entity(wf_entity)
+
+            # Link agents
+            for a_name in set(agent_names):
+                if not a_name:
+                    continue
+                a_id = make_entity_id(wf.tenant_id, wf.project_id, "agent", a_name)
+                a_entity = GraphEntity(
+                    id=a_id,
+                    tenant_id=wf.tenant_id,
+                    project_id=wf.project_id,
+                    kind="agent",
+                    name=a_name,
+                    canonical_name=a_name.lower(),
+                    description=f"Specialist agent '{a_name}' orchestrated by workflow '{wf.name}'",
+                    source="workflow_engine",
+                    confidence=1.0,
+                )
+                await adapter.create_or_update_entity(a_entity)
+                rel_id = make_relationship_id(wf.tenant_id, wf.project_id, "USES", wf_entity_id, a_id)
+                await adapter.create_or_update_relationship(
+                    GraphRelationship(
+                        id=rel_id,
+                        source_id=wf_entity_id,
+                        target_id=a_id,
+                        kind="USES",
+                        tenant_id=wf.tenant_id,
+                        project_id=wf.project_id,
+                        source="workflow_engine",
+                        confidence=1.0,
+                    )
+                )
+
+            # Link tools
+            for t_name in set(tool_names):
+                if not t_name:
+                    continue
+                t_id = make_entity_id(wf.tenant_id, wf.project_id, "tool", str(t_name))
+                t_entity = GraphEntity(
+                    id=t_id,
+                    tenant_id=wf.tenant_id,
+                    project_id=wf.project_id,
+                    kind="tool",
+                    name=str(t_name),
+                    canonical_name=str(t_name).lower(),
+                    description=f"Tool '{t_name}' utilized by workflow '{wf.name}'",
+                    source="workflow_engine",
+                    confidence=1.0,
+                )
+                await adapter.create_or_update_entity(t_entity)
+                rel_id = make_relationship_id(wf.tenant_id, wf.project_id, "USES", wf_entity_id, t_id)
+                await adapter.create_or_update_relationship(
+                    GraphRelationship(
+                        id=rel_id,
+                        source_id=wf_entity_id,
+                        target_id=t_id,
+                        kind="USES",
+                        tenant_id=wf.tenant_id,
+                        project_id=wf.project_id,
+                        source="workflow_engine",
+                        confidence=1.0,
+                    )
+                )
+        except Exception:
+            # Graph sync is best-effort and must never block or break workflow operations
             pass

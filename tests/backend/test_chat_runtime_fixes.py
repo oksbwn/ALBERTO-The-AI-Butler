@@ -373,3 +373,58 @@ async def test_assistant_fast_stream_resilient_to_recall_exception_and_restores_
         user_texts = [m.content for m in captured_messages if getattr(m, "role", None) == "user" or m.__class__.__name__ == "HumanMessage"]
         assert "Previous user message" in user_texts
         assert "Hello after crash" in user_texts
+
+
+@pytest.mark.asyncio
+async def test_assistant_automation_manager_receives_live_workflow_context_and_tools(sample_project: Project):
+    """When chatting with persona='automation_manager', live project workflows and tools are bound."""
+    from alberto.db.base import SessionLocal
+    from alberto.models import Workflow
+
+    # Create a test workflow in the project
+    async with SessionLocal() as s:
+        wf = Workflow(
+            tenant_id=sample_project.tenant_id,
+            project_id=sample_project.id,
+            name="Daily Triage Pipeline",
+            status="active",
+            executable={"nodes": [{"id": "entry", "type": "start"}, {"id": "end", "type": "end"}], "edges": []},
+            canvas={"nodes": []},
+        )
+        s.add(wf)
+        await s.commit()
+
+    captured_messages = []
+    bound_tools = []
+
+    class DummyModel:
+        def bind_tools(self, tools):
+            bound_tools.extend(tools)
+            return self
+
+        async def astream(self, messages, config=None):
+            captured_messages.extend(messages)
+            from langchain_core.messages import AIMessageChunk
+            yield AIMessageChunk(content="You have 1 active workflow: Daily Triage Pipeline.")
+
+    with patch("alberto.services.assistant.resolve_model", return_value=DummyModel()):
+        chunks = []
+        async for chunk in AssistantService._fast_stream(
+            tenant_id=sample_project.tenant_id,
+            project_id=sample_project.id,
+            messages=[{"role": "user", "content": "How many workflows we have as of now ?"}],
+            persona="automation_manager",
+        ):
+            chunks.append(chunk)
+
+        # Tools bound must include list_resources and describe_workflow
+        bound_tool_names = [t.name for t in bound_tools]
+        assert "list_resources" in bound_tool_names
+        assert "describe_workflow" in bound_tool_names
+
+        # System prompt must contain live workflow registry
+        sys_msg = captured_messages[0].content
+        assert "[PROJECT WORKFLOW REGISTRY]" in sys_msg
+        assert "Total Workflows in this Project: 1" in sys_msg
+        assert "Daily Triage Pipeline" in sys_msg
+
