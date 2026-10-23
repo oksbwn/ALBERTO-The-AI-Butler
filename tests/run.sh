@@ -60,6 +60,19 @@ echo "--> [2/2] Running Frontend Tests (Vitest)..."
 }
 echo "    ✓ Frontend tests passed!"
 
+if [[ "${1:-}" == "--e2e" || "${1:-}" == "--all" ]]; then
+  echo ""
+  echo "--> [3/3] Running Playwright E2E Tests..."
+  (
+    cd "$ROOT_DIR/frontend"
+    npx playwright test --config="../tests/e2e/playwright.config.ts" --project=e2e
+  ) || {
+    echo "Error: Playwright E2E tests failed!" >&2
+    exit 1
+  }
+  echo "    ✓ Playwright E2E tests passed!"
+fi
+
 echo "=========================================="
 echo " ✓ ALL TEST SUITES PASSED"
 echo "=========================================="

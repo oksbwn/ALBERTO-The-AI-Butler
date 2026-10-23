@@ -1,0 +1,259 @@
+import { APIRequestContext, request } from "@playwright/test";
+
+export interface TestProject {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+export interface TestWorkflow {
+  id: string;
+  project_id: string;
+  name: string;
+  status: string;
+  executable: any;
+  canvas: any;
+}
+
+export class DataFixture {
+  private apiContext!: APIRequestContext;
+  private baseURL: string;
+  private createdWorkflowIds: { projectId: string; id: string }[] = [];
+  private createdProjectIds: string[] = [];
+
+  constructor(baseURL: string = "http://127.0.0.1:8000") {
+    this.baseURL = baseURL;
+  }
+
+  async init() {
+    this.apiContext = await request.newContext({
+      baseURL: this.baseURL,
+      extraHTTPHeaders: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    try {
+      const loginRes = await this.apiContext.post("/v1/auth/login", {
+        data: {
+          email: "admin",
+          password: "password",
+        },
+      });
+      if (loginRes.ok()) {
+        const authData = await loginRes.json();
+        if (authData.access_token) {
+          await this.apiContext.dispose();
+          this.apiContext = await request.newContext({
+            baseURL: this.baseURL,
+            extraHTTPHeaders: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${authData.access_token}`,
+            },
+          });
+        }
+      }
+    } catch {
+      // In dev mode with anonymous owner, fall through
+    }
+  }
+
+  async getOrCreateDefaultProject(): Promise<TestProject> {
+    const res = await this.apiContext.get("/v1/projects");
+    if (res.ok()) {
+      const list = await res.json();
+      if (list && list.length > 0) {
+        return list[0];
+      }
+    }
+    const createRes = await this.apiContext.post("/v1/projects", {
+      data: { name: `Test Project ${Date.now()}` },
+    });
+    const proj = await createRes.json();
+    this.createdProjectIds.push(proj.id);
+    return proj;
+  }
+
+  async createDeterministicWorkflow(projectId: string, name: string): Promise<TestWorkflow> {
+    const payload = {
+      name,
+      description: "Automated Playwright E2E Deterministic Workflow",
+      executable: {
+        id: `e2e_${Date.now()}`,
+        version: 1,
+        entry_node: "start_node",
+        state: {
+          messages: { type: "list[message]", reducer: "add_messages" },
+          output: { type: "str", reducer: "last" },
+        },
+        nodes: [
+          {
+            id: "start_node",
+            type: "start",
+            config: { name: "Start" },
+            position: { x: 50, y: 150 },
+          },
+          {
+            id: "echo_agent",
+            type: "agent",
+            config: {
+              name: "Echo Agent",
+              model: "fake:E2E execution confirmed successfully.",
+              system_prompt: "You are an E2E testing agent.",
+            },
+            position: { x: 300, y: 150 },
+          },
+          {
+            id: "end_node",
+            type: "end",
+            config: { name: "End" },
+            position: { x: 550, y: 150 },
+          },
+        ],
+      },
+      canvas: {
+        nodes: [
+          {
+            id: "start_node",
+            type: "forgeNode",
+            position: { x: 50, y: 150 },
+            data: { nodeType: "start", config: { name: "Start" } },
+          },
+          {
+            id: "echo_agent",
+            type: "forgeNode",
+            position: { x: 300, y: 150 },
+            data: {
+              nodeType: "agent",
+              config: {
+                name: "Echo Agent",
+                model: "fake:E2E execution confirmed successfully.",
+              },
+            },
+          },
+          {
+            id: "end_node",
+            type: "forgeNode",
+            position: { x: 550, y: 150 },
+            data: { nodeType: "end", config: { name: "End" } },
+          },
+        ],
+        edges: [
+          { id: "e1", source: "start_node", target: "echo_agent" },
+          { id: "e2", source: "echo_agent", target: "end_node" },
+        ],
+      },
+    };
+
+    const res = await this.apiContext.post(`/v1/projects/${projectId}/workflows`, {
+      data: payload,
+    });
+    if (!res.ok()) {
+      throw new Error(`Failed to create test workflow: ${await res.text()}`);
+    }
+    const wf = await res.json();
+    this.createdWorkflowIds.push({ projectId, id: wf.id });
+    return wf;
+  }
+
+  async createHitlWorkflow(projectId: string, name: string): Promise<TestWorkflow> {
+    const payload = {
+      name,
+      description: "Automated Playwright E2E HITL Approval Workflow",
+      executable: {
+        id: `hitl_${Date.now()}`,
+        version: 1,
+        entry_node: "start_node",
+        state: {
+          messages: { type: "list[message]", reducer: "add_messages" },
+          approved: { type: "bool", reducer: "last" },
+        },
+        nodes: [
+          {
+            id: "start_node",
+            type: "start",
+            config: { name: "Start" },
+            position: { x: 50, y: 150 },
+          },
+          {
+            id: "pause_approval",
+            type: "human_input",
+            config: {
+              name: "Review Approval",
+              prompt: "Please approve or reject this automated transaction.",
+            },
+            position: { x: 300, y: 150 },
+          },
+          {
+            id: "end_node",
+            type: "end",
+            config: { name: "End" },
+            position: { x: 550, y: 150 },
+          },
+        ],
+      },
+      canvas: {
+        nodes: [
+          {
+            id: "start_node",
+            type: "forgeNode",
+            position: { x: 50, y: 150 },
+            data: { nodeType: "start", config: { name: "Start" } },
+          },
+          {
+            id: "pause_approval",
+            type: "forgeNode",
+            position: { x: 300, y: 150 },
+            data: {
+              nodeType: "human_input",
+              config: {
+                name: "Review Approval",
+                prompt: "Please approve or reject this automated transaction.",
+              },
+            },
+          },
+          {
+            id: "end_node",
+            type: "forgeNode",
+            position: { x: 550, y: 150 },
+            data: { nodeType: "end", config: { name: "End" } },
+          },
+        ],
+        edges: [
+          { id: "e1", source: "start_node", target: "pause_approval" },
+          { id: "e2", source: "pause_approval", target: "end_node" },
+        ],
+      },
+    };
+
+    const res = await this.apiContext.post(`/v1/projects/${projectId}/workflows`, {
+      data: payload,
+    });
+    if (!res.ok()) {
+      throw new Error(`Failed to create HITL workflow: ${await res.text()}`);
+    }
+    const wf = await res.json();
+    this.createdWorkflowIds.push({ projectId, id: wf.id });
+    return wf;
+  }
+
+  async cleanup() {
+    for (const item of this.createdWorkflowIds) {
+      try {
+        await this.apiContext.delete(`/v1/projects/${item.projectId}/workflows/${item.id}`);
+      } catch {
+        // Ignore deletion cleanup error
+      }
+    }
+    for (const pid of this.createdProjectIds) {
+      try {
+        await this.apiContext.delete(`/v1/projects/${pid}`);
+      } catch {
+        // Ignore deletion cleanup error
+      }
+    }
+    if (this.apiContext) {
+      await this.apiContext.dispose();
+    }
+  }
+}

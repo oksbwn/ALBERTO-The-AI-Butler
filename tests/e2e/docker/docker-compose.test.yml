@@ -1,0 +1,27 @@
+services:
+  alberto-test:
+    build:
+      context: ../../../
+      dockerfile: docker/Dockerfile
+    image: alberto-test:acceptance
+    environment:
+      ALBERTO_ENVIRONMENT: test
+      ALBERTO_DATA_DIR: /data
+      ALBERTO_DATABASE_URL: sqlite+aiosqlite:///data/db/alberto.db
+      ALBERTO_CHECKPOINT_BACKEND: sqlite
+      ALBERTO_ENABLE_SCHEDULER: "false"
+      ALBERTO_JWT_SECRET: alberto-test-secret-key-32chars-min!
+      ALBERTO_BOOTSTRAP_ADMIN_EMAIL: testadmin@alberto.local
+      ALBERTO_BOOTSTRAP_ADMIN_PASSWORD: alberto-admin
+      ALBERTO_PUBLIC_BASE_URL: http://localhost:8001
+      ALBERTO_PUBLIC_CONSOLE_URL: http://localhost:8001
+      ALBERTO_CORS_ORIGINS: '["http://localhost:8001"]'
+      FORGE_AUTH_REQUIRED: "false"
+    volumes:
+      # Isolated test volume - completely separate from production 'alberto-data'
+      - alberto-test-acceptance-data:/data
+    ports:
+      - "8001:8000"
+
+volumes:
+  alberto-test-acceptance-data:

@@ -8,6 +8,8 @@ cd "$ROOT_DIR"
 RUN_LINT=true
 RUN_BACKEND=true
 RUN_FRONTEND=true
+RUN_E2E=false
+E2E_FLAGS=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -15,16 +17,63 @@ while [[ $# -gt 0 ]]; do
     --lint|--lint-only)
       RUN_BACKEND=false
       RUN_FRONTEND=false
+      RUN_E2E=false
       shift
       ;;
     --backend|--backend-only)
       RUN_LINT=false
       RUN_FRONTEND=false
+      RUN_E2E=false
       shift
       ;;
     --frontend|--frontend-only)
       RUN_LINT=false
       RUN_BACKEND=false
+      RUN_E2E=false
+      shift
+      ;;
+    --e2e|--e2e-only)
+      RUN_LINT=false
+      RUN_BACKEND=false
+      RUN_FRONTEND=false
+      RUN_E2E=true
+      E2E_FLAGS="--project=e2e"
+      shift
+      ;;
+    --e2e-headed)
+      RUN_LINT=false
+      RUN_BACKEND=false
+      RUN_FRONTEND=false
+      RUN_E2E=true
+      E2E_FLAGS="--project=e2e --headed"
+      shift
+      ;;
+    --e2e-live)
+      RUN_LINT=false
+      RUN_BACKEND=false
+      RUN_FRONTEND=false
+      RUN_E2E=true
+      E2E_FLAGS="--project=live"
+      shift
+      ;;
+    --e2e-docker)
+      RUN_LINT=false
+      RUN_BACKEND=false
+      RUN_FRONTEND=false
+      RUN_E2E=true
+      E2E_FLAGS="--project=docker"
+      shift
+      ;;
+    --e2e-report)
+      (cd "$ROOT_DIR/frontend" && npx playwright show-report ../playwright-report)
+      exit 0
+      ;;
+    --all)
+      RUN_LINT=true
+      RUN_BACKEND=true
+      RUN_FRONTEND=true
+      RUN_E2E=true
+      E2E_FLAGS="--project=e2e"
       shift
       ;;
     --no-lint)
@@ -39,6 +88,12 @@ while [[ $# -gt 0 ]]; do
       echo "  --lint, --lint-only        Run only linters (Ruff + TypeScript)"
       echo "  --backend, --backend-only  Run only backend tests (Pytest)"
       echo "  --frontend, --frontend-only Run only frontend tests (Vitest)"
+      echo "  --e2e, --e2e-only          Run Playwright E2E suite"
+      echo "  --e2e-headed               Run Playwright E2E suite with visible browser"
+      echo "  --e2e-live                 Run live LLM integration tests"
+      echo "  --e2e-docker               Run Docker acceptance tests"
+      echo "  --e2e-report               Open HTML test report"
+      echo "  --all                      Run all linters, backend, frontend, and E2E tests"
       echo "  --no-lint                  Skip linting and run only tests"
       echo "  --help, -h                 Show this help message"
       exit 0
@@ -93,9 +148,17 @@ fi
 # 3. Frontend Tests
 if [[ "$RUN_FRONTEND" == true ]]; then
   echo ""
-  echo "--> [3/3] Running Frontend Tests (Vitest)..."
+  echo "--> [3/4] Running Frontend Tests (Vitest)..."
   (cd "$ROOT_DIR/frontend" && npm test)
   echo "    ✓ Frontend tests passed!"
+fi
+
+# 4. Playwright E2E Tests
+if [[ "$RUN_E2E" == true ]]; then
+  echo ""
+  echo "--> [4/4] Running Playwright E2E Tests..."
+  (cd "$ROOT_DIR/frontend" && npx playwright test --config="../tests/e2e/playwright.config.ts" $E2E_FLAGS)
+  echo "    ✓ Playwright E2E tests passed!"
 fi
 
 echo ""
