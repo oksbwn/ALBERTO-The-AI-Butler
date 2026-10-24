@@ -75,6 +75,7 @@ export default defineConfig({
         /security\/.*\.spec\.ts/,
         /automation\/.*\.spec\.ts/,
         /lifecycle\/.*\.spec\.ts/,
+        /butler\/.*\.spec\.ts/,
       ],
       use: {
         ...devices["Desktop Chrome"],
@@ -116,6 +117,8 @@ export default defineConfig({
             ALBERTO_CHECKPOINT_DB: path.join(testDataDir, "db/checkpoints.sqlite").replace(/\\/g, "/"),
             ALBERTO_CHECKPOINT_BACKEND: "sqlite",
             ALBERTO_ENABLE_SCHEDULER: "false",
+            ALBERTO_AUTH_RATE_LIMIT_PER_MINUTE: "0",
+            FORGE_AUTH_RATE_LIMIT_PER_MINUTE: "0",
             FORGE_AUTH_REQUIRED: "false",
             ALBERTO_DEV_ALLOW_ANONYMOUS_OWNER: "true",
             FORGE_DEV_ALLOW_ANONYMOUS_OWNER: "true",

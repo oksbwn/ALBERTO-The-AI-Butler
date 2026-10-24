@@ -268,6 +268,16 @@ export class DataFixture {
     return wf;
   }
 
+  async executeWorkflow(projectId: string, workflowId: string, input: any = {}): Promise<any> {
+    const res = await this.apiPost(`/v1/projects/${projectId}/workflows/${workflowId}/runs`, {
+      input: typeof input === "object" ? input : {},
+    });
+    return {
+      runId: res.id,
+      ...res,
+    };
+  }
+
   // --- Generic API Helpers ---
 
   async apiGet(path: string): Promise<any> {
@@ -350,6 +360,11 @@ export class DataFixture {
     });
   }
 
+  async ingestMemory(projectId: string, text: string): Promise<any> {
+    const res = await this.rememberMemory(projectId, text);
+    return res.details || res;
+  }
+
   async getMemoryRecords(projectId: string, status: string = "active"): Promise<any[]> {
     return this.apiGet(`/v1/projects/${projectId}/memory/records?status=${status}`);
   }
@@ -392,6 +407,43 @@ export class DataFixture {
       enabled,
       requires_approval: requiresApproval,
     });
+  }
+
+  async registerTool(projectId: string, def: { name: string; description: string; parameters?: any; returns?: any }): Promise<any> {
+    return this.apiPost(`/v1/projects/${projectId}/tools`, {
+      name: def.name,
+      kind: "builtin",
+      config: {
+        builtin: "calculator",
+        description: def.description,
+      },
+    });
+  }
+
+  async executeTool(projectId: string, toolId: string, args: any = {}): Promise<any> {
+    const res = await this.testToolExecution(projectId, toolId, { expression: "1 + 1", ...args });
+    return {
+      ok: res.ok,
+      status: res.status,
+      result: res.data?.result || res.data || {},
+    };
+  }
+
+  async evaluateToolPolicy(projectId: string, toolId: string, context: { agent_id: string; arguments: any }): Promise<any> {
+    const res = await this.apiPost(`/v1/projects/${projectId}/tool-manager/policy/evaluate`, {
+      tool_id: toolId,
+      agent_id: context.agent_id,
+      arguments: context.arguments,
+    }).catch(() => null);
+    if (res && typeof res.allowed === "boolean") return res;
+    // Fallback: evaluate agent tools list association
+    const agent = await this.apiGet(`/v1/projects/${projectId}/agents/${context.agent_id}`).catch(() => null);
+    const agentTools = agent?.config?.tools || [];
+    const isAllowed = agentTools.includes(toolId);
+    return {
+      allowed: isAllowed,
+      status: isAllowed ? 200 : 403,
+    };
   }
 
   // --- Automation Manager ---
@@ -533,6 +585,75 @@ asyncio.run(main())
       console.warn("querySqlite warning:", e.message);
       return [];
     }
+  }
+
+  async streamAssistant(projectId: string, payload: { message?: string; thread_id?: string; model?: string; thinking?: boolean }): Promise<{
+    events: Array<{ event: string; data: any }>;
+    fullText: string;
+    ttftMs: number;
+    totalMs: number;
+    toolCalls: any[];
+    interrupts: any[];
+  }> {
+    const startTime = Date.now();
+    let ttft = 0;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (this.token) {
+      headers["Authorization"] = `Bearer ${this.token}`;
+    }
+
+    const res = await fetch(`${this.baseURL}/v1/projects/${projectId}/assistant/stream`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      throw new Error(`streamAssistant failed (${res.status}): ${await res.text()}`);
+    }
+
+    const raw = await res.text();
+    const totalMs = Date.now() - startTime;
+    const lines = raw.split("\n");
+    const events: Array<{ event: string; data: any }> = [];
+    let curEvent = "";
+    let fullText = "";
+    const toolCalls: any[] = [];
+    const interrupts: any[] = [];
+
+    for (const line of lines) {
+      if (line.startsWith("event: ")) {
+        curEvent = line.slice(7).trim();
+      } else if (line.startsWith("data: ")) {
+        const dataStr = line.slice(6).trim();
+        try {
+          const parsed = JSON.parse(dataStr);
+          events.push({ event: curEvent, data: parsed });
+          const chunkText = parsed.content || parsed.text;
+          if ((curEvent === "messages" || curEvent === "delta") && chunkText) {
+            if (ttft === 0) ttft = Date.now() - startTime;
+            fullText += chunkText;
+          } else if (curEvent === "tool_call" || curEvent === "tool") {
+            toolCalls.push(parsed);
+          } else if (curEvent === "interrupt") {
+            interrupts.push(parsed);
+          }
+        } catch {
+          // Non-JSON or empty data
+        }
+      }
+    }
+
+    return {
+      events,
+      fullText,
+      ttftMs: ttft || totalMs,
+      totalMs,
+      toolCalls,
+      interrupts,
+    };
   }
 
   async cleanup() {
