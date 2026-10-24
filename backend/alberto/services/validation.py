@@ -45,9 +45,15 @@ def _adjacency(definition: dict) -> dict[str, set[str]]:
     routed: set[str] = set()
 
     for n in definition["nodes"]:
-        if n["type"] == "router":
+        if n["type"] in ("router", "switch"):
             cfg = n.get("config", {}) or {}
-            for tgt in list((cfg.get("cases") or {}).values()) + ([cfg.get("default")] if cfg.get("default") else []):
+            targets = list((cfg.get("cases") or {}).values())
+            for r in (cfg.get("rules") or []):
+                if r.get("target"):
+                    targets.append(r["target"])
+            if cfg.get("default"):
+                targets.append(cfg["default"])
+            for tgt in targets:
                 if tgt in nodes:
                     adj[n["id"]].add(tgt)
             routed.add(n["id"])
@@ -60,7 +66,7 @@ def _adjacency(definition: dict) -> dict[str, set[str]]:
             if child in nodes:
                 adj[n["id"]].add(child)
             routed.add(n["id"])
-        if n["type"] == "end":
+        if n["type"] in ("end", "debug"):
             adj[n["id"]].add("__END__")
 
     for e in definition.get("edges", []):
@@ -229,7 +235,7 @@ def validate_workflow(definition: dict) -> ValidationResult:
         for node_id in sorted(n for n in reachable if n):
             if node_id in subagent_children:
                 continue
-            if node_types.get(node_id) != "end" and not adj.get(node_id):
+            if node_types.get(node_id) not in ("end", "debug") and not adj.get(node_id):
                 res.warn(
                     "/nodes",
                     f"Node {node_id!r} is reachable but has no outgoing edge, so the run stops "
@@ -323,7 +329,7 @@ def _warn_webhook_signing(res: ValidationResult, nodes: list) -> None:
 # state.py always provides `messages`; `structured_response` is the conventional channel for
 # structured llm/agent output; loop nodes manage their own private `_loop`/`_loop_count`. All
 # are treated as implicitly declared so the declared-state check doesn't false-flag them.
-_IMPLICIT_STATE_KEYS = frozenset({"messages", "structured_response", "_loop", "_loop_count"})
+_IMPLICIT_STATE_KEYS = frozenset({"messages", "structured_response", "_loop", "_loop_count", "msg", "payload", "topic", "metadata"})
 
 
 def _node_output_keys(node: dict) -> list[tuple[str, str]]:
@@ -332,6 +338,8 @@ def _node_output_keys(node: dict) -> list[tuple[str, str]]:
     always present); the loop node's private keys are implicit too."""
     cfg = node.get("config", {}) or {}
     t = node.get("type")
+    if t == "inject":
+        return [("output_key", cfg.get("output_key", "payload"))]
     if t == "classifier":
         return [("output_key", cfg.get("output_key", "intent"))]
     if t == "transform":

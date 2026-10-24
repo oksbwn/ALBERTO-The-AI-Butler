@@ -124,6 +124,7 @@ async def _scheduler_loop(app: FastAPI) -> None:
     """Fire due `schedule` triggers once a minute. Single-worker in-process scheduler."""
     from alberto.services.dispatch import (
         run_due_app_events,
+        run_due_delays,
         run_due_schedules,
         run_due_source_syncs,
     )
@@ -140,6 +141,7 @@ async def _scheduler_loop(app: FastAPI) -> None:
             await run_due_schedules(run_service)
             await run_due_app_events(run_service)
             await run_due_source_syncs()
+            await run_due_delays(run_service)
         except asyncio.CancelledError:
             break
         except Exception:  # noqa: BLE001 - keep the scheduler alive across failures

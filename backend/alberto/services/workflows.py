@@ -181,9 +181,16 @@ class WorkflowService:
                 if n.get("type") == "agent" and ((n.get("config") or {}).get("name") or n.get("id"))
             ]
             tool_names = [
-                (n.get("config") or {}).get("tool") or (n.get("config") or {}).get("name")
+                (n.get("config") or {}).get("tool_id")
+                or (n.get("config") or {}).get("tool")
+                or (n.get("config") or {}).get("name")
                 for n in nodes
-                if n.get("type") == "tool" and ((n.get("config") or {}).get("tool") or (n.get("config") or {}).get("name"))
+                if n.get("type") in ("tool", "tool_call")
+                and (
+                    (n.get("config") or {}).get("tool_id")
+                    or (n.get("config") or {}).get("tool")
+                    or (n.get("config") or {}).get("name")
+                )
             ]
 
             desc_parts = [

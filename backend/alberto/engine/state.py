@@ -28,11 +28,50 @@ def _merge(a: dict | None, b: dict | None) -> dict:
     return {**(a or {}), **(b or {})}
 
 
+def _merge_payload(a: Any, b: Any) -> Any:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if isinstance(a, dict) and isinstance(b, dict):
+        base = dict(a)
+        for k, v in b.items():
+            if isinstance(base.get(k), dict) and isinstance(v, dict):
+                base[k] = _merge_payload(base[k], v)
+            else:
+                base[k] = v
+        return base
+    return b
+
+
+def _last_value(a: Any, b: Any) -> Any:
+    return b if b is not None else a
+
+
+def _merge_msg(a: dict | None, b: dict | None) -> dict:
+    if not a:
+        return dict(b or {})
+    if not b:
+        return dict(a or {})
+    res = {**a, **b}
+    res["payload"] = _merge_payload(a.get("payload"), b.get("payload"))
+    if isinstance(a.get("metadata"), dict) and isinstance(b.get("metadata"), dict):
+        res["metadata"] = {**a["metadata"], **b["metadata"]}
+    if "_branches" in a or "_branches" in b:
+        res["_branches"] = {**(a.get("_branches") or {}), **(b.get("_branches") or {})}
+    if a.get("topic") and b.get("topic") and a["topic"] != b["topic"]:
+        res["topic"] = ",".join(sorted({a["topic"], b["topic"]}))
+    return res
+
+
 # Doc 4 StateFieldSpec.reducer -> binary reducer. "last" => no reducer (LastValue/overwrite).
 REDUCERS: dict[str, Any] = {
     "add_messages": add_messages,
     "add": operator.add,
     "merge": _merge,
+    "merge_msg": _merge_msg,
+    "merge_payload": _merge_payload,
+    "last_value": _last_value,
     # "last" intentionally absent: a plain annotation => overwrite semantics.
 }
 
@@ -50,6 +89,10 @@ def build_state_typeddict(state_cfg: dict[str, dict], name: str = "WorkflowState
     """
     cfg = dict(state_cfg or {})
     cfg.setdefault("messages", _DEFAULT_MESSAGES)
+    cfg.setdefault("msg", {"type": "json", "reducer": "merge_msg"})
+    cfg.setdefault("payload", {"type": "json", "reducer": "merge_payload"})
+    cfg.setdefault("topic", {"type": "str", "reducer": "last_value"})
+    cfg.setdefault("_branches", {"type": "json", "reducer": "merge"})
 
     annotations: dict[str, Any] = {}
     for field, spec in cfg.items():

@@ -399,16 +399,16 @@ class AutomationManagerService:
             pos = n.get("position")
             if not pos or not isinstance(pos, dict):
                 # Auto-layout in a clean multi-column canvas
-                if ntype in ("start", "schedule", "webhook_in", "email_in", "app_event"):
+                if ntype in ("start", "schedule", "webhook_in", "email_in", "app_event", "inject"):
                     pos = {"x": 60, "y": 200 + i * 80}
                 elif ntype in ("classifier", "router"):
                     pos = {"x": 360, "y": 200 + i * 80}
                 elif ntype in ("agent", "deep_agent", "llm"):
                     pos = {"x": 680, "y": 120 + i * 140}
-                elif ntype in ("tool_call", "transform", "human_input"):
+                elif ntype in ("tool_call", "transform", "human_input", "delay"):
                     pos = {"x": 980, "y": 180 + i * 100}
-                elif ntype == "end":
-                    pos = {"x": 1280, "y": 220}
+                elif ntype in ("end", "debug"):
+                    pos = {"x": 1280, "y": 220 + i * 80}
                 else:
                     pos = {"x": 200 + (i * 240), "y": 220}
             positioned_nodes.append(

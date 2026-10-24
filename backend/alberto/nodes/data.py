@@ -54,17 +54,92 @@ def _jq_transform(expr: str, input_key: str | None, output_key: str):
     return _node
 
 
+def _get_nested(data: Any, path: str) -> Any:
+    if not path or not isinstance(data, dict):
+        return data
+    parts = path.split(".")
+    curr = data
+    for p in parts:
+        if isinstance(curr, dict) and p in curr:
+            curr = curr[p]
+        else:
+            return None
+    return curr
+
+
+def _set_nested(data: dict, path: str, val: Any) -> None:
+    if not path:
+        return
+    parts = path.split(".")
+    curr = data
+    for p in parts[:-1]:
+        if p not in curr or not isinstance(curr[p], dict):
+            curr[p] = {}
+        curr = curr[p]
+    curr[parts[-1]] = val
+
+
+def _delete_nested(data: dict, path: str) -> None:
+    if not path or not isinstance(data, dict):
+        return
+    parts = path.split(".")
+    curr = data
+    for p in parts[:-1]:
+        if isinstance(curr, dict) and p in curr:
+            curr = curr[p]
+        else:
+            return
+    if isinstance(curr, dict) and parts[-1] in curr:
+        del curr[parts[-1]]
+
+
 def transform_factory(cfg: dict, ctx: CompileContext):
-    expr = cfg["expression"]
-    engine = cfg.get("engine", "jmespath")
-    input_key = cfg.get("input_key")
+    operations = cfg.get("operations")
     output_key = cfg.get("output_key", "data")
+    input_key = cfg.get("input_key")
+
+    if operations:
+        def _ops_node(state: dict) -> dict:
+            import copy
+            state_dict = dict(state or {})
+            src = state_dict.get(input_key) if input_key else state_dict
+            target = copy.deepcopy(src) if isinstance(src, dict) else ({"payload": src} if src is not None else {})
+            for op in operations:
+                act = op.get("type") or op.get("action", "set")
+                prop = (op.get("target") or op.get("property") or op.get("to") or "").replace("msg.", "")
+                if act == "set":
+                    val = op.get("value")
+                    if isinstance(val, str) and val.startswith("{{") and val.endswith("}}"):
+                        vkey = val[2:-2].strip().replace("state.", "").replace("msg.", "")
+                        val = _get_nested(state_dict, vkey)
+                    _set_nested(target, prop, val)
+                elif act in ("change", "move", "rename"):
+                    from_p = (op.get("from") or op.get("source") or op.get("target") or "").replace("msg.", "")
+                    to_p = (op.get("to") or op.get("property") or "").replace("msg.", "")
+                    val = _get_nested(target, from_p)
+                    _delete_nested(target, from_p)
+                    _set_nested(target, to_p, val)
+                elif act == "delete":
+                    _delete_nested(target, prop)
+
+            res = {output_key: target}
+            for k, v in target.items():
+                res[k] = v
+            if "payload" in target:
+                res["payload"] = target["payload"]
+                res["msg"] = {"payload": res["payload"], "topic": state_dict.get("topic", "")}
+            return res
+        return _ops_node
+
+    expr = cfg.get("expression") or "payload"
+    engine = cfg.get("engine", "jmespath")
 
     if engine == "jq":
         return _jq_transform(expr, input_key, output_key)
 
     def _node(state: dict) -> dict:
-        src = state.get(input_key) if input_key else dict(state)
+        state_dict = dict(state or {})
+        src = state_dict.get(input_key) if input_key else state_dict
         try:
             result: Any = jmespath.search(expr, src)
         except jmespath.exceptions.JMESPathError as e:
@@ -72,7 +147,11 @@ def transform_factory(cfg: dict, ctx: CompileContext):
             # broken transform is traceable in the run log (audit F7).
             log.warning("transform jmespath %r failed: %s: %s", expr, type(e).__name__, e)
             result = None
-        return {output_key: result}
+        res = {output_key: result}
+        if output_key == "payload":
+            res["payload"] = result
+            res["msg"] = {"payload": result, "topic": state_dict.get("topic", "")}
+        return res
 
     return _node
 
@@ -146,6 +225,7 @@ def webhook_out_factory(cfg: dict, ctx: CompileContext):
     headers_t = cfg.get("headers", {})
 
     async def _node(state: dict) -> dict:
+        from alberto.services.audit import AuditService
         from alberto.util.http import shared_async_client
         from alberto.util.ssrf import validate_url
 
@@ -155,6 +235,16 @@ def webhook_out_factory(cfg: dict, ctx: CompileContext):
         headers = render_value(dict(headers_t), vars)
         params: dict[str, str] = {}
         cookies: dict[str, str] = {}
+
+        if cfg.get("requires_approval") and not (state.get("approved") or state.get("human_approved")):
+            return {
+                output_key: {
+                    "error": "Execution policy violation: Outbound request requires human approval",
+                    "requires_approval": True,
+                    "url": url,
+                }
+            }
+
         if provider_id and ctx.auth_resolver:
             auth = await ctx.auth_resolver.resolve(
                 tenant_id=ctx.tenant_id, project_id=ctx.project_id, provider_id=provider_id, context={}
@@ -164,12 +254,38 @@ def webhook_out_factory(cfg: dict, ctx: CompileContext):
             cookies.update(auth.cookies)
         await validate_url(url, getattr(ctx, "egress_policy", None))
         c = shared_async_client()
-        r = await c.request(method, url, headers=headers, params=params or None, json=body, cookies=cookies or None, timeout=30)
         try:
-            out: Any = r.json()
-        except Exception:  # noqa: BLE001
-            out = r.text
-        return {output_key: out}
+            r = await c.request(method, url, headers=headers, params=params or None, json=body, cookies=cookies or None, timeout=30)
+            try:
+                out: Any = r.json()
+            except Exception:  # noqa: BLE001
+                out = r.text
+            status_code = getattr(r, "status_code", 200)
+            await AuditService.log(
+                tenant_id=ctx.tenant_id,
+                project_id=ctx.project_id,
+                action="workflow.webhook_out",
+                actor_id=(ctx.end_user or {}).get("id") or (ctx.end_user or {}).get("user_id"),
+                actor_email=(ctx.end_user or {}).get("email"),
+                resource_type="webhook",
+                resource_id=url,
+                status="ok" if status_code < 400 else "error",
+                meta={"method": method, "url": url, "status_code": status_code, "auth_provider_id": provider_id},
+            )
+            return {output_key: out}
+        except Exception as e:
+            await AuditService.log(
+                tenant_id=ctx.tenant_id,
+                project_id=ctx.project_id,
+                action="workflow.webhook_out",
+                actor_id=(ctx.end_user or {}).get("id") or (ctx.end_user or {}).get("user_id"),
+                actor_email=(ctx.end_user or {}).get("email"),
+                resource_type="webhook",
+                resource_id=url,
+                status="error",
+                meta={"method": method, "url": url, "error": str(e), "auth_provider_id": provider_id},
+            )
+            raise
 
     return _node
 
@@ -252,6 +368,13 @@ register(NodeSpec(
     output_ports=[Port(id="out", io_type="json", direction="out")],
     factory=transform_factory, category="model_tools", label="Transform", description="JMESPath data map",
     summarize=lambda c: [f"{c.get('engine', 'jmespath')} · → {c.get('output_key', 'data')}"],
+))
+register(NodeSpec(
+    type="change", schema_id="forge/nodes/transform",
+    input_ports=[Port(id="in", io_type="json", direction="in")],
+    output_ports=[Port(id="out", io_type="json", direction="out")],
+    factory=transform_factory, category="model_tools", label="Change", description="Visual and expression data change operations",
+    summarize=lambda c: [f"{len(c.get('operations', []))} ops"],
 ))
 register(NodeSpec(
     type="human_input", schema_id="forge/nodes/human_input",
