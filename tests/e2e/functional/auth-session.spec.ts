@@ -53,10 +53,10 @@ test.describe("Alberto Authentication & Session Management E2E", () => {
     const { access_token } = await loginRes.json();
 
     await page.goto("/");
-    await page.waitForSelector(".topbar", { timeout: 20000 });
-
-    // Set token dynamically in the active session
+    // Set token dynamically in the active session and reload into authenticated state
     await auth.setSession(access_token);
+    await page.reload();
+    await page.waitForSelector(".topbar", { timeout: 20000 });
 
     // Open account menu and click sign out
     const accountBtn = page.locator('button[aria-label="Account"], button[title="Account"]').first();

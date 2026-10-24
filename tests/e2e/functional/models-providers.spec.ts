@@ -9,7 +9,7 @@ test.describe("Alberto Models & Providers Configuration E2E", () => {
 
     // Navigate to Settings
     await navigateTo(page, "Settings");
-    await page.waitForSelector(".topbar:has-text('Settings')", { timeout: 15000 });
+    await expect(page.locator('button:has-text("Models & Providers")').first()).toBeVisible({ timeout: 15000 });
   });
 
   test("renders Models & Providers configuration tab by default", async ({ page }) => {

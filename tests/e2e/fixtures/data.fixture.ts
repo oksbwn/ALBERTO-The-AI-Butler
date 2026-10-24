@@ -20,6 +20,7 @@ export class DataFixture {
   private baseURL: string;
   private createdWorkflowIds: { projectId: string; id: string }[] = [];
   private createdProjectIds: string[] = [];
+  public token: string | null = null;
 
   constructor(baseURL: string = "http://127.0.0.1:8000") {
     this.baseURL = baseURL;
@@ -43,6 +44,7 @@ export class DataFixture {
       if (loginRes.ok()) {
         const authData = await loginRes.json();
         if (authData.access_token) {
+          this.token = authData.access_token;
           await this.apiContext.dispose();
           this.apiContext = await request.newContext({
             baseURL: this.baseURL,
@@ -235,6 +237,181 @@ export class DataFixture {
     const wf = await res.json();
     this.createdWorkflowIds.push({ projectId, id: wf.id });
     return wf;
+  }
+
+  // --- Generic API Helpers ---
+
+  async apiGet(path: string): Promise<any> {
+    const res = await this.apiContext.get(path);
+    if (!res.ok()) {
+      throw new Error(`GET ${path} failed (${res.status()}): ${await res.text()}`);
+    }
+    return res.json();
+  }
+
+  async apiPost(path: string, data: any): Promise<any> {
+    const res = await this.apiContext.post(path, { data });
+    if (!res.ok()) {
+      throw new Error(`POST ${path} failed (${res.status()}): ${await res.text()}`);
+    }
+    return res.json();
+  }
+
+  async apiPatch(path: string, data: any): Promise<any> {
+    const res = await this.apiContext.patch(path, { data });
+    if (!res.ok()) {
+      throw new Error(`PATCH ${path} failed (${res.status()}): ${await res.text()}`);
+    }
+    return res.json();
+  }
+
+  async apiDelete(path: string): Promise<any> {
+    const res = await this.apiContext.delete(path);
+    if (!res.ok() && res.status() !== 204 && res.status() !== 404) {
+      throw new Error(`DELETE ${path} failed (${res.status()}): ${await res.text()}`);
+    }
+    return res.status() === 204 ? null : res.json();
+  }
+
+  // --- Traces & Spans Inspection ---
+
+  async getTraces(projectId: string): Promise<any[]> {
+    return this.apiGet(`/v1/projects/${projectId}/traces`);
+  }
+
+  async getTrace(projectId: string, traceId: string): Promise<any> {
+    return this.apiGet(`/v1/projects/${projectId}/traces/${traceId}`);
+  }
+
+  // --- Memory & Knowledge Lifecycle ---
+
+  async getMemoryStatus(projectId: string): Promise<any> {
+    return this.apiGet(`/v1/projects/${projectId}/memory/status`);
+  }
+
+  async recallMemory(projectId: string, query: string, sources: string[] = ["sqlite", "markdown", "chromadb", "graph"]): Promise<any> {
+    return this.apiPost(`/v1/projects/${projectId}/memory/recall`, {
+      query,
+      sources,
+      scope: "project",
+      top_k: 8,
+    });
+  }
+
+  async rememberMemory(
+    projectId: string,
+    text: string,
+    options: { target?: string; kind?: string; entity_kind?: string; entity_name?: string } = {}
+  ): Promise<any> {
+    return this.apiPost(`/v1/projects/${projectId}/memory/remember`, {
+      text,
+      target: options.target || "sqlite",
+      scope: "project",
+      kind: options.kind || "fact",
+      entity_kind: options.entity_kind,
+      entity_name: options.entity_name,
+    });
+  }
+
+  async getMemoryRecords(projectId: string, status: string = "active"): Promise<any[]> {
+    return this.apiGet(`/v1/projects/${projectId}/memory/records?status=${status}`);
+  }
+
+  async getMarkdownMemories(projectId: string): Promise<any[]> {
+    return this.apiGet(`/v1/projects/${projectId}/memory/markdown`);
+  }
+
+  async getGraphStats(projectId: string): Promise<any> {
+    return this.apiGet(`/v1/projects/${projectId}/graph/stats`);
+  }
+
+  async getGraphEntities(projectId: string, kind?: string, search?: string): Promise<any[]> {
+    const params = new URLSearchParams();
+    if (kind) params.set("kind", kind);
+    if (search) params.set("search", search);
+    return this.apiGet(`/v1/projects/${projectId}/graph/entities?${params.toString()}`);
+  }
+
+  async getGraphSubgraph(projectId: string, focusId?: string): Promise<any> {
+    const path = focusId ? `/v1/projects/${projectId}/graph/subgraph?focus_id=${focusId}` : `/v1/projects/${projectId}/graph/subgraph`;
+    return this.apiGet(path);
+  }
+
+  // --- Tool Manager & Policy ---
+
+  async listTools(projectId: string): Promise<any[]> {
+    return this.apiGet(`/v1/projects/${projectId}/tools`);
+  }
+
+  async testToolExecution(projectId: string, toolId: string, args: any = {}, approvalId?: string): Promise<any> {
+    const res = await this.apiContext.post(`/v1/projects/${projectId}/tools/${toolId}/test`, {
+      data: { args, approval_id: approvalId },
+    });
+    return { status: res.status(), ok: res.ok(), data: await res.json() };
+  }
+
+  async updateToolActivation(projectId: string, toolId: string, enabled: boolean, requiresApproval?: boolean): Promise<any> {
+    return this.apiPatch(`/v1/projects/${projectId}/tool-manager/tools/${toolId}/activation`, {
+      enabled,
+      requires_approval: requiresApproval,
+    });
+  }
+
+  // --- Automation Manager ---
+
+  async discoverCapabilities(projectId: string): Promise<any> {
+    return this.apiGet(`/v1/projects/${projectId}/automate/capabilities`);
+  }
+
+  async createAuthoringSession(projectId: string, requirement: string, title?: string): Promise<any> {
+    return this.apiPost(`/v1/projects/${projectId}/automate/sessions`, {
+      requirement,
+      title: title || `Auto Session ${Date.now()}`,
+    });
+  }
+
+  async sendAuthoringMessage(projectId: string, sessionId: string, message: string): Promise<any> {
+    return this.apiPost(`/v1/projects/${projectId}/automate/sessions/${sessionId}/messages`, {
+      message,
+    });
+  }
+
+  async testSessionProposal(projectId: string, sessionId: string): Promise<any> {
+    return this.apiPost(`/v1/projects/${projectId}/automate/sessions/${sessionId}/test`, {});
+  }
+
+  async approveSessionProposal(projectId: string, sessionId: string, body: any = {}): Promise<any> {
+    const payload = {
+      revision: body.revision !== undefined ? body.revision : 1,
+      create_agents: body.create_agents ?? true,
+      activate_triggers: body.activate_triggers ?? false,
+      ...body,
+    };
+    return this.apiPost(`/v1/projects/${projectId}/automate/sessions/${sessionId}/approve`, payload);
+  }
+
+  // --- Read-Only SQLite Validation Helper ---
+
+  querySqlite(sql: string): any[] {
+    const cp = require("child_process");
+    const path = require("path");
+    const fs = require("fs");
+    const repoRoot = path.resolve(__dirname, "../../..");
+    const candidates = [
+      path.join(repoRoot, "data/db/alberto.db"),
+      path.join(repoRoot, "data/test_e2e/db/alberto.db"),
+    ].filter((p) => fs.existsSync(p));
+    candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    const activeDb = candidates[0] || path.join(repoRoot, "data/db/alberto.db");
+    const escapedSql = sql.replace(/"/g, '\\"');
+    const cmd = `python -c "import sqlite3, json; conn=sqlite3.connect(r'${activeDb}'); conn.row_factory=sqlite3.Row; cur=conn.cursor(); cur.execute(\\"${escapedSql}\\"); print(json.dumps([dict(r) for r in cur.fetchall()]))"`;
+    try {
+      const output = cp.execSync(cmd, { encoding: "utf-8", timeout: 10000 });
+      return JSON.parse(output.trim());
+    } catch (e: any) {
+      console.warn("querySqlite warning:", e.message);
+      return [];
+    }
   }
 
   async cleanup() {

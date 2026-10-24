@@ -11,8 +11,8 @@ services:
       ALBERTO_CHECKPOINT_BACKEND: sqlite
       ALBERTO_ENABLE_SCHEDULER: "false"
       ALBERTO_JWT_SECRET: alberto-test-secret-key-32chars-min!
-      ALBERTO_BOOTSTRAP_ADMIN_EMAIL: testadmin@alberto.local
-      ALBERTO_BOOTSTRAP_ADMIN_PASSWORD: alberto-admin
+      ALBERTO_BOOTSTRAP_ADMIN_EMAIL: admin
+      ALBERTO_BOOTSTRAP_ADMIN_PASSWORD: password
       ALBERTO_PUBLIC_BASE_URL: http://localhost:8001
       ALBERTO_PUBLIC_CONSOLE_URL: http://localhost:8001
       ALBERTO_CORS_ORIGINS: '["http://localhost:8001"]'

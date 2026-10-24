@@ -10,17 +10,15 @@ test.describe("Alberto Knowledge & Memory Management E2E", () => {
 
   test("toggles autonomous memory learning indicator in topbar", async ({ page }: { page: Page }) => {
     const learningToggle = page.locator('button[aria-label*="Toggle autonomous memory learning"]');
+    await learningToggle.waitFor({ state: "visible", timeout: 8000 }).catch(() => {});
     if (await learningToggle.isVisible()) {
-      const initialLabel = await learningToggle.getAttribute("aria-label");
+      const initialLabel = (await learningToggle.getAttribute("aria-label")) || "";
       await learningToggle.click();
-      await page.waitForTimeout(500);
-
-      const nextLabel = await learningToggle.getAttribute("aria-label");
-      expect(nextLabel).not.toBe(initialLabel);
+      await expect(learningToggle).not.toHaveAttribute("aria-label", initialLabel, { timeout: 10000 });
 
       // Revert toggle
       await learningToggle.click();
-      await page.waitForTimeout(500);
+      await expect(learningToggle).toHaveAttribute("aria-label", initialLabel, { timeout: 10000 });
     }
   });
 

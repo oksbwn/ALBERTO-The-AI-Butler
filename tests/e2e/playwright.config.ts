@@ -60,6 +60,10 @@ export default defineConfig({
         /functional\/.*\.spec\.ts/,
         /workflows\/.*\.spec\.ts/,
         /agents\/.*\.spec\.ts/,
+        /orchestration\/.*\.spec\.ts/,
+        /memory-graph\/.*\.spec\.ts/,
+        /security\/.*\.spec\.ts/,
+        /automation\/.*\.spec\.ts/,
       ],
       use: {
         ...devices["Desktop Chrome"],
