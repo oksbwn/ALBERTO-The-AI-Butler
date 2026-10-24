@@ -1148,7 +1148,7 @@ class AssistantService:
             tools_to_bind = []
             if is_tool_mgr or is_assistant or is_auto_mgr:
                 all_tools = build_assistant_tools(tenant_id, project_id, [], current_user=current_user)
-                tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow", "delegate_tool_execution")]
+                tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow", "delegate_tool_execution", "delegate_automation_management")]
 
             runnable = model_inst.bind_tools(tools_to_bind) if tools_to_bind else model_inst
 
@@ -1249,11 +1249,12 @@ class AssistantService:
                     "Be natural, warm, and concise (1-3 sentences). Answer questions directly. "
                     "Always preserve user-provided technical terms, product names, acronyms, and model identifiers exactly as stated. "
                     "Never substitute, normalize, or autocorrect them with more common, popular, or phonetically similar alternatives unless the user explicitly tells you to. "
-                    "SMART HOME CONTROL & INTEGRATIONS: You do NOT have a direct physical connection to devices. Instead, you delegate all device actions, light toggles, sensors, and external tools to the Integration Manager via the `delegate_tool_execution` tool. "
-                    "For smart home actions with Home Assistant (HA), call `delegate_tool_execution(tool_id_or_capability='ha_manage_pipeline', parameters_json='{\"action\": \"process\", \"sentence\": \"<user command>\"}'). "
-                    "If tool execution returns READ_ONLY_MODE, explain to the user that the Home Assistant MCP server has Read-Only Mode enabled and must be disabled in the ha-mcp add-on settings to allow smart home control. "
-                    "If the user asks for multi-step automation design or deep reasoning, "
-                    "mention they can toggle Deep Thinking mode or ask you to execute it."
+                    "SUB-AGENT DELEGATION & TOOL EXECUTION: You do NOT execute external tools or interact with physical/external systems directly. "
+                    "Instead, consult the active project context (registered integrations, MCP servers, connectors, and workflows) and delegate to the appropriate specialist sub-agent: "
+                    "- External Tools & Integrations: For any external system action, device query, status check, or integration capability, delegate to the Integration Manager via `delegate_tool_execution(tool_id_or_capability=..., parameters_json=...)`. Select the appropriate tool from the registered integrations context or pass the requested capability name/intent. "
+                    "- Workflows & Automations: For designing, modifying, validating, or troubleshooting workflows, delegate to the Automation Manager via `delegate_automation_management(requirement=...)`. "
+                    "- Do NOT call `list_resources` if the necessary integration or tool is already visible in the provided Project Registries. "
+                    "Explain results and status clearly to the user based on what the sub-agent returns."
                 )
 
             if integration_context:
@@ -1368,40 +1369,55 @@ class AssistantService:
         last_token_time: float | None = None
 
         try:
-            async for chunk in runnable.astream(formatted_messages, config=config):
-                tool_calls = getattr(chunk, "tool_calls", None) or []
-                if tool_calls:
-                    for tc in tool_calls:
-                        t_name = tc.get("name")
-                        yield {"event": "tool", "data": {"name": t_name, "result": "running"}}
-                        matched = next((t for t in tools_to_bind if t.name == t_name), None)
-                        if matched:
-                            try:
-                                res = await matched.ainvoke(tc.get("args") or {})
-                                yield {"event": "tool", "data": {"name": t_name, "result": str(res)}}
-                                formatted_messages.append(AIMessage(content="", tool_calls=[tc]))
-                                from langchain_core.messages import ToolMessage
+            max_turns = 4
+            turn = 0
+            while turn < max_turns:
+                turn += 1
+                accum_content = ""
+                accum_tool_calls: list[dict] = []
+                async for chunk in runnable.astream(formatted_messages, config=config):
+                    t_calls = getattr(chunk, "tool_calls", None) or []
+                    for tc in t_calls:
+                        if tc.get("name") and not any(x.get("id") == tc.get("id") or (x.get("name") == tc.get("name") and x.get("args") == tc.get("args")) for x in accum_tool_calls):
+                            accum_tool_calls.append(tc)
+                    txt = content_to_text(getattr(chunk, "content", ""))
+                    if txt:
+                        if first_token_time is None:
+                            first_token_time = time.monotonic()
+                        last_token_time = time.monotonic()
+                        accum_content += txt
+                        final_text += txt
+                        yield {"event": "messages", "data": {"content": txt}}
 
-                                formatted_messages.append(ToolMessage(tool_call_id=tc.get("id", "tc1"), content=str(res)))
-                                async for follow_chunk in model_inst.astream(formatted_messages, config=config):
-                                    txt = content_to_text(getattr(follow_chunk, "content", ""))
-                                    if txt:
-                                        if first_token_time is None:
-                                            first_token_time = time.monotonic()
-                                        last_token_time = time.monotonic()
-                                        final_text += txt
-                                        yield {"event": "messages", "data": {"content": txt}}
-                            except Exception as te:
-                                yield {"event": "error", "data": {"message": f"tool error: {te}"}}
-                    continue
+                if not accum_tool_calls:
+                    break
 
-                txt = content_to_text(getattr(chunk, "content", ""))
-                if txt:
-                    if first_token_time is None:
-                        first_token_time = time.monotonic()
-                    last_token_time = time.monotonic()
-                    final_text += txt
-                    yield {"event": "messages", "data": {"content": txt}}
+                # Ensure every tool call has a consistent unique ID
+                for idx, tc in enumerate(accum_tool_calls):
+                    if not tc.get("id"):
+                        tc["id"] = f"call_{turn}_{idx}"
+
+                formatted_messages.append(AIMessage(content=accum_content, tool_calls=accum_tool_calls))
+                from langchain_core.messages import ToolMessage
+
+                for tc in accum_tool_calls:
+                    t_name = tc.get("name")
+                    tc_id = tc["id"]
+                    yield {"event": "tool", "data": {"name": t_name, "result": "running"}}
+                    matched = next((t for t in tools_to_bind if t.name == t_name), None)
+                    if matched:
+                        try:
+                            res = await asyncio.wait_for(matched.ainvoke(tc.get("args") or {}), timeout=20.0)
+                            yield {"event": "tool", "data": {"name": t_name, "result": str(res)}}
+                            formatted_messages.append(ToolMessage(tool_call_id=tc_id, content=str(res)))
+                        except Exception as te:
+                            err_str = f"tool error: {te}"
+                            yield {"event": "tool", "data": {"name": t_name, "result": err_str}}
+                            formatted_messages.append(ToolMessage(tool_call_id=tc_id, content=err_str))
+                    else:
+                        err_str = f"Unknown tool: {t_name}"
+                        yield {"event": "tool", "data": {"name": t_name, "result": err_str}}
+                        formatted_messages.append(ToolMessage(tool_call_id=tc_id, content=err_str))
 
             in_tok, out_tok, total_tok = tracer.token_totals()
             has_usage = tracer.has_token_counts()
