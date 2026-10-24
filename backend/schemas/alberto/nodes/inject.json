@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forge/nodes/inject",
+  "type": "object",
+  "properties": {
+    "payload": {},
+    "payload_type": { "type": "string", "enum": ["json", "string", "number", "boolean", "date", "timestamp"], "default": "json" },
+    "topic": { "type": "string", "default": "" },
+    "output_key": { "type": "string", "default": "payload" },
+    "repeat": { "type": "number", "minimum": 0 },
+    "once": { "type": "boolean", "default": false }
+  },
+  "$comment": "ports: out:any"
+}
