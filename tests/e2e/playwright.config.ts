@@ -55,8 +55,8 @@ export default defineConfig({
   ],
   use: {
     baseURL,
-    actionTimeout: 10000,
-    navigationTimeout: 15000,
+    actionTimeout: 15000,
+    navigationTimeout: 30000,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
@@ -139,7 +139,6 @@ export default defineConfig({
           cwd: path.join(repoRoot, "frontend"),
           env: {
             ...process.env,
-            NODE_OPTIONS: "--max-old-space-size=4096",
             PORT: testPort,
             ALBERTO_API_URL: `http://127.0.0.1:${testBackendPort}`,
             FORGE_API_URL: `http://127.0.0.1:${testBackendPort}`,

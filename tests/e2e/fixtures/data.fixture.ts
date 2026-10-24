@@ -268,6 +268,618 @@ export class DataFixture {
     return wf;
   }
 
+  async createNodeRedEvolutionWorkflow(projectId: string, name: string): Promise<TestWorkflow> {
+    const payload = {
+      name,
+      description: "Automated Playwright E2E Node-RED Evolution Workflow",
+      executable: {
+        id: `nodered_${Date.now()}`,
+        version: 1,
+        entry_node: "inject_node",
+        state: {
+          msg: { type: "dict", reducer: "merge" },
+          payload: { type: "any", reducer: "last" },
+          topic: { type: "str", reducer: "last" },
+        },
+        nodes: [
+          {
+            id: "inject_node",
+            type: "inject",
+            config: {
+              payload_type: "json",
+              payload: '{"sensor": "temp", "temp": 32, "api_key": "topsecret_token"}',
+              topic: "home/climate",
+            },
+            position: { x: 50, y: 150 },
+          },
+          {
+            id: "transform_node",
+            type: "transform",
+            config: {
+              operations: [
+                { type: "set", target: "msg.payload.status", value: "warning" },
+              ],
+            },
+            position: { x: 300, y: 150 },
+          },
+          {
+            id: "debug_node",
+            type: "debug",
+            config: {
+              target: "payload",
+              active: true,
+            },
+            position: { x: 550, y: 150 },
+          },
+        ],
+      },
+      canvas: {
+        nodes: [
+          {
+            id: "inject_node",
+            type: "forgeNode",
+            position: { x: 50, y: 150 },
+            data: {
+              nodeType: "inject",
+              config: {
+                payload_type: "json",
+                payload: '{"sensor": "temp", "temp": 32, "api_key": "topsecret_token"}',
+                topic: "home/climate",
+              },
+            },
+          },
+          {
+            id: "transform_node",
+            type: "forgeNode",
+            position: { x: 300, y: 150 },
+            data: {
+              nodeType: "transform",
+              config: {
+                operations: [
+                  { type: "set", target: "msg.payload.status", value: "warning" },
+                ],
+              },
+            },
+          },
+          {
+            id: "debug_node",
+            type: "forgeNode",
+            position: { x: 550, y: 150 },
+            data: {
+              nodeType: "debug",
+              config: {
+                target: "payload",
+                active: true,
+              },
+            },
+          },
+        ],
+        edges: [
+          { id: "e1", source: "inject_node", sourceHandle: "out", target: "transform_node", targetHandle: "in" },
+          { id: "e2", source: "transform_node", sourceHandle: "out", target: "debug_node", targetHandle: "in" },
+        ],
+      },
+    };
+
+    const res = await this.apiContext.post(`/v1/projects/${projectId}/workflows`, {
+      data: payload,
+    });
+    if (!res.ok()) {
+      throw new Error(`Failed to create Node-RED evolution workflow: ${await res.text()}`);
+    }
+    const wf = await res.json();
+    this.createdWorkflowIds.push({ projectId, id: wf.id });
+    return wf;
+  }
+
+  async createParallelNodeRedWorkflow(projectId: string, name: string): Promise<TestWorkflow> {
+    const payload = {
+      name,
+      description: "Parallel Node-RED Workflow with Join Aggregation",
+      executable: {
+        id: `parallel_${Date.now()}`,
+        version: 1,
+        entry_node: "inject_node",
+        state: {
+          msg: { type: "dict", reducer: "merge" },
+          payload: { type: "any", reducer: "merge_payload" },
+          topic: { type: "str", reducer: "last" },
+          _branches: { type: "dict", reducer: "merge" },
+        },
+        nodes: [
+          {
+            id: "inject_node",
+            type: "inject",
+            config: {
+              payload_type: "json",
+              payload: '{"source": "sensor", "value": 10}',
+              topic: "sensor/parallel",
+            },
+            position: { x: 50, y: 150 },
+          },
+          {
+            id: "change_a",
+            type: "change",
+            config: {
+              operations: [
+                { type: "set", target: "payload.value", value: 20 },
+                { type: "set", target: "payload.branch_a", value: 100 },
+              ],
+            },
+            position: { x: 280, y: 80 },
+          },
+          {
+            id: "change_b",
+            type: "change",
+            config: {
+              operations: [
+                { type: "set", target: "payload.value", value: 30 },
+                { type: "set", target: "payload.branch_b", value: 200 },
+              ],
+            },
+            position: { x: 280, y: 220 },
+          },
+          {
+            id: "join_node",
+            type: "join",
+            config: {
+              reducer: "branch_map",
+              output_key: "payload",
+            },
+            position: { x: 500, y: 150 },
+          },
+          {
+            id: "debug_node",
+            type: "debug",
+            config: {
+              target: "payload",
+              active: true,
+            },
+            position: { x: 720, y: 150 },
+          },
+        ],
+        edges: [
+          { from: "inject_node", to: "change_a" },
+          { from: "inject_node", to: "change_b" },
+          { from: "change_a", to: "join_node" },
+          { from: "change_b", to: "join_node" },
+          { from: "join_node", to: "debug_node" },
+        ],
+      },
+      canvas: {
+        nodes: [
+          {
+            id: "inject_node",
+            type: "forgeNode",
+            position: { x: 50, y: 150 },
+            data: {
+              nodeType: "inject",
+              config: {
+                payload_type: "json",
+                payload: '{"source": "sensor", "value": 10}',
+                topic: "sensor/parallel",
+              },
+            },
+          },
+          {
+            id: "change_a",
+            type: "forgeNode",
+            position: { x: 280, y: 80 },
+            data: {
+              nodeType: "change",
+              config: {
+                operations: [
+                  { type: "set", target: "payload.value", value: 20 },
+                  { type: "set", target: "payload.branch_a", value: 100 },
+                ],
+              },
+            },
+          },
+          {
+            id: "change_b",
+            type: "forgeNode",
+            position: { x: 280, y: 220 },
+            data: {
+              nodeType: "change",
+              config: {
+                operations: [
+                  { type: "set", target: "payload.value", value: 30 },
+                  { type: "set", target: "payload.branch_b", value: 200 },
+                ],
+              },
+            },
+          },
+          {
+            id: "join_node",
+            type: "forgeNode",
+            position: { x: 500, y: 150 },
+            data: {
+              nodeType: "join",
+              config: {
+                reducer: "branch_map",
+                output_key: "payload",
+              },
+            },
+          },
+          {
+            id: "debug_node",
+            type: "forgeNode",
+            position: { x: 720, y: 150 },
+            data: {
+              nodeType: "debug",
+              config: {
+                target: "payload",
+                active: true,
+              },
+            },
+          },
+        ],
+        edges: [
+          { id: "e1", source: "inject_node", sourceHandle: "out", target: "change_a", targetHandle: "in" },
+          { id: "e2", source: "inject_node", sourceHandle: "out", target: "change_b", targetHandle: "in" },
+          { id: "e3", source: "change_a", sourceHandle: "out", target: "join_node", targetHandle: "in" },
+          { id: "e4", source: "change_b", sourceHandle: "out", target: "join_node", targetHandle: "in" },
+          { id: "e5", source: "join_node", sourceHandle: "out", target: "debug_node", targetHandle: "in" },
+        ],
+      },
+    };
+
+    const res = await this.apiContext.post(`/v1/projects/${projectId}/workflows`, {
+      data: payload,
+    });
+    if (!res.ok()) {
+      throw new Error(`Failed to create parallel workflow: ${await res.text()}`);
+    }
+    const wf = await res.json();
+    this.createdWorkflowIds.push({ projectId, id: wf.id });
+    return wf;
+  }
+
+  async createHomeAutomationWorkflow(projectId: string, name: string): Promise<TestWorkflow> {
+    const payload = {
+      name,
+      description: "Home Automation: Check Device State -> Switch -> Alert",
+      executable: {
+        id: `ha_wf_${Date.now()}`,
+        version: 1,
+        entry_node: "inject_device",
+        state: {
+          msg: { type: "dict", reducer: "merge" },
+          payload: { type: "any", reducer: "merge_payload" },
+          topic: { type: "str", reducer: "last" },
+        },
+        nodes: [
+          {
+            id: "inject_device",
+            type: "inject",
+            config: {
+              payload_type: "json",
+              payload: '{"device_id": "light.living_room", "state": "unavailable"}',
+              topic: "homeassistant/state",
+            },
+            position: { x: 50, y: 150 },
+          },
+          {
+            id: "switch_state",
+            type: "switch",
+            config: {
+              rules: [
+                { property: "payload.state", op: "eq", value: "unavailable", target: "change_alert" },
+              ],
+              default: "debug_normal",
+            },
+            position: { x: 280, y: 150 },
+          },
+          {
+            id: "change_alert",
+            type: "change",
+            config: {
+              operations: [
+                { type: "set", target: "payload.alert", value: "Device offline notification dispatched" },
+                { type: "set", target: "payload.notified", value: true },
+              ],
+            },
+            position: { x: 500, y: 80 },
+          },
+          {
+            id: "debug_alert",
+            type: "debug",
+            config: {
+              target: "payload",
+              active: true,
+            },
+            position: { x: 720, y: 80 },
+          },
+          {
+            id: "debug_normal",
+            type: "debug",
+            config: {
+              target: "payload",
+              active: true,
+            },
+            position: { x: 500, y: 220 },
+          },
+        ],
+        edges: [
+          { from: "inject_device", to: "switch_state" },
+          { from: "change_alert", to: "debug_alert" },
+        ],
+      },
+      canvas: {
+        nodes: [
+          {
+            id: "inject_device",
+            type: "forgeNode",
+            position: { x: 50, y: 150 },
+            data: {
+              nodeType: "inject",
+              config: {
+                payload_type: "json",
+                payload: '{"device_id": "light.living_room", "state": "unavailable"}',
+                topic: "homeassistant/state",
+              },
+            },
+          },
+          {
+            id: "switch_state",
+            type: "forgeNode",
+            position: { x: 280, y: 150 },
+            data: {
+              nodeType: "switch",
+              config: {
+                rules: [
+                  { property: "payload.state", op: "eq", value: "unavailable", target: "change_alert" },
+                ],
+                default: "debug_normal",
+              },
+            },
+          },
+          {
+            id: "change_alert",
+            type: "forgeNode",
+            position: { x: 500, y: 80 },
+            data: {
+              nodeType: "change",
+              config: {
+                operations: [
+                  { type: "set", target: "payload.alert", value: "Device offline notification dispatched" },
+                  { type: "set", target: "payload.notified", value: true },
+                ],
+              },
+            },
+          },
+          {
+            id: "debug_alert",
+            type: "forgeNode",
+            position: { x: 720, y: 80 },
+            data: {
+              nodeType: "debug",
+              config: {
+                target: "payload",
+                active: true,
+              },
+            },
+          },
+          {
+            id: "debug_normal",
+            type: "forgeNode",
+            position: { x: 500, y: 220 },
+            data: {
+              nodeType: "debug",
+              config: {
+                target: "payload",
+                active: true,
+              },
+            },
+          },
+        ],
+        edges: [
+          { id: "e1", source: "inject_device", sourceHandle: "out", target: "switch_state", targetHandle: "in" },
+          { id: "e2", source: "change_alert", sourceHandle: "out", target: "debug_alert", targetHandle: "in" },
+        ],
+      },
+    };
+
+    const res = await this.apiContext.post(`/v1/projects/${projectId}/workflows`, {
+      data: payload,
+    });
+    if (!res.ok()) {
+      throw new Error(`Failed to create home automation workflow: ${await res.text()}`);
+    }
+    const wf = await res.json();
+    this.createdWorkflowIds.push({ projectId, id: wf.id });
+    return wf;
+  }
+
+  async createAiButlerMeetingWorkflow(projectId: string, name: string): Promise<TestWorkflow> {
+    const payload = {
+      name,
+      description: "AI Butler Meeting Assistant: Inject Request -> Structured Agent -> Switch -> Summary -> Debug",
+      executable: {
+        id: `butler_meeting_${Date.now()}`,
+        version: 1,
+        entry_node: "inject_request",
+        state: {
+          msg: { type: "dict", reducer: "merge" },
+          payload: { type: "any", reducer: "merge_payload" },
+          topic: { type: "str", reducer: "last" },
+        },
+        nodes: [
+          {
+            id: "inject_request",
+            type: "inject",
+            config: {
+              payload_type: "json",
+              payload: '{"request": "Schedule design sync meeting tomorrow at 10 AM", "user": "Alex", "priority": "high"}',
+              topic: "butler/calendar_request",
+            },
+            position: { x: 50, y: 150 },
+          },
+          {
+            id: "agent_interpretation",
+            type: "change",
+            config: {
+              operations: [
+                { type: "set", target: "payload.intent", value: "schedule_meeting" },
+                { type: "set", target: "payload.actionable", value: true },
+                { type: "set", target: "payload.meeting_title", value: "Design Sync" },
+                { type: "set", target: "payload.meeting_time", value: "10:00 AM" },
+              ],
+            },
+            position: { x: 260, y: 150 },
+          },
+          {
+            id: "switch_actionable",
+            type: "switch",
+            config: {
+              rules: [
+                { property: "payload.actionable", op: "eq", value: true, target: "change_summary" },
+              ],
+              default: "debug_unactionable",
+            },
+            position: { x: 480, y: 150 },
+          },
+          {
+            id: "change_summary",
+            type: "change",
+            config: {
+              operations: [
+                { type: "set", target: "payload.action_summary", value: "Meeting 'Design Sync' prepared for 10:00 AM (Pending Tool Authorization)" },
+                { type: "set", target: "payload.status", value: "ready_for_review" },
+                { type: "set", target: "payload.tool_authorized", value: false },
+              ],
+            },
+            position: { x: 700, y: 80 },
+          },
+          {
+            id: "debug_butler_result",
+            type: "debug",
+            config: {
+              target: "payload",
+              active: true,
+            },
+            position: { x: 920, y: 80 },
+          },
+          {
+            id: "debug_unactionable",
+            type: "debug",
+            config: {
+              target: "payload",
+              active: true,
+            },
+            position: { x: 700, y: 220 },
+          },
+        ],
+        edges: [
+          { from: "inject_request", to: "agent_interpretation" },
+          { from: "agent_interpretation", to: "switch_actionable" },
+          { from: "change_summary", to: "debug_butler_result" },
+        ],
+      },
+      canvas: {
+        nodes: [
+          {
+            id: "inject_request",
+            type: "forgeNode",
+            position: { x: 50, y: 150 },
+            data: {
+              nodeType: "inject",
+              config: {
+                payload_type: "json",
+                payload: '{"request": "Schedule design sync meeting tomorrow at 10 AM", "user": "Alex", "priority": "high"}',
+                topic: "butler/calendar_request",
+              },
+            },
+          },
+          {
+            id: "agent_interpretation",
+            type: "forgeNode",
+            position: { x: 260, y: 150 },
+            data: {
+              nodeType: "change",
+              config: {
+                operations: [
+                  { type: "set", target: "payload.intent", value: "schedule_meeting" },
+                  { type: "set", target: "payload.actionable", value: true },
+                  { type: "set", target: "payload.meeting_title", value: "Design Sync" },
+                  { type: "set", target: "payload.meeting_time", value: "10:00 AM" },
+                ],
+              },
+            },
+          },
+          {
+            id: "switch_actionable",
+            type: "forgeNode",
+            position: { x: 480, y: 150 },
+            data: {
+              nodeType: "switch",
+              config: {
+                rules: [
+                  { property: "payload.actionable", op: "eq", value: true, target: "change_summary" },
+                ],
+                default: "debug_unactionable",
+              },
+            },
+          },
+          {
+            id: "change_summary",
+            type: "forgeNode",
+            position: { x: 700, y: 80 },
+            data: {
+              nodeType: "change",
+              config: {
+                operations: [
+                  { type: "set", target: "payload.action_summary", value: "Meeting 'Design Sync' prepared for 10:00 AM (Pending Tool Authorization)" },
+                  { type: "set", target: "payload.status", value: "ready_for_review" },
+                  { type: "set", target: "payload.tool_authorized", value: false },
+                ],
+              },
+            },
+          },
+          {
+            id: "debug_butler_result",
+            type: "forgeNode",
+            position: { x: 920, y: 80 },
+            data: {
+              nodeType: "debug",
+              config: {
+                target: "payload",
+                active: true,
+              },
+            },
+          },
+          {
+            id: "debug_unactionable",
+            type: "forgeNode",
+            position: { x: 700, y: 220 },
+            data: {
+              nodeType: "debug",
+              config: {
+                target: "payload",
+                active: true,
+              },
+            },
+          },
+        ],
+        edges: [
+          { id: "e1", source: "inject_request", sourceHandle: "out", target: "agent_interpretation", targetHandle: "in" },
+          { id: "e2", source: "agent_interpretation", sourceHandle: "out", target: "switch_actionable", targetHandle: "in" },
+          { id: "e3", source: "change_summary", sourceHandle: "out", target: "debug_butler_result", targetHandle: "in" },
+        ],
+      },
+    };
+
+    const res = await this.apiContext.post(`/v1/projects/${projectId}/workflows`, {
+      data: payload,
+    });
+    if (!res.ok()) {
+      throw new Error(`Failed to create AI Butler meeting workflow: ${await res.text()}`);
+    }
+    const wf = await res.json();
+    this.createdWorkflowIds.push({ projectId, id: wf.id });
+    return wf;
+  }
+
   async executeWorkflow(projectId: string, workflowId: string, input: any = {}): Promise<any> {
     const res = await this.apiPost(`/v1/projects/${projectId}/workflows/${workflowId}/runs`, {
       input: typeof input === "object" ? input : {},
