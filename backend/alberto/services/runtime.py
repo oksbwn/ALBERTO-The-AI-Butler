@@ -80,6 +80,11 @@ async def build_compile_context(
         select(ModelServer).where(ModelServer.tenant_id == tenant_id)
     )).scalars().all()
 
+    for r in reg_rows:
+        session.expunge(r)
+    for s in srv_rows:
+        session.expunge(s)
+
     # Resolve server api keys
     for s in srv_rows:
         if s.api_key_ref:

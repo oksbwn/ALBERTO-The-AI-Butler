@@ -8,6 +8,7 @@ token-by-token over SSE, emitting `tool` events as it performs each action.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -142,7 +143,7 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list, curren
     from langchain_core.tools import StructuredTool
 
     async def list_resources() -> str:
-        """List everything in this project: MCP integrations, connectors, tools, workflows, agents, auth providers, knowledge sources, and Q&A pairs. Use this to answer 'what do I have' and before deciding what to build."""
+        """List everything in this project: MCP integrations, connectors, tools, workflows, agents, auth providers, knowledge sources, and Q&A pairs. Use ONLY when user explicitly asks 'what tools/integrations do I have' or asks to see project resource lists. Do NOT call this to execute actions or look up devices."""
         from alberto.models import ConnectorInstall, McpClient
         async with SessionLocal() as s:
             def names(rows, attr="name"):
@@ -772,11 +773,7 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list, curren
         return f"Deleted workflow '{wf.name}' (id {wf.id}) and its run history."
 
     async def delegate_tool_execution(tool_id_or_capability: str, parameters_json: str = "{}", approval_id: str = "") -> str:
-        """Execute an external tool securely by delegating to the Tool Manager system agent.
-        The Master Agent has NO direct external tool access; all external tool execution must be
-        mediated by Tool Manager. Tool Manager resolves the tool, verifies activation, caller
-        entitlements, and human approval before execution. Pass tool_id_or_capability, optional
-        parameters_json, and optional approval_id if resuming an approved execution."""
+        """Execute an external tool or query Home Assistant devices. For smart home or device queries (lights, switches, sensors, climate, states), pass tool_id_or_capability (e.g. 'ha_get_overview', 'ha_search', 'ha_eval_template', 'ha_get_state') and parameters_json."""
         from alberto.services.tool_manager import ToolManagerService
         try:
             params = json.loads(parameters_json) if parameters_json else {}
@@ -930,6 +927,36 @@ def _assistant_model_ref(ctx) -> str:
     if default_setting:
         return default_setting
     raise ValueError("No model configured or available. Please configure an assistant model or default registered model.")
+
+
+def _compact_tool_result(res: Any, max_chars: int = 2500) -> str:
+    """Cap and compact tool result content fed back to the LLM to prevent GPU KV-cache OOM."""
+    s = str(res)
+    if len(s) <= max_chars:
+        return s
+    try:
+        data = json.loads(s)
+        if isinstance(data, dict):
+            if "result" in data and isinstance(data["result"], list):
+                inner_list = data["result"]
+                if inner_list and isinstance(inner_list[0], dict) and "text" in inner_list[0]:
+                    try:
+                        inner_data = json.loads(inner_list[0]["text"])
+                        if isinstance(inner_data, dict):
+                            if "entities" in inner_data and isinstance(inner_data["entities"], list):
+                                inner_data["entities"] = inner_data["entities"][:10]
+                            if "automations" in inner_data and isinstance(inner_data["automations"], list):
+                                inner_data["automations"] = inner_data["automations"][:3]
+                            inner_list[0]["text"] = json.dumps(inner_data)
+                    except Exception:
+                        pass
+                data["result"] = inner_list[:5]
+                compacted = json.dumps(data)
+                if len(compacted) <= max_chars:
+                    return compacted
+    except Exception:
+        pass
+    return s[:max_chars] + f"\n... [output truncated to {max_chars} chars for model context]"
 
 
 class AssistantService:
@@ -1148,7 +1175,14 @@ class AssistantService:
             tools_to_bind = []
             if is_tool_mgr or is_assistant or is_auto_mgr:
                 all_tools = build_assistant_tools(tenant_id, project_id, [], current_user=current_user)
-                tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow", "delegate_tool_execution", "delegate_automation_management")]
+                if is_assistant:
+                    # General assistant: bind delegation tools directly.
+                    # Only bind list_resources if user explicitly asks for resource/tool discovery.
+                    user_wants_resources = any(w in user_msg.lower() for w in ("what tools", "list tools", "list resources", "what integrations", "what workflows"))
+                    allowed_names = ("delegate_tool_execution", "delegate_automation_management") + (("list_resources", "describe_workflow") if user_wants_resources else ())
+                    tools_to_bind = [t for t in all_tools if t.name in allowed_names]
+                else:
+                    tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow", "delegate_tool_execution", "delegate_automation_management")]
 
             runnable = model_inst.bind_tools(tools_to_bind) if tools_to_bind else model_inst
 
@@ -1289,10 +1323,6 @@ class AssistantService:
                     }
                 except Exception as me:
                     log.warning("Assistant memory recall error: %s", me)
-                    try:
-                        await s.rollback()
-                    except Exception:
-                        pass
 
             if recalled_block:
                 fast_sys_prompt = f"{fast_sys_prompt}\n\n{recalled_block}"
@@ -1311,10 +1341,6 @@ class AssistantService:
                             history_turns.append({"role": "assistant", "content": pt.ai_response})
                 except Exception as he:
                     log.warning("Assistant history retrieval error: %s", he)
-                    try:
-                        await s.rollback()
-                    except Exception:
-                        pass
 
             if not history_turns and len(messages) > 1:
                 # Explicit stateless messages sent by client
@@ -1325,9 +1351,18 @@ class AssistantService:
                     history_turns.append({"role": "user", "content": user_msg})
 
             # Calculate context budget based on configured model context window
-            reg = ctx.registered_models.get(primary_ref) or next((r for r in ctx.registered_models.values() if r.model_name == primary_ref), None)
-            ctx_max = (reg.context_window_configured or reg.context_window_max or 32768) if reg else 32768
-            max_output = (reg.max_output_tokens or 4096) if reg else 4096
+            ctx_max = 32768
+            max_output = 4096
+            try:
+                reg = (ctx.registered_models or {}).get(primary_ref) or next(
+                    (r for r in (ctx.registered_models or {}).values() if getattr(r, "model_name", None) == primary_ref),
+                    None,
+                )
+                if reg:
+                    ctx_max = getattr(reg, "context_window_configured", None) or getattr(reg, "context_window_max", None) or 32768
+                    max_output = getattr(reg, "max_output_tokens", None) or 4096
+            except Exception as re:
+                log.warning("Failed to resolve model context budget from registry: %s", re)
             input_budget_chars = max(4000, (ctx_max - max_output) * 3)
 
             # Prioritize: (1) System prompt + (2) Current turn, then (3) Recent conversation turns
@@ -1409,15 +1444,15 @@ class AssistantService:
                         try:
                             res = await asyncio.wait_for(matched.ainvoke(tc.get("args") or {}), timeout=20.0)
                             yield {"event": "tool", "data": {"name": t_name, "result": str(res)}}
-                            formatted_messages.append(ToolMessage(tool_call_id=tc_id, content=str(res)))
+                            formatted_messages.append(ToolMessage(tool_call_id=tc_id, content=_compact_tool_result(res)))
                         except Exception as te:
                             err_str = f"tool error: {te}"
                             yield {"event": "tool", "data": {"name": t_name, "result": err_str}}
-                            formatted_messages.append(ToolMessage(tool_call_id=tc_id, content=err_str))
+                            formatted_messages.append(ToolMessage(tool_call_id=tc_id, content=_compact_tool_result(err_str)))
                     else:
                         err_str = f"Unknown tool: {t_name}"
                         yield {"event": "tool", "data": {"name": t_name, "result": err_str}}
-                        formatted_messages.append(ToolMessage(tool_call_id=tc_id, content=err_str))
+                        formatted_messages.append(ToolMessage(tool_call_id=tc_id, content=_compact_tool_result(err_str)))
 
             in_tok, out_tok, total_tok = tracer.token_totals()
             has_usage = tracer.has_token_counts()

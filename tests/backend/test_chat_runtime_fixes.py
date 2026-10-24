@@ -428,3 +428,57 @@ async def test_assistant_automation_manager_receives_live_workflow_context_and_t
         assert "Total Workflows in this Project: 1" in sys_msg
         assert "Daily Triage Pipeline" in sys_msg
 
+
+@pytest.mark.asyncio
+async def test_assistant_fast_stream_with_registered_model(sample_project: Project):
+    """Verify fast stream with registered model does not trigger MissingGreenlet on attribute access."""
+    from alberto.db.base import SessionLocal
+    from alberto.models import ModelServer, RegisteredModel
+
+    async with SessionLocal() as s:
+        server = ModelServer(
+            id=f"srv-{id(object())}",
+            tenant_id=sample_project.tenant_id,
+            name="Test Ollama",
+            provider_type="ollama",
+            base_url="http://localhost:11434",
+            enabled=True,
+        )
+        s.add(server)
+        await s.flush()
+
+        rm = RegisteredModel(
+            id=f"mod-{id(object())}",
+            tenant_id=sample_project.tenant_id,
+            server_id=server.id,
+            model_name="llama3.2:latest",
+            display_name="Llama 3.2",
+            enabled=True,
+            context_window_max=8192,
+            context_window_configured=4096,
+            max_output_tokens=2048,
+        )
+        s.add(rm)
+        await s.commit()
+        rm_id = rm.id
+
+    class DummyModel:
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, messages, config=None):
+            from langchain_core.messages import AIMessageChunk
+            yield AIMessageChunk(content="Hello! I am Alberto.")
+
+    with patch("alberto.services.assistant.resolve_model", return_value=DummyModel()):
+        chunks = []
+        async for chunk in AssistantService._fast_stream(
+            tenant_id=sample_project.tenant_id,
+            project_id=sample_project.id,
+            messages=[{"role": "user", "content": "Hello"}],
+            model=rm_id,
+        ):
+            chunks.append(chunk)
+
+    assert any(c.get("event") == "messages" for c in chunks)
+

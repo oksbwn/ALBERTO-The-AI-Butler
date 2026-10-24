@@ -100,10 +100,6 @@ class UnifiedMemoryManager:
                     )
             except Exception as e:
                 logger.warning("SQLite memory list error: %s", e)
-                try:
-                    await session.rollback()
-                except Exception:
-                    pass
             return hits
 
         try:
@@ -124,10 +120,6 @@ class UnifiedMemoryManager:
                 )
         except Exception as e:
             logger.warning("MemoryService recall error: %s", e)
-            try:
-                await session.rollback()
-            except Exception:
-                pass
 
         # Keyword and exact entity matching from authoritative SQLite memory
         # Ensures exact technical terms and identifiers are never lost to vector drift or embedding outages
@@ -170,10 +162,6 @@ class UnifiedMemoryManager:
                 )
         except Exception as e:
             logger.warning("SQLite memory keyword/fallback recall error: %s", e)
-            try:
-                await session.rollback()
-            except Exception:
-                pass
 
         return hits
 
@@ -268,10 +256,6 @@ class UnifiedMemoryManager:
                 return hits
             except Exception as e:
                 logger.warning("Error fetching all QA pairs: %s", e)
-                try:
-                    await session.rollback()
-                except Exception:
-                    pass
             return hits
 
         try:
@@ -295,10 +279,6 @@ class UnifiedMemoryManager:
                 )
         except Exception as e:
             logger.warning("KnowledgeService top_qa error: %s", e)
-            try:
-                await session.rollback()
-            except Exception:
-                pass
         return hits
 
     @staticmethod
@@ -332,10 +312,6 @@ class UnifiedMemoryManager:
                 return hits
             except Exception as e:
                 logger.warning("Error listing knowledge sources: %s", e)
-                try:
-                    await session.rollback()
-                except Exception:
-                    pass
             return hits
 
         try:
@@ -357,10 +333,6 @@ class UnifiedMemoryManager:
                 )
         except Exception as e:
             logger.warning("KnowledgeService search error: %s", e)
-            try:
-                await session.rollback()
-            except Exception:
-                pass
         return hits
 
     @staticmethod
@@ -460,17 +432,9 @@ class UnifiedMemoryManager:
                     return await coro
             except TimeoutError:
                 logger.warning("Retrieval source %s timed out after %.1fs", source_name, per_source_timeout)
-                try:
-                    await session.rollback()
-                except Exception:
-                    pass
                 return []
             except Exception as e:
                 logger.warning("Retrieval source %s failed: %s", source_name, e)
-                try:
-                    await session.rollback()
-                except Exception:
-                    pass
                 return []
 
         async def _query_sources(target_sources: set[str]) -> list[UnifiedMemoryRecord]:
