@@ -8,16 +8,17 @@ test.describe("Alberto Live Local LLM Provider Acceptance", () => {
   let isOnline = false;
 
   test.beforeAll(async () => {
+    const apiBase = process.env.ALBERTO_API_URL || "http://127.0.0.1:8005";
     // Probe Alberto's configured models from backend registry
     try {
-      const authRes = await fetch("http://127.0.0.1:8000/v1/auth/login", {
+      const authRes = await fetch(`${apiBase}/v1/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: "admin", password: "password" }),
       });
       if (authRes.ok) {
         const authData = await authRes.json();
-        const modelsRes = await fetch("http://127.0.0.1:8000/v1/models/registry", {
+        const modelsRes = await fetch(`${apiBase}/v1/models/registry`, {
           headers: { Authorization: `Bearer ${authData.access_token}` },
         });
         if (modelsRes.ok) {
@@ -27,7 +28,7 @@ test.describe("Alberto Live Local LLM Provider Acceptance", () => {
           if (activeModel) {
             // Test reachability of this configured model
             const testInfRes = await fetch(
-              `http://127.0.0.1:8000/v1/models/registry/${activeModel.id}/test-inference`,
+              `${apiBase}/v1/models/registry/${activeModel.id}/test-inference`,
               {
                 method: "POST",
                 headers: {

@@ -14,10 +14,11 @@ test.describe("Alberto Workflow Execution & SSE Streaming E2E", () => {
 
     // Navigate to Workflows list
     await navigateTo(page, "Workflows");
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(600);
 
     // Click our test workflow in the list to open canvas (click caption so inline rename is not triggered)
     const workflowCard = page.locator(".card", { hasText: workflow.name }).first();
+    await expect(workflowCard).toBeVisible({ timeout: 15000 });
     await workflowCard.locator(".t-caption").click();
     await page.waitForSelector(".react-flow", { timeout: 20000 });
   });
@@ -25,7 +26,7 @@ test.describe("Alberto Workflow Execution & SSE Streaming E2E", () => {
   test("verifies workflow canvas node persistence and renders React Flow graph", async ({ page }: { page: Page }) => {
     // Verify Start, Echo Agent, and End nodes are rendered on canvas
     await expect(page.locator('.react-flow__node:has-text("Start")')).toBeVisible();
-    await expect(page.locator('.react-flow__node:has-text("Echo Agent")')).toBeVisible();
+    await expect(page.locator('.react-flow__node:has-text("echo_agent"), .react-flow__node:has-text("Echo Agent")').first()).toBeVisible();
     await expect(page.locator('.react-flow__node:has-text("End")')).toBeVisible();
 
     // Verify Run button is present in canvas toolbar
@@ -94,13 +95,13 @@ test.describe("Alberto Workflow Execution & SSE Streaming E2E", () => {
 
   test("persists canvas layout and workflow nodes across page reloads", async ({ page }: { page: Page }) => {
     // Verify nodes on canvas
-    await expect(page.locator('.react-flow__node:has-text("Echo Agent")')).toBeVisible();
+    await expect(page.locator('.react-flow__node:has-text("echo_agent"), .react-flow__node:has-text("Echo Agent")').first()).toBeVisible();
 
     // Reload browser page
     await page.reload();
     await page.waitForSelector(".topbar", { timeout: 15000 });
     await navigateTo(page, "Workflows");
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(600);
     const card = page.locator(".card", { hasText: workflow.name }).first();
     await expect(card).toBeVisible({ timeout: 15000 });
     await card.locator(".tile, .t-caption").first().click();
@@ -108,7 +109,7 @@ test.describe("Alberto Workflow Execution & SSE Streaming E2E", () => {
 
     // Verify all workflow nodes persist intact on the canvas
     await expect(page.locator('.react-flow__node:has-text("Start")')).toBeVisible();
-    await expect(page.locator('.react-flow__node:has-text("Echo Agent")')).toBeVisible();
+    await expect(page.locator('.react-flow__node:has-text("echo_agent"), .react-flow__node:has-text("Echo Agent")').first()).toBeVisible();
     await expect(page.locator('.react-flow__node:has-text("End")')).toBeVisible();
   });
 });

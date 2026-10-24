@@ -22,7 +22,7 @@ export class DataFixture {
   private createdProjectIds: string[] = [];
   public token: string | null = null;
 
-  constructor(baseURL: string = "http://127.0.0.1:8000") {
+  constructor(baseURL: string = process.env.ALBERTO_API_URL || "http://127.0.0.1:8005") {
     this.baseURL = baseURL;
   }
 
@@ -58,6 +58,35 @@ export class DataFixture {
     } catch {
       // In dev mode with anonymous owner, fall through
     }
+
+    await this.verifyIsolation();
+  }
+
+  async verifyIsolation(): Promise<void> {
+    try {
+      const res = await this.apiContext.get("/v1/projects");
+      if (res.ok()) {
+        const projects = await res.json();
+        const testProjectId = projects[0]?.id;
+        if (testProjectId) {
+          const statsRes = await this.apiContext.get(`/v1/projects/${testProjectId}/graph/stats`);
+          if (statsRes.ok()) {
+            const stats = await statsRes.json();
+            const storagePath = (stats.storage_path || "").toLowerCase();
+            if (storagePath && !storagePath.includes("test_e2e") && storagePath.includes("data\\db\\ladybug")) {
+              throw new Error(
+                `TEST ISOLATION VIOLATION: Connected backend at ${this.baseURL} is using production/dev storage (${stats.storage_path}). ` +
+                `Tests must run against an isolated instance using ALBERTO_DATA_DIR=data/test_e2e.`
+              );
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      if (err.message?.includes("TEST ISOLATION VIOLATION")) {
+        throw err;
+      }
+    }
   }
 
   async getOrCreateDefaultProject(): Promise<TestProject> {
@@ -92,14 +121,14 @@ export class DataFixture {
           {
             id: "start_node",
             type: "start",
-            config: { name: "Start" },
+            config: {},
             position: { x: 50, y: 150 },
           },
           {
             id: "echo_agent",
             type: "agent",
             config: {
-              name: "Echo Agent",
+              name: "echo_agent",
               model: "fake:E2E execution confirmed successfully.",
               system_prompt: "You are an E2E testing agent.",
             },
@@ -108,7 +137,7 @@ export class DataFixture {
           {
             id: "end_node",
             type: "end",
-            config: { name: "End" },
+            config: {},
             position: { x: 550, y: 150 },
           },
         ],
@@ -119,7 +148,7 @@ export class DataFixture {
             id: "start_node",
             type: "forgeNode",
             position: { x: 50, y: 150 },
-            data: { nodeType: "start", config: { name: "Start" } },
+            data: { nodeType: "start", config: {} },
           },
           {
             id: "echo_agent",
@@ -128,7 +157,7 @@ export class DataFixture {
             data: {
               nodeType: "agent",
               config: {
-                name: "Echo Agent",
+                name: "echo_agent",
                 model: "fake:E2E execution confirmed successfully.",
               },
             },
@@ -137,7 +166,7 @@ export class DataFixture {
             id: "end_node",
             type: "forgeNode",
             position: { x: 550, y: 150 },
-            data: { nodeType: "end", config: { name: "End" } },
+            data: { nodeType: "end", config: {} },
           },
         ],
         edges: [
@@ -174,14 +203,14 @@ export class DataFixture {
           {
             id: "start_node",
             type: "start",
-            config: { name: "Start" },
+            config: {},
             position: { x: 50, y: 150 },
           },
           {
             id: "pause_approval",
             type: "human_input",
             config: {
-              name: "Review Approval",
+              name: "pause_approval",
               prompt: "Please approve or reject this automated transaction.",
             },
             position: { x: 300, y: 150 },
@@ -189,7 +218,7 @@ export class DataFixture {
           {
             id: "end_node",
             type: "end",
-            config: { name: "End" },
+            config: {},
             position: { x: 550, y: 150 },
           },
         ],
@@ -200,7 +229,7 @@ export class DataFixture {
             id: "start_node",
             type: "forgeNode",
             position: { x: 50, y: 150 },
-            data: { nodeType: "start", config: { name: "Start" } },
+            data: { nodeType: "start", config: {} },
           },
           {
             id: "pause_approval",
@@ -209,7 +238,7 @@ export class DataFixture {
             data: {
               nodeType: "human_input",
               config: {
-                name: "Review Approval",
+                name: "pause_approval",
                 prompt: "Please approve or reject this automated transaction.",
               },
             },
@@ -218,7 +247,7 @@ export class DataFixture {
             id: "end_node",
             type: "forgeNode",
             position: { x: 550, y: 150 },
-            data: { nodeType: "end", config: { name: "End" } },
+            data: { nodeType: "end", config: {} },
           },
         ],
         edges: [
@@ -390,21 +419,48 @@ export class DataFixture {
     return this.apiPost(`/v1/projects/${projectId}/automate/sessions/${sessionId}/approve`, payload);
   }
 
-  // --- Read-Only SQLite Validation Helper ---
+  // --- Read-Only SQLite Validation Helper with Deterministic Isolation ---
+  getTestDbPath(): string {
+    const path = require("path");
+    const fs = require("fs");
+    const repoRoot = path.resolve(__dirname, "../../..");
+    const envDataDir = process.env.ALBERTO_DATA_DIR || process.env.FORGE_DATA_DIR || path.join(repoRoot, "data/test_e2e");
+    
+    // Explicit canonical validation
+    const resolvedDataDir = fs.existsSync(envDataDir) ? fs.realpathSync(envDataDir) : path.resolve(envDataDir);
+    const prodDataDir = fs.existsSync(path.join(repoRoot, "data")) ? fs.realpathSync(path.join(repoRoot, "data")) : null;
+    
+    // Fail immediately if path references production or normal development storage
+    if (prodDataDir && (resolvedDataDir === prodDataDir || (resolvedDataDir.startsWith(prodDataDir) && !resolvedDataDir.includes("test_e2e")))) {
+      throw new Error(`TEST ISOLATION VIOLATION: Resolved test database directory '${resolvedDataDir}' points to production/dev storage '${prodDataDir}'. Test database selection must be strictly isolated to data/test_e2e.`);
+    }
+
+    const testDb = path.join(resolvedDataDir, "db", "alberto.db");
+    if (!fs.existsSync(testDb)) {
+      const dbDir = path.dirname(testDb);
+      if (!fs.existsSync(dbDir)) {
+        fs.mkdirSync(dbDir, { recursive: true });
+      }
+    }
+    return testDb;
+  }
 
   querySqlite(sql: string): any[] {
     const cp = require("child_process");
     const path = require("path");
     const fs = require("fs");
     const repoRoot = path.resolve(__dirname, "../../..");
-    const candidates = [
-      path.join(repoRoot, "data/db/alberto.db"),
-      path.join(repoRoot, "data/test_e2e/db/alberto.db"),
-    ].filter((p) => fs.existsSync(p));
-    candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-    const activeDb = candidates[0] || path.join(repoRoot, "data/db/alberto.db");
+    const testDb = this.getTestDbPath();
+    const pythonBin = process.platform === "win32"
+      ? (fs.existsSync(path.join(repoRoot, "backend/.venv/Scripts/python.exe"))
+          ? path.join(repoRoot, "backend/.venv/Scripts/python.exe")
+          : "python")
+      : (fs.existsSync(path.join(repoRoot, "backend/.venv/bin/python"))
+          ? path.join(repoRoot, "backend/.venv/bin/python")
+          : "python3");
+
     const escapedSql = sql.replace(/"/g, '\\"');
-    const cmd = `python -c "import sqlite3, json; conn=sqlite3.connect(r'${activeDb}'); conn.row_factory=sqlite3.Row; cur=conn.cursor(); cur.execute(\\"${escapedSql}\\"); print(json.dumps([dict(r) for r in cur.fetchall()]))"`;
+    const cmd = `"${pythonBin}" -c "import sqlite3, json; conn=sqlite3.connect(r'${testDb}'); conn.row_factory=sqlite3.Row; cur=conn.cursor(); cur.execute(\\"${escapedSql}\\"); print(json.dumps([dict(r) for r in cur.fetchall()]))"`;
     try {
       const output = cp.execSync(cmd, { encoding: "utf-8", timeout: 10000 });
       return JSON.parse(output.trim());

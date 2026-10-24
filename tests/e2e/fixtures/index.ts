@@ -11,7 +11,7 @@ export interface AlbertoTestFixtures {
 
 export const test = baseTest.extend<AlbertoTestFixtures>({
   data: async ({}, use: (r: DataFixture) => Promise<void>) => {
-    const apiBase = process.env.ALBERTO_API_URL || "http://127.0.0.1:8000";
+    const apiBase = process.env.ALBERTO_API_URL || "http://127.0.0.1:8005";
     const data = new DataFixture(apiBase);
     await data.init();
     await use(data);

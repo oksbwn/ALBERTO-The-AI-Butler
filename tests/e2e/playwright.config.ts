@@ -11,9 +11,19 @@ const pythonBin = process.platform === "win32"
       ? path.join(repoRoot, "backend/.venv/bin/python")
       : "python3");
 
+const nextBin = process.platform === "win32"
+  ? path.join(repoRoot, "frontend/node_modules/.bin/next.cmd")
+  : path.join(repoRoot, "frontend/node_modules/.bin/next");
+
 const testDataDir = path.join(repoRoot, "data/test_e2e");
-const testPort = process.env.PLAYWRIGHT_PORT || "3000";
+const testBackendPort = process.env.PLAYWRIGHT_BACKEND_PORT || "8005";
+const testPort = process.env.PLAYWRIGHT_PORT || "3005";
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${testPort}`;
+const apiURL = process.env.ALBERTO_API_URL || `http://127.0.0.1:${testBackendPort}`;
+process.env.ALBERTO_API_URL = apiURL;
+process.env.FORGE_API_URL = apiURL;
+process.env.ALBERTO_DATA_DIR = testDataDir;
+process.env.FORGE_DATA_DIR = testDataDir;
 const isCI = !!process.env.CI;
 
 export default defineConfig({
@@ -89,14 +99,16 @@ export default defineConfig({
     ? undefined
     : [
         {
-          command: `"${pythonBin}" -m uvicorn alberto.main:app --host 127.0.0.1 --port 8000`,
-          url: "http://127.0.0.1:8000/health",
-          reuseExistingServer: true,
-          timeout: 40000,
+          command: `"${pythonBin}" -m uvicorn alberto.main:app --host 127.0.0.1 --port ${testBackendPort}`,
+          url: `http://127.0.0.1:${testBackendPort}/health`,
+          reuseExistingServer: false,
+          timeout: 45000,
           cwd: repoRoot,
           env: {
             ...process.env,
             PYTHONPATH: path.join(repoRoot, "backend"),
+            PORT: testBackendPort,
+            ALBERTO_PORT: testBackendPort,
             ALBERTO_DATA_DIR: testDataDir,
             FORGE_DATA_DIR: testDataDir,
             ALBERTO_DATABASE_URL: `sqlite+aiosqlite:///${path.join(testDataDir, "db/alberto.db").replace(/\\/g, "/")}`,
@@ -111,19 +123,23 @@ export default defineConfig({
             ALBERTO_BOOTSTRAP_ADMIN_PASSWORD: "password",
             FORGE_BOOTSTRAP_ADMIN_PASSWORD: "password",
             ALBERTO_SEED_DEMO: "true",
+            ALBERTO_CORS_ORIGINS: `http://localhost:${testPort},http://127.0.0.1:${testPort},http://localhost:3000,http://127.0.0.1:3000`,
+            FORGE_CORS_ORIGINS: `http://localhost:${testPort},http://127.0.0.1:${testPort},http://localhost:3000,http://127.0.0.1:3000`,
           },
         },
         {
-          command: "npm run dev",
-          url: "http://127.0.0.1:3000",
-          reuseExistingServer: true,
-          timeout: 40000,
+          command: `"${nextBin}" dev -p ${testPort}`,
+          url: `http://127.0.0.1:${testPort}`,
+          reuseExistingServer: false,
+          timeout: 60000,
           cwd: path.join(repoRoot, "frontend"),
           env: {
             ...process.env,
-            PORT: "3000",
-            ALBERTO_API_URL: "http://127.0.0.1:8000",
-            FORGE_API_URL: "http://127.0.0.1:8000",
+            PORT: testPort,
+            ALBERTO_API_URL: `http://127.0.0.1:${testBackendPort}`,
+            FORGE_API_URL: `http://127.0.0.1:${testBackendPort}`,
+            NEXT_PUBLIC_ALBERTO_API_URL: `http://127.0.0.1:${testBackendPort}`,
+            NEXT_PUBLIC_FORGE_API_URL: `http://127.0.0.1:${testBackendPort}`,
           },
         },
       ],

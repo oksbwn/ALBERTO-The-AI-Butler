@@ -3,7 +3,8 @@ import { test, expect } from "../fixtures";
 test.describe("Alberto Authentication & Session Management E2E", () => {
   test("maintains authenticated session state in local storage", async ({ page, auth }) => {
     // Obtain a valid signed access token from backend login using admin/password
-    const loginRes = await page.request.post("http://127.0.0.1:8000/v1/auth/login", {
+    const apiBase = process.env.ALBERTO_API_URL || "http://127.0.0.1:8005";
+    const loginRes = await page.request.post(`${apiBase}/v1/auth/login`, {
       data: { email: "admin", password: "password" },
     });
     expect(loginRes.ok()).toBe(true);
@@ -21,7 +22,8 @@ test.describe("Alberto Authentication & Session Management E2E", () => {
   });
 
   test("renders account menu and displays user role", async ({ page, auth }) => {
-    const loginRes = await page.request.post("http://127.0.0.1:8000/v1/auth/login", {
+    const apiBase = process.env.ALBERTO_API_URL || "http://127.0.0.1:8005";
+    const loginRes = await page.request.post(`${apiBase}/v1/auth/login`, {
       data: { email: "admin", password: "password" },
     });
     if (loginRes.ok()) {
@@ -46,7 +48,8 @@ test.describe("Alberto Authentication & Session Management E2E", () => {
   });
 
   test("clears authentication tokens and resets session upon sign out", async ({ page, auth }) => {
-    const loginRes = await page.request.post("http://127.0.0.1:8000/v1/auth/login", {
+    const apiBase = process.env.ALBERTO_API_URL || "http://127.0.0.1:8005";
+    const loginRes = await page.request.post(`${apiBase}/v1/auth/login`, {
       data: { email: "admin", password: "password" },
     });
     expect(loginRes.ok()).toBe(true);
