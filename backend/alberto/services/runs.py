@@ -396,8 +396,11 @@ def _internal_message_nodes(nodes: list) -> set[str]:
         if not isinstance(n, dict) or not n.get("id"):
             continue  # a null id would match tokens with no `langgraph_node` and drop answers
         ntype = n.get("type")
-        structured_llm = ntype == "llm" and ((n.get("config") or {}).get("response_format") or {}).get("mode") == "structured"
-        if ntype in ("classifier", "router", "start", "end") or structured_llm:
+        cfg = n.get("config") or {}
+        rf = cfg.get("response_format") or {}
+        structured_llm = ntype == "llm" and rf.get("mode") == "structured"
+        structured_agent = ntype in ("agent", "deep_agent") and (rf.get("mode") == "structured" or bool(cfg.get("output_key")))
+        if ntype in ("classifier", "router", "start", "end") or structured_llm or structured_agent:
             out.add(n["id"])
     return out
 
@@ -492,11 +495,6 @@ class RunService:
             session.add(thread)
             await session.flush()
 
-        # Bind the end user (identity) to the thread so the whole conversation acts for them.
-        if end_user:
-            thread.user_external_id = str(end_user.get("id") or "") or thread.user_external_id
-            thread.meta = {**(thread.meta or {}), "end_user": end_user}
-
         run = Run(
             tenant_id=tenant_id,
             project_id=project_id,
@@ -507,6 +505,33 @@ class RunService:
             source=source,
         )
         session.add(run)
+        await session.flush()
+
+        # Snapshot the workflow executable at run creation so mid-stream workflow edits do not shift running topology.
+        # Store both thread-level and per-run snapshots for run isolation across concurrent/interrupted executions.
+        import copy
+
+        immutable_snapshot = copy.deepcopy(wf.executable) if isinstance(wf.executable, dict) else wf.executable
+        meta = dict(thread.meta or {})
+        run_snapshot_keys = [k for k in meta if k.startswith("run_snapshot_")]
+        if len(run_snapshot_keys) > 20:
+            active_run_ids = set((await session.execute(
+                select(Run.id).where(
+                    Run.thread_id == thread.id,
+                    Run.status.in_(("queued", "running", "interrupted")),
+                )
+            )).scalars())
+            for old_key in run_snapshot_keys[:-15]:
+                old_run_id = old_key.removeprefix("run_snapshot_")
+                if old_run_id not in active_run_ids:
+                    meta.pop(old_key, None)
+        meta["workflow_snapshot"] = immutable_snapshot
+        meta[f"run_snapshot_{run.id}"] = immutable_snapshot
+        thread.meta = meta
+        if end_user:
+            thread.user_external_id = str(end_user.get("id") or "") or thread.user_external_id
+            thread.meta["end_user"] = end_user
+
         await session.commit()
         await session.refresh(run)
         return run
@@ -689,8 +714,13 @@ class RunService:
                         run_context=run_context,
                     )
                     display_token = set_tool_display_names(ctx.tool_display_names)
+                    wf_executable = (
+                        (thread.meta or {}).get(f"run_snapshot_{run.id}")
+                        or (thread.meta or {}).get("workflow_snapshot")
+                        or wf.executable
+                    )
                     try:
-                        graph = compile_workflow(wf.executable, ctx)
+                        graph = compile_workflow(wf_executable, ctx)
                     except Exception as e:  # noqa: BLE001 - compile failure -> error frame
                         log.warning("compile error for run %s: %s", run.id, e)
                         await self._finalize_error(session, run, tracer, f"compile error: {e}")
@@ -932,7 +962,12 @@ class RunService:
 
                 checkpointer = InMemorySaver()
             tracer = ForgeTracer()
-            config = {"configurable": {"thread_id": thread.lg_thread_id}, "callbacks": [tracer], "recursion_limit": _recursion_limit(wf.executable)}
+            wf_executable = (
+                (thread.meta or {}).get(f"run_snapshot_{run.id}")
+                or (thread.meta or {}).get("workflow_snapshot")
+                or wf.executable
+            )
+            config = {"configurable": {"thread_id": thread.lg_thread_id}, "callbacks": [tracer], "recursion_limit": _recursion_limit(wf_executable)}
             tlock = await thread_locks.acquire_cm(thread.lg_thread_id)
             try:
                 async with tenant_concurrency.slot(tenant_id, settings.max_concurrent_runs_per_tenant), tlock:
@@ -945,7 +980,7 @@ class RunService:
                         end_user=(thread.meta or {}).get("end_user"),
                         run_context=run_context,
                     )
-                    graph = compile_workflow(wf.executable, ctx)
+                    graph = compile_workflow(wf_executable, ctx)
                     # Drive with the custom stream (not ainvoke) so `component` frames emitted by
                     # widget-tools are captured for channels that consume run_to_completion
                     # (webhook/schedule/email/evals) - ainvoke discards custom-stream items
@@ -1074,7 +1109,12 @@ class RunService:
             thread = (await session.execute(select(Thread).where(Thread.id == run.thread_id))).scalar_one()
 
             tracer = ForgeTracer()
-            config = {"configurable": {"thread_id": thread.lg_thread_id}, "callbacks": [tracer], "recursion_limit": _recursion_limit(wf.executable)}
+            wf_executable = (
+                (thread.meta or {}).get(f"run_snapshot_{run.id}")
+                or (thread.meta or {}).get("workflow_snapshot")
+                or wf.executable
+            )
+            config = {"configurable": {"thread_id": thread.lg_thread_id}, "callbacks": [tracer], "recursion_limit": _recursion_limit(wf_executable)}
             tlock = await thread_locks.acquire_cm(thread.lg_thread_id)
             try:
                 async with tenant_concurrency.slot(tenant_id, settings.max_concurrent_runs_per_tenant), tlock:
@@ -1086,7 +1126,7 @@ class RunService:
                         end_user=(thread.meta or {}).get("end_user"),
                         run_context=run_context,
                     )
-                    graph = compile_workflow(wf.executable, ctx)
+                    graph = compile_workflow(wf_executable, ctx)
                     value = await _expand_hitl_decisions(graph, config, value)
                     wall_clock = RUN_WALL_CLOCK_TIMEOUT_SECONDS
                     try:
@@ -1318,6 +1358,32 @@ class RunService:
                 ended_at=now,
             )
         )
+        if status == "interrupted" and snapshot is not None:
+            tasks = getattr(snapshot, "tasks", []) or []
+            delay_val = None
+            for t in tasks:
+                for int_item in getattr(t, "interrupts", []) or []:
+                    val = getattr(int_item, "value", int_item)
+                    if isinstance(val, dict) and val.get("type") == "delay":
+                        delay_val = val
+                        break
+                if delay_val is not None:
+                    break
+            th = await session.get(Thread, run.thread_id)
+            if th is not None:
+                th_meta = dict(th.meta or {})
+                if delay_val is not None:
+                    th_meta[f"delay_continuation_{run.id}"] = delay_val
+                else:
+                    th_meta.pop(f"delay_continuation_{run.id}", None)
+                th.meta = th_meta
+        elif status in ("done", "canceled", "error"):
+            th = await session.get(Thread, run.thread_id)
+            if th is not None and th.meta and f"delay_continuation_{run.id}" in th.meta:
+                th_meta = dict(th.meta)
+                th_meta.pop(f"delay_continuation_{run.id}", None)
+                th.meta = th_meta
+
         res = await session.execute(stmt)
         await session.commit()
         rowcount = int(getattr(res, "rowcount", 0) or 0)
@@ -1428,6 +1494,23 @@ class RunService:
                 run.ended_at = now
         except Exception:  # noqa: BLE001
             log.exception("failed to commit error state for run %s", run.id)
+
+        # Autonomous failure diagnosis trigger
+        try:
+            import asyncio
+
+            from alberto.services.automation_manager import AutomationManagerService
+            asyncio.create_task(
+                AutomationManagerService.on_run_failure(
+                    tenant_id=run.tenant_id,
+                    project_id=run.project_id or "",
+                    workflow_id=run.workflow_id or "",
+                    run_id=run.id,
+                    error=error,
+                )
+            )
+        except Exception as e:
+            log.debug("Could not spawn autonomous failure diagnosis: %s", e)
 
         try:
             from alberto.tracing import otel
@@ -1606,10 +1689,11 @@ class RunService:
                     checkpointer=self.checkpointer, store=self.store,
                     end_user=(thread.meta or {}).get("end_user"), run_context=None,
                 )
-                graph = compile_workflow(wf.executable, ctx)
+                wf_executable = (thread.meta or {}).get("workflow_snapshot") or wf.executable
+                graph = compile_workflow(wf_executable, ctx)
                 config = {
                     "configurable": {"thread_id": thread.lg_thread_id},
-                    "recursion_limit": _recursion_limit(wf.executable),
+                    "recursion_limit": _recursion_limit(wf_executable),
                 }
                 snapshot = await graph.aget_state(config)
                 interrupts = [

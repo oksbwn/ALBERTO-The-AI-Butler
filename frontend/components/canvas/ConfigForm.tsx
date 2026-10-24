@@ -4,8 +4,16 @@
    (workflows.tsx) and the middleware stack (AgentConfig.tsx). A form merges only its own
    keys into the config, so unknown/advanced keys are preserved. */
 import { Field, Toggle } from "../primitives";
+import { Icon } from "../icons";
 import { useModels } from "@/lib/models";
 import { useEffect, useState } from "react";
+
+export interface UpstreamSource {
+  nodeId: string;
+  nodeName: string;
+  nodeType?: string;
+  keys: string[];
+}
 
 export type FieldSpec = {
   key: string;
@@ -112,7 +120,126 @@ function CsvInput({ value, placeholder, onChange }: { value: any; placeholder?: 
   );
 }
 
-export function FieldsForm({ specs, config, onPatch, dynamic }: { specs: FieldSpec[]; config: Record<string, any>; onPatch: (patch: Record<string, any>) => void; dynamic?: Record<string, string[]> }) {
+export function VariablePicker({
+  sources,
+  onSelect,
+}: {
+  sources?: UpstreamSource[];
+  onSelect: (path: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+
+  if (!sources || sources.length === 0) return null;
+
+  const needle = search.trim().toLowerCase();
+  const filtered = sources
+    .map((s) => ({
+      ...s,
+      keys: s.keys.filter((k) => !needle || k.toLowerCase().includes(needle) || s.nodeName.toLowerCase().includes(needle)),
+    }))
+    .filter((s) => s.keys.length > 0);
+
+  return (
+    <div style={{ position: "relative", display: "inline-block" }}>
+      <button
+        type="button"
+        className="btn btn-xs btn-ghost"
+        title="Pick upstream output variable"
+        onClick={() => setOpen(!open)}
+        style={{
+          height: 24,
+          padding: "0 6px",
+          fontSize: 11,
+          fontFamily: "var(--font-mono)",
+          color: "var(--accent)",
+          borderColor: "var(--line)",
+          background: "var(--bg-3)",
+        }}
+      >
+        {"{x}"}
+      </button>
+      {open && (
+        <div
+          className="card"
+          style={{
+            position: "absolute",
+            right: 0,
+            top: 28,
+            width: 250,
+            zIndex: 100,
+            padding: 8,
+            boxShadow: "var(--sh-pop)",
+            background: "var(--bg-card)",
+          }}
+        >
+          <div className="row spread" style={{ marginBottom: 6 }}>
+            <span className="t-micro">Upstream Variables</span>
+            <button type="button" className="iconbtn" style={{ width: 18, height: 18 }} onClick={() => setOpen(false)}>
+              <Icon name="x" size={12} />
+            </button>
+          </div>
+          <input
+            className="input"
+            style={{ height: 26, fontSize: 11, marginBottom: 6 }}
+            placeholder="Search variables…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            autoFocus
+          />
+          <div className="scroll-y" style={{ maxHeight: 180 }}>
+            {filtered.map((s) => (
+              <div key={s.nodeId} style={{ marginBottom: 6 }}>
+                <div className="mono-sm fg-2" style={{ fontSize: 10.5, fontWeight: 600 }}>{s.nodeName} ({s.nodeId})</div>
+                <div className="col gap1" style={{ marginTop: 2 }}>
+                  {s.keys.map((k) => (
+                    <button
+                      key={k}
+                      type="button"
+                      className="row spread"
+                      onClick={() => {
+                        onSelect(k);
+                        setOpen(false);
+                      }}
+                      style={{
+                        padding: "3px 6px",
+                        borderRadius: 4,
+                        border: "none",
+                        background: "var(--bg-3)",
+                        cursor: "pointer",
+                        textAlign: "left",
+                        fontSize: 11,
+                        fontFamily: "var(--font-mono)",
+                        color: "var(--fg-1)",
+                      }}
+                    >
+                      <span>{k}</span>
+                      <span className="fg-2" style={{ fontSize: 9 }}>select</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function FieldsForm({
+  specs,
+  config,
+  onPatch,
+  dynamic,
+  upstreamSources,
+}: {
+  specs: FieldSpec[];
+  config: Record<string, any>;
+  onPatch: (patch: Record<string, any>) => void;
+  dynamic?: Record<string, string[]>;
+  upstreamSources?: UpstreamSource[];
+}) {
   const read = (f: FieldSpec) => {
     const v = config[f.key];
     return f.format ? f.format(v) : v;
@@ -165,9 +292,37 @@ export function FieldsForm({ specs, config, onPatch, dynamic }: { specs: FieldSp
             ) : f.widget === "csv" ? (
               <CsvInput value={v} placeholder={f.placeholder} onChange={(items) => write(f, items)} />
             ) : f.widget === "textarea" ? (
-              <textarea className="textarea mono" rows={3} value={v ?? ""} placeholder={f.placeholder} onChange={(e) => write(f, e.target.value)} />
+              <div className="col gap1" style={{ width: "100%" }}>
+                {upstreamSources && upstreamSources.length > 0 && (
+                  <div className="row spread" style={{ marginBottom: 2 }}>
+                    <span className="fg-2" style={{ fontSize: 10.5 }}>Insert variable</span>
+                    <VariablePicker
+                      sources={upstreamSources}
+                      onSelect={(path) => {
+                        const current = v ?? "";
+                        write(f, current ? `${current} {{${path}}}` : `{{${path}}}`);
+                      }}
+                    />
+                  </div>
+                )}
+                <textarea className="textarea mono" rows={3} value={v ?? ""} placeholder={f.placeholder} onChange={(e) => write(f, e.target.value)} />
+              </div>
             ) : (
-              <input className="input mono" value={v ?? ""} placeholder={f.placeholder} onChange={(e) => write(f, e.target.value || undefined)} />
+              <div className="row gap1" style={{ width: "100%", alignItems: "center" }}>
+                <input
+                  className="input mono"
+                  style={{ flex: 1 }}
+                  value={v ?? ""}
+                  placeholder={f.placeholder}
+                  onChange={(e) => write(f, e.target.value || undefined)}
+                />
+                {upstreamSources && upstreamSources.length > 0 && (
+                  <VariablePicker
+                    sources={upstreamSources}
+                    onSelect={(path) => write(f, path)}
+                  />
+                )}
+              </div>
             )}
           </Field>
         );

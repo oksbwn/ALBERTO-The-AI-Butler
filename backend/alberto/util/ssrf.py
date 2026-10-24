@@ -77,10 +77,22 @@ class EgressPolicy:
 def _host_matches(host: str, patterns: tuple[str, ...]) -> bool:
     host = (host or "").lower().rstrip(".")
     for p in patterns:
-        p = (p or "").lower().lstrip("*.").rstrip(".")
-        if not p:
+        raw_p = (p or "").strip()
+        if not raw_p:
             continue
-        if host == p or host.endswith("." + p):
+        try:
+            target_ip = ipaddress.ip_address(host)
+            net = ipaddress.ip_network(raw_p, strict=False)
+            if target_ip in net:
+                return True
+        except ValueError:
+            pass
+        if raw_p.endswith("*") and host.startswith(raw_p[:-1]):
+            return True
+        clean_p = raw_p.lower().lstrip("*.").rstrip(".")
+        if not clean_p:
+            continue
+        if host == clean_p or host.endswith("." + clean_p):
             return True
     return False
 
@@ -120,7 +132,7 @@ async def _resolve_ips(host: str, port: int) -> set[str]:
         infos = await loop.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as e:
         raise EgressBlocked(f"could not resolve host {host!r}: {e}") from e
-    return {ai[4][0] for ai in infos}
+    return {str(ai[4][0]) for ai in infos}
 
 
 async def validate_url(url: str, policy: EgressPolicy | None = None) -> str:

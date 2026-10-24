@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import operator as op
 from datetime import UTC, datetime
+from typing import Any
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
@@ -14,20 +15,94 @@ from pydantic import BaseModel, Field
 # automatically (on project create + whenever the tools list is read), are protected from
 # deletion, and are never carried in import/export bundles - so importing a project neither
 # duplicates nor loses them. `builtin` is both the tool name the model calls and the config key.
-BUILTIN_DEFAULTS: list[dict[str, str]] = [
-    {"builtin": "current_time", "description": "Return the current date and time."},
-    {"builtin": "calculator", "description": "Evaluate an arithmetic expression safely."},
-    {"builtin": "web_fetch", "description": "Fetch the contents of a URL."},
-    {"builtin": "web_search", "description": "Search the web (requires a configured search-provider key)."},
-    {"builtin": "knowledge_search", "description": "Search this project's knowledge base (docs + Q&A)."},
-    {"builtin": "remember", "description": "Store a durable memory for later recall."},
-    {"builtin": "recall", "description": "Recall stored memories relevant to a query."},
+BUILTIN_DEFAULTS: list[dict[str, Any]] = [
+    {
+        "builtin": "current_time",
+        "description": "Return the current date and time.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tz": {"type": "string", "description": "Timezone name (default UTC)", "default": "UTC"}
+            },
+        },
+    },
+    {
+        "builtin": "calculator",
+        "description": "Evaluate an arithmetic expression safely.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "Arithmetic expression, e.g. '2 * (3 + 4)'"}
+            },
+            "required": ["expression"],
+        },
+    },
+    {
+        "builtin": "web_fetch",
+        "description": "Fetch the contents of a URL.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch (e.g. 'https://example.com')"}
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "builtin": "web_search",
+        "description": "Search the web (requires a configured search-provider key).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"}
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "builtin": "knowledge_search",
+        "description": "Search this project's knowledge base (docs + Q&A).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query to find in project documents and FAQs"}
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "builtin": "remember",
+        "description": "Store a durable memory or Knowledge Graph entity for later recall.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Fact or content to remember"},
+                "key": {"type": "string", "description": "Optional memory label or entity name"},
+                "value": {"type": "string", "description": "Optional memory content if key/value format is used"},
+                "target": {"type": "string", "description": "Storage destination: 'memory' or 'graph'", "default": "memory"},
+            },
+        },
+    },
+    {
+        "builtin": "recall",
+        "description": "Recall stored memories and Knowledge Graph entities relevant to a query.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Query to search stored memories and graph"}
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 # Safe arithmetic for the calculator (no names, no calls).
-_OPS = {
+_BIN_OPS: dict[type[ast.operator], Any] = {
     ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv,
-    ast.Pow: op.pow, ast.Mod: op.mod, ast.USub: op.neg, ast.FloorDiv: op.floordiv,
+    ast.Pow: op.pow, ast.Mod: op.mod, ast.FloorDiv: op.floordiv,
+}
+_UNARY_OPS: dict[type[ast.unaryop], Any] = {
+    ast.USub: op.neg,
 }
 
 # Bound exponentiation so an expression like `9**9**9` can't build a multi-gigabyte int and
@@ -39,13 +114,13 @@ _MAX_POW_BASE = 1_000_000
 def _calc(node: ast.AST) -> float:
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return node.value
-    if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
         left, right = _calc(node.left), _calc(node.right)
         if isinstance(node.op, ast.Pow) and (abs(right) > _MAX_POW_EXPONENT or abs(left) > _MAX_POW_BASE):
             raise ValueError("exponent too large")
-        return _OPS[type(node.op)](left, right)
-    if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
-        return _OPS[type(node.op)](_calc(node.operand))
+        return _BIN_OPS[type(node.op)](left, right)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
+        return _UNARY_OPS[type(node.op)](_calc(node.operand))
     raise ValueError("Unsupported expression")
 
 
@@ -154,37 +229,102 @@ def build_builtin_tool(cfg: dict, ctx):
 
     if builtin == "remember":
         class _RememberArgs(BaseModel):
-            text: str = Field(description="A concise fact worth remembering for future conversations (e.g. a preference, a decision, an account detail).")
+            text: str | None = Field(default=None, description="A concise fact worth remembering for future conversations (e.g. a preference, a decision, an account detail).")
+            key: str | None = Field(default=None, description="Optional memory label or entity name.")
+            value: str | None = Field(default=None, description="Optional memory content if key/value format is used.")
+            target: str = Field(default="memory", description="Storage destination: 'memory' for general facts, or 'graph' for entities/relationships.")
 
-        async def remember_tool(text: str) -> str:
+        async def remember_tool(
+            text: str | None = None,
+            key: str | None = None,
+            value: str | None = None,
+            target: str = "memory",
+        ) -> str:
+            import re
+
             from alberto.db.base import SessionLocal
-            from alberto.services.memory import MemoryService
+            from alberto.services.memory_curator import SENSITIVE_PATTERNS
+            from alberto.services.unified_memory import UnifiedMemoryManager
+
+            content = (text or "").strip()
+            if not content:
+                if key and value:
+                    content = f"{key}: {value}"
+                elif value:
+                    content = value.strip()
+                elif key:
+                    content = key.strip()
+
+            if not content:
+                return "Error: No text or content provided to remember."
+
+            for pat in SENSITIVE_PATTERNS:
+                if re.search(pat, content):
+                    return "Error: Content contains sensitive credentials (passwords, tokens, or private keys) and cannot be stored."
+
+            target_clean = "graph" if (target or "").strip().lower() in ("graph", "ladybug", "ladybug_graph") else "memory"
 
             async with SessionLocal() as s:
-                await MemoryService.remember(s, ctx.tenant_id, ctx.project_id, text, scope=_memory_scope(ctx))
+                res = await UnifiedMemoryManager.remember(
+                    session=s,
+                    tenant_id=ctx.tenant_id,
+                    project_id=ctx.project_id,
+                    text=content,
+                    target=target_clean,
+                    scope=_memory_scope(ctx),
+                    entity_name=key,
+                    provenance="agent_tool",
+                )
+
+            if target_clean == "graph":
+                return f"Saved entity '{res.get('name', 'node')}' to Knowledge Graph."
             return "Saved to long-term memory."
 
         return StructuredTool.from_function(
             coroutine=remember_tool, name=name,
-            description=desc or "Save a fact to long-term memory so it persists across conversations.",
+            description=desc or "Save a fact to long-term memory or Knowledge Graph so it persists across conversations.",
             args_schema=_RememberArgs,
         )
 
     if builtin == "recall":
         class _RecallArgs(BaseModel):
-            query: str = Field(description="What to look up in long-term memory.")
+            query: str = Field(description="What to look up in long-term memory and Knowledge Graph.")
 
         async def recall_tool(query: str) -> str:
             from alberto.db.base import SessionLocal
-            from alberto.services.memory import MemoryService
+            from alberto.services.unified_memory import UnifiedMemoryManager
 
-            async with SessionLocal() as s:
-                mems = await MemoryService.recall(s, ctx.tenant_id, ctx.project_id, query, scope=_memory_scope(ctx), top_k=5)
-            return "\n".join(f"- {m}" for m in mems) if mems else "No relevant memories found."
+            try:
+                async with SessionLocal() as s:
+                    records = await UnifiedMemoryManager.recall(
+                        session=s,
+                        tenant_id=ctx.tenant_id,
+                        project_id=ctx.project_id,
+                        query=query,
+                        sources=["memory", "graph", "markdown"],
+                        scope=_memory_scope(ctx),
+                        top_k=5,
+                    )
+                if not records:
+                    return "No relevant memories or knowledge graph entities found."
+                formatted = []
+                for r in records:
+                    if r.source in ("ladybug_graph", "graph"):
+                        formatted.append(f"- [Knowledge Graph] {r.content}")
+                    elif r.source in ("markdown_memory", "markdown"):
+                        formatted.append(f"- [Markdown] {r.content}")
+                    else:
+                        formatted.append(f"- {r.content}")
+                return "\n".join(formatted)
+            except Exception:
+                from alberto.services.memory import MemoryService
+                async with SessionLocal() as s:
+                    mems = await MemoryService.recall(s, ctx.tenant_id, ctx.project_id, query, scope=_memory_scope(ctx), top_k=5)
+                return "\n".join(f"- {m}" for m in mems) if mems else "No relevant memories found."
 
         return StructuredTool.from_function(
             coroutine=recall_tool, name=name,
-            description=desc or "Recall previously remembered facts from long-term memory.",
+            description=desc or "Recall previously remembered facts and Knowledge Graph entities.",
             args_schema=_RecallArgs,
         )
 

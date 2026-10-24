@@ -26,6 +26,7 @@ from alberto.routers import (
     audit,
     auth,
     auth_providers,
+    automate,
     channels,
     components,
     connections,
@@ -47,6 +48,7 @@ from alberto.routers import (
     runs,
     secrets,
     stats,
+    tool_manager,
     tool_sets,
     tools,
     traces,
@@ -122,6 +124,7 @@ async def _scheduler_loop(app: FastAPI) -> None:
     """Fire due `schedule` triggers once a minute. Single-worker in-process scheduler."""
     from alberto.services.dispatch import (
         run_due_app_events,
+        run_due_delays,
         run_due_schedules,
         run_due_source_syncs,
     )
@@ -138,10 +141,34 @@ async def _scheduler_loop(app: FastAPI) -> None:
             await run_due_schedules(run_service)
             await run_due_app_events(run_service)
             await run_due_source_syncs()
+            await run_due_delays(run_service)
         except asyncio.CancelledError:
             break
         except Exception:  # noqa: BLE001 - keep the scheduler alive across failures
             log.exception("scheduler tick failed")
+
+
+async def _channel_poll_loop(app: FastAPI) -> None:
+    """Poll inbound channels (e.g. Telegram in polling mode) using long-polling for instant pickup."""
+    from alberto.services.channel_gateway import telegram_poll_all
+    from alberto.services.runs import RunService
+
+    log = logging.getLogger("forge.channels.poller")
+    run_service = RunService(
+        checkpointer=getattr(app.state, "checkpointer", None),
+        store=getattr(app.state, "store", None),
+    )
+    while True:
+        try:
+            handled = await telegram_poll_all(run_service=run_service, timeout=25)
+            if handled == 0:
+                await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            break
+        except Exception:  # noqa: BLE001
+            log.exception("channel poller tick failed")
+            await asyncio.sleep(3)
+
 
 
 def _preload_heavy_modules() -> None:
@@ -210,6 +237,27 @@ async def lifespan(app: FastAPI):
         recovered = await LearningCoordinator.recover_pending_events()
         if recovered:
             logging.getLogger("forge.startup").info("Startup sweep recovered %d pending learning events", recovered)
+    # Immediate startup sweep for pending/interrupted tool discovery/analysis jobs
+    with contextlib.suppress(Exception):
+        from alberto.services.tool_manager import ToolManagerService
+
+        recovered_tools = await ToolManagerService.recover_pending_analysis_jobs()
+        if recovered_tools:
+            logging.getLogger("forge.startup").info("Startup sweep recovered %d tool analysis jobs", recovered_tools)
+    # Immediate startup sweep for pending/stuck channel events (Integrations v3)
+    with contextlib.suppress(Exception):
+        from alberto.services.channel_gateway import ChannelGatewayService
+
+        recovered_events = await ChannelGatewayService.recover_stale_events()
+        if recovered_events:
+            logging.getLogger("forge.startup").info("Startup sweep recovered %d stale channel events", recovered_events)
+    # Immediate startup sweep for orphaned Knowledge Graph entities (Integrations & Tools cleanup)
+    with contextlib.suppress(Exception):
+        from alberto.services.graph_manager import GraphManagerService
+
+        purged_graph = await GraphManagerService.sweep_orphaned_entities()
+        if purged_graph:
+            logging.getLogger("forge.startup").info("Startup sweep purged %d orphaned graph entities", purged_graph)
     if settings.otel_enabled:
         from alberto.tracing import otel
 
@@ -220,6 +268,7 @@ async def lifespan(app: FastAPI):
     # so you can ship one image everywhere (audit P3).
     if settings.enable_scheduler and settings.scheduler_leader:
         bg_tasks.append(asyncio.create_task(_scheduler_loop(app), name="forge-scheduler"))
+        bg_tasks.append(asyncio.create_task(_channel_poll_loop(app), name="forge-channel-poller"))
     # The reaper is safe to run everywhere (idempotent), but one instance is enough.
     if settings.scheduler_leader:
         bg_tasks.append(asyncio.create_task(_reaper_loop(app), name="forge-reaper"))
@@ -293,7 +342,8 @@ def create_app() -> FastAPI:
         triggers_router.router, channels.router, channels.public, handoff.router, evals.router,
         mcp_clients.router, versions.router,
         graph.router, memory.router,
-        connectors.router,
+        connectors.router, tool_manager.router, tool_manager.integration_router,
+        automate.router, automate.api_router,
     ):
         app.include_router(r)
     return app

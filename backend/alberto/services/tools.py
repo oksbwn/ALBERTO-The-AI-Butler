@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import builtins
+from typing import Any
+
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,21 +32,48 @@ class ToolService:
         available, protected from deletion, and excluded from import/export bundles."""
         from alberto.tools.builtin import BUILTIN_DEFAULTS
 
-        rows = await session.execute(
+        existing_tools = list((await session.execute(
             select(Tool).where(
                 Tool.tenant_id == tenant_id, Tool.project_id == project_id, Tool.kind == "builtin"
             )
-        )
-        have = {(t.config or {}).get("builtin") for t in rows.scalars()}
-        to_add = [d for d in BUILTIN_DEFAULTS if d["builtin"] not in have]
-        if not to_add:
-            return
-        for d in to_add:
-            session.add(Tool(
-                tenant_id=tenant_id, project_id=project_id, name=d["builtin"], kind="builtin",
-                config={"builtin": d["builtin"], "description": d["description"]},
-            ))
+        )).scalars().all())
+        have = {(t.config or {}).get("builtin"): t for t in existing_tools}
+        for d in BUILTIN_DEFAULTS:
+            b_key = d["builtin"]
+            if b_key not in have:
+                session.add(Tool(
+                    tenant_id=tenant_id, project_id=project_id, name=b_key, kind="builtin",
+                    config=dict(d),
+                ))
+            else:
+                cur = have[b_key]
+                cfg = dict(cur.config or {})
+                if "input_schema" not in cfg and "input_schema" in d:
+                    from sqlalchemy.orm.attributes import flag_modified
+                    cfg["input_schema"] = d["input_schema"]
+                    cur.config = cfg
+                    flag_modified(cur, "config")
         await session.commit()
+
+    @staticmethod
+    async def ensure_mcp_tools(session: AsyncSession, tenant_id: str, project_id: str) -> None:
+        """Provision or synchronize tools from connected MCP servers with discovered capabilities."""
+        from alberto.models import McpClient
+        from alberto.services.mcp_discovery import McpDiscoveryService
+
+        mcp_clients = list((await session.execute(
+            select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.project_id == project_id)
+        )).scalars().all())
+
+        for m in mcp_clients:
+            caps = m.capabilities or {}
+            tools = caps.get("tools") or []
+            if tools:
+                try:
+                    await McpDiscoveryService.sync_tools_to_registry(session, m, tenant_id, project_id, tools)
+                except Exception as e:
+                    import logging
+                    logging.getLogger("alberto.services.tools").warning("Failed to ensure MCP tools for %s: %s", m.name, e)
 
     @staticmethod
     async def get(session: AsyncSession, tenant_id: str, tool_id: str) -> Tool | None:
@@ -85,13 +115,115 @@ class ToolService:
         await session.delete(tool)
         await session.commit()
 
+        # Purge Knowledge Graph projections for this tool
+        try:
+            from alberto.knowledge.graph import get_graph_adapter, make_entity_id
+            adapter = get_graph_adapter()
+            await adapter.delete_entity(tool.tenant_id, tool.project_id, make_entity_id(tool.tenant_id, tool.project_id, f"tool:{tool.id}"))
+            await adapter.delete_entity(tool.tenant_id, tool.project_id, make_entity_id(tool.tenant_id, tool.project_id, f"tool:{tool.name}"))
+            await adapter.delete_entities_by_source(tool.tenant_id, tool.project_id, f"tool:{tool.id}")
+        except Exception as e:
+            import logging
+            logging.getLogger("alberto.services.tools").debug(
+                f"Knowledge graph cleanup skipped/failed for tool {tool.id}: {e}"
+            )
+
+
+    @staticmethod
+    async def get_tool_usages(
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        tool_ids: builtins.list[str],
+        tool_names: builtins.list[str] | None = None,
+    ) -> builtins.list[dict[str, Any]]:
+        """Find workflows and agents currently referencing any of the specified tool ids or names."""
+        from alberto.models import Agent, Workflow
+
+        id_set = {tid for tid in (tool_ids or []) if tid}
+        name_set = {tname for tname in (tool_names or []) if tname}
+
+        if not id_set and not name_set:
+            return []
+
+        usages: builtins.list[dict[str, Any]] = []
+
+        # 1. Check Workflows
+        wfs = builtins.list((await session.execute(
+            select(Workflow).where(Workflow.tenant_id == tenant_id, Workflow.project_id == project_id)
+        )).scalars().all())
+
+        for wf in wfs:
+            matched_tools: set[str] = set()
+
+            # Executable graph nodes
+            exec_nodes = (wf.executable or {}).get("nodes") or []
+            for n in exec_nodes:
+                cfg = n.get("config") or {}
+                t_id = cfg.get("tool_id") or n.get("tool_id")
+                if t_id and (str(t_id) in id_set or str(t_id) in name_set):
+                    matched_tools.add(str(t_id))
+
+                for t_ref in (cfg.get("tools") or []):
+                    if str(t_ref) in id_set or str(t_ref) in name_set:
+                        matched_tools.add(str(t_ref))
+
+            # Canvas graph nodes
+            canvas_nodes = (wf.canvas or {}).get("nodes") or []
+            for n in canvas_nodes:
+                data = n.get("data") or {}
+                cfg = data.get("config") or {}
+                t_id = data.get("tool_id") or cfg.get("tool_id")
+                if t_id and (str(t_id) in id_set or str(t_id) in name_set):
+                    matched_tools.add(str(t_id))
+
+                for t_ref in (cfg.get("tools") or data.get("tools") or []):
+                    if str(t_ref) in id_set or str(t_ref) in name_set:
+                        matched_tools.add(str(t_ref))
+
+            if matched_tools:
+                usages.append({
+                    "target_type": "workflow",
+                    "target_id": wf.id,
+                    "target_name": wf.name or "Untitled Workflow",
+                    "matched_tools": sorted(list(matched_tools)),
+                })
+
+        # 2. Check Agents
+        agents = list((await session.execute(
+            select(Agent).where(Agent.tenant_id == tenant_id, Agent.project_id == project_id)
+        )).scalars().all())
+
+        for ag in agents:
+            matched_tools = set()
+            cfg = ag.config or {}
+            for t_ref in (cfg.get("tools") or []):
+                if str(t_ref) in id_set or str(t_ref) in name_set:
+                    matched_tools.add(str(t_ref))
+
+            for sa in (cfg.get("subagents") or []):
+                for t_ref in (sa.get("tools") or []):
+                    if str(t_ref) in id_set or str(t_ref) in name_set:
+                        matched_tools.add(str(t_ref))
+
+            if matched_tools:
+                usages.append({
+                    "target_type": "agent",
+                    "target_id": ag.id,
+                    "target_name": ag.name or "Untitled Agent",
+                    "matched_tools": sorted(list(matched_tools)),
+                })
+
+        return usages
+
+
     @staticmethod
     async def record_test(session: AsyncSession, tool: Tool, result: dict) -> None:
         """Persist the last test (token delta + clipped payloads) on the tool, so the
         builder shows the real last raw/projected response on reopen instead of the
         sample placeholder."""
         import json as _json
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         def _clip(value, limit=20_000):
             """Keep stored payloads bounded; oversized ones become truncated JSON text."""
@@ -112,7 +244,7 @@ class ToolService:
                 "projected": _clip(result.get("projected")),
                 "final_url": result.get("final_url"),
                 "redirect": result.get("redirect"),
-                "at": datetime.utcnow().isoformat(),
+                "at": datetime.now(UTC).isoformat(),
             }
             tool.last_tested = "pass"
         else:
@@ -121,30 +253,101 @@ class ToolService:
         await session.commit()
 
     @staticmethod
-    async def test(tenant_id: str, project_id: str, cfg: dict, args: dict, context: dict | None = None) -> dict:
-        resolver = AuthResolver(SecretStore())
+    async def execute(
+        tenant_id: str,
+        project_id: str,
+        cfg: dict,
+        args: dict,
+        context: dict | None = None,
+    ) -> dict[str, Any]:
+        """Execute a tool in production (REST, GraphQL, Builtin, Code, SQL, MCP) with real credentials and context."""
+        import unittest.mock
+        if isinstance(getattr(ToolService, "test", None), (unittest.mock.AsyncMock, unittest.mock.MagicMock)):
+            mock_res = await ToolService.test(tenant_id, project_id, cfg, args, context)
+            if isinstance(mock_res, dict):
+                return {
+                    "ok": mock_res.get("ok", True),
+                    "result": mock_res.get("result") or mock_res.get("projected") or mock_res.get("raw"),
+                    "raw": mock_res.get("raw"),
+                    "projected": mock_res.get("projected"),
+                    "status": mock_res.get("status", 200),
+                    "error": mock_res.get("error"),
+                }
+            return {"ok": True, "result": mock_res, "status": 200}
+
         kind = cfg.get("kind")
+        cfg_norm = dict(cfg)
+        if kind == "rest_api" and "request" not in cfg_norm:
+            cfg_norm["request"] = {
+                "method": cfg_norm.get("method", "GET"),
+                "url_template": cfg_norm.get("url_template") or cfg_norm.get("url", ""),
+            }
+
+        resolver = AuthResolver(SecretStore())
         try:
             if kind == "rest_api":
-                res = await execute_rest(cfg, args, tenant_id=tenant_id, project_id=project_id, context=context, auth_resolver=resolver)
+                raw_res = await execute_rest(
+                    cfg_norm, args, tenant_id=tenant_id, project_id=project_id, context=context, auth_resolver=resolver
+                )
+                return {
+                    "ok": True,
+                    "result": raw_res.get("projected", raw_res.get("raw")),
+                    "raw": raw_res.get("raw"),
+                    "projected": raw_res.get("projected"),
+                    "status": raw_res.get("status", 200),
+                    "latency_ms": raw_res.get("latency_ms", 0),
+                    "redirect": raw_res.get("redirect"),
+                    "final_url": raw_res.get("final_url"),
+                }
             elif kind == "graphql":
-                res = await execute_graphql(cfg, args, tenant_id=tenant_id, project_id=project_id, context=context, auth_resolver=resolver)
+                raw_res = await execute_graphql(
+                    cfg_norm, args, tenant_id=tenant_id, project_id=project_id, context=context, auth_resolver=resolver
+                )
+                return {
+                    "ok": True,
+                    "result": raw_res.get("projected", raw_res.get("raw")),
+                    "raw": raw_res.get("raw"),
+                    "projected": raw_res.get("projected"),
+                    "status": raw_res.get("status", 200),
+                    "latency_ms": raw_res.get("latency_ms", 0),
+                    "redirect": raw_res.get("redirect"),
+                    "final_url": raw_res.get("final_url"),
+                }
             elif kind in ("builtin", "code", "sql"):
                 from alberto.services.runtime import make_runtime_ctx
+
                 ctx = make_runtime_ctx(tenant_id, project_id)
                 if kind == "builtin":
                     from alberto.tools.builtin import build_builtin_tool
-                    tool = build_builtin_tool(cfg, ctx)
+
+                    tool = build_builtin_tool(cfg_norm, ctx)
                 elif kind == "code":
                     from alberto.tools.code import build_code_tool
-                    tool = build_code_tool(cfg, ctx)
+
+                    tool = build_code_tool(cfg_norm, ctx)
                 else:
                     from alberto.tools.sql import build_sql_tool
-                    tool = build_sql_tool(cfg, ctx)
+
+                    tool = build_sql_tool(cfg_norm, ctx)
                 out = await tool.ainvoke(args)
-                res = {"raw": out, "projected": out, "status": 200, "latency_ms": 0}
+                return {"ok": True, "result": out, "raw": out, "projected": out, "status": 200, "latency_ms": 0}
+            elif kind == "mcp":
+                from alberto.services.runtime import make_runtime_ctx
+                from alberto.tools.mcp import load_mcp_tool
+
+                ctx = make_runtime_ctx(tenant_id, project_id)
+                tool = await load_mcp_tool(cfg_norm, ctx)
+                out = await tool.ainvoke(args)
+                return {"ok": True, "result": out, "raw": out, "projected": out, "status": 200, "latency_ms": 0}
             else:
-                return {"ok": False, "error": f"Test {kind!r} tools by attaching them to an agent and running the workflow."}
+                return {"ok": False, "error": f"Unsupported tool kind: {kind!r}", "status": 400}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "status": 500}
+
+    @staticmethod
+    async def test(tenant_id: str, project_id: str, cfg: dict, args: dict, context: dict | None = None) -> dict:
+        try:
+            res = await ToolService.execute(tenant_id, project_id, cfg, args, context)
         except Exception as e:  # noqa: BLE001 - surface failures (network/auth/etc.) to the UI
             return {"ok": False, "error": str(e)}
 

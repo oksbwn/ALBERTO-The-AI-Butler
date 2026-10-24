@@ -183,9 +183,9 @@ export function KnowledgeMemoryScreen({ project }: { project: any }) {
               <div className="card" style={{ padding: 22 }}>
                 <div className="row spread" style={{ alignItems: "center", marginBottom: 16 }}>
                   <div>
-                    <div className="t-h2">Authoritative SQLite Long-Term Memories</div>
+                    <div className="t-h2">Saved Memories &amp; Facts</div>
                     <div className="fg-2 t-caption" style={{ marginTop: 2 }}>
-                      High-confidence user preferences, entity statements, and configuration facts.
+                      Your saved preferences, home devices, and facts Alberto remembers.
                     </div>
                   </div>
                   <span className="chip chip-mono">{records.length} records</span>
@@ -204,9 +204,15 @@ export function KnowledgeMemoryScreen({ project }: { project: any }) {
                           <span className="badge" style={{ color: "var(--ok)", background: "rgba(34,197,94,0.15)" }}>
                             {r.status}
                           </span>
-                          <span className="t-micro fg-2 mono">{r.provenance}</span>
+                          <span className="t-micro fg-2">
+                            {r.provenance?.startsWith("turn:") || r.provenance?.startsWith("run_")
+                              ? "Learned from chat"
+                              : r.provenance?.startsWith("doc:")
+                              ? "From document"
+                              : r.provenance || "Saved fact"}
+                          </span>
                           {r.confidence < 1.0 && (
-                            <span className="chip chip-mono t-micro">{Math.round(r.confidence * 100)}%</span>
+                            <span className="chip chip-mono t-micro">{Math.round(r.confidence * 100)}% certainty</span>
                           )}
                         </div>
                         <div className="t-body-sm" style={{ whiteSpace: "pre-wrap", lineHeight: "20px" }}>

@@ -12,6 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from alberto.models import Agent
 from alberto.schemas.contracts import validate_against_id
 
+INTEGRATION_MANAGER_DESCRIPTION = (
+    "Discovers, classifies, recommends and diagnoses integrations, communication channels and tools; "
+    "mediates authorised external tool execution for the Master Agent."
+)
+
 SYSTEM_AGENT_SPECS: dict[str, dict[str, Any]] = {
     "intent_router": {
         "name": "Intent Router",
@@ -53,7 +58,41 @@ SYSTEM_AGENT_SPECS: dict[str, dict[str, Any]] = {
             "status": "inactive",
         },
     },
+    # Integrations v3: this is the Integration Manager. The internal identifier stays
+    # `tool_manager` (system_key, config.name, caller_type, delegate_tool_execution, routes) so
+    # persisted model overrides, traces and permissions survive; only the display name changed.
+    "tool_manager": {
+        "name": "Integration Manager",
+        "system_key": "tool_manager",
+        "description": INTEGRATION_MANAGER_DESCRIPTION,
+        "config": {
+            "name": "tool_manager",
+            "description": INTEGRATION_MANAGER_DESCRIPTION,
+            "system_prompt": "You are Alberto's Integration Manager. You understand installed integrations, MCP servers, communication channels and tools: analyze capabilities and schemas, classify effects and risk, recommend suitable capabilities, diagnose connection, authentication and delivery failures, and mediate authorised tool execution for the Master Agent. You never grant permissions, approve operations or change credentials yourself.",
+            "tools": [],
+            "model": "",
+            "status": "active",
+        },
+    },
+    "automation_manager": {
+        "name": "Automation Manager",
+        "system_key": "automation_manager",
+        "description": "Designs, generates, validates, tests, modifies, monitors, troubleshoots and optimises workflows through natural-language conversations.",
+        "config": {
+            "name": "automation_manager",
+            "description": "Designs, generates, validates, tests, modifies, monitors, troubleshoots and optimises workflows through natural-language conversations.",
+            "system_prompt": "You are Alberto's Automation Manager. You design, generate, validate, troubleshoot, and optimise workflows. You understand Alberto's nodes, triggers, agent registry, and tool capabilities. You choose the simplest execution strategy that satisfies the user's requirements.",
+            "tools": [],
+            "model": "",
+            "status": "active",
+        },
+    },
 }
+
+# Pre-v3 display names / prompts, used to migrate existing rows in place (never duplicating them).
+LEGACY_SYSTEM_AGENT_NAMES = {"tool_manager": "Tool Manager"}
+LEGACY_TOOL_MANAGER_PROMPT = "You are Alberto's Tool Manager. You analyze tool capabilities, schemas, effect classification, and suggest suitable tools."
+LEGACY_TOOL_MANAGER_DESCRIPTION = "Analyzes discovered tools, classifies risk and effects, detects duplicate capabilities, and recommends activations."
 
 RESERVED_SYSTEM_KEYS = set(SYSTEM_AGENT_SPECS.keys())
 
@@ -73,6 +112,24 @@ class AgentService:
             )
         )
         existing_by_key = {a.system_key: a for a in existing.scalars() if a.system_key}
+
+        # Integrations v3: Tool Manager -> Integration Manager, migrated in place (same row/id).
+        renamed = False
+        for key, legacy_name in LEGACY_SYSTEM_AGENT_NAMES.items():
+            row = existing_by_key.get(key)
+            if row is None or row.name != legacy_name:
+                continue
+            spec = SYSTEM_AGENT_SPECS[key]
+            row.name = spec["name"]
+            cfg = copy.deepcopy(row.config or {})
+            if cfg.get("description") in (None, "", LEGACY_TOOL_MANAGER_DESCRIPTION):
+                cfg["description"] = spec["config"]["description"]
+            if cfg.get("system_prompt") in (None, "", LEGACY_TOOL_MANAGER_PROMPT):
+                cfg["system_prompt"] = spec["config"]["system_prompt"]
+            row.config = cfg
+            renamed = True
+        if renamed:
+            await session.commit()
 
         created = []
         for key, spec in SYSTEM_AGENT_SPECS.items():
@@ -122,7 +179,7 @@ class AgentService:
                 Agent.is_system.is_(True),
             )
         )
-        return list(all_agents.scalars())
+        return [a for a in all_agents.scalars()]
 
     @staticmethod
     async def list(session: AsyncSession, tenant_id: str, project_id: str) -> list[Agent]:
@@ -132,7 +189,7 @@ class AgentService:
             .where(Agent.tenant_id == tenant_id, Agent.project_id == project_id)
             .order_by(Agent.is_system.asc(), Agent.created_at.asc())
         )
-        return list(rows.scalars())
+        return [a for a in rows.scalars()]
 
     @staticmethod
     async def get(session: AsyncSession, tenant_id: str, agent_id: str) -> Agent | None:

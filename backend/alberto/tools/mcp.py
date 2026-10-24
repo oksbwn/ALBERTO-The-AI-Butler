@@ -60,6 +60,7 @@ class _Cached:
     created: float
     used: float
     client: Any = None
+    tools: list | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -389,10 +390,23 @@ async def _connection_for(client_row: McpClient, tenant_id: str, project_id: str
                 "execution); enable FORGE_ENABLE_MCP_STDIO=true only on a trusted single-tenant install."
             )
         allowed = settings.mcp_stdio_allowed_commands
-        if allowed and (client_row.command or "") not in allowed:
-            raise McpUnavailable(f"MCP stdio command {client_row.command!r} is not in the allowed list.")
+        if not allowed:
+            raise McpUnavailable(
+                "MCP stdio execution is blocked: mcp_stdio_allowed_commands is empty or unconfigured. "
+                "A nonempty command allowlist is required."
+            )
+        cmd = (client_row.command or "").strip()
+        if cmd not in allowed:
+            raise McpUnavailable(f"MCP stdio command {cmd!r} is not in the allowed list.")
+        if any(c in cmd for c in (";", "&", "|", "`", "$", ">", "<", "\n")):
+            raise McpUnavailable("Invalid or unsafe executable command for MCP stdio. Shell metacharacters are forbidden.")
         args = client_row.args or {}
-        conn = {"command": client_row.command, "args": args.get("args", []) if isinstance(args, dict) else args, "transport": "stdio"}
+        raw_args = args.get("args", []) if isinstance(args, dict) else args
+        if isinstance(raw_args, str):
+            raw_args = [raw_args]
+        elif not isinstance(raw_args, list):
+            raw_args = []
+        conn = {"command": cmd, "args": raw_args, "transport": "stdio"}
     else:
         raise McpUnavailable(f"unsupported MCP transport {transport!r}")
     if client_row.headers_ref:
@@ -441,6 +455,7 @@ async def _client_and_tools(client_row: McpClient, tenant_id: str, project_id: s
                 # elapsed may still be running against it.
                 _retire(entry.client, now)
                 entry.client = None
+                entry.tools = None
                 try:
                     # Reuse the provider we just resolved instead of making _connection_for
                     # re-read it.
@@ -462,8 +477,11 @@ async def _client_and_tools(client_row: McpClient, tenant_id: str, project_id: s
                 else:
                     _evict(now)
     client = entry.client
-    tools = await client.get_tools()
-    return client, tools
+    if entry.tools is None:
+        async with entry.lock:
+            if entry.tools is None:
+                entry.tools = await client.get_tools()
+    return client, entry.tools
 
 
 async def discover_tools(client_row: McpClient, tenant_id: str, project_id: str,
@@ -866,18 +884,24 @@ def _wrap_with_context_injection(tool, inject_keys: list[str]):
 
 async def load_mcp_tool(cfg: dict, ctx) -> Any:
     """Resolve a single `mcp`-kind tool config to a runnable tool (async)."""
+    client_id = cfg.get("mcp_client_id")
+    if not client_id:
+        raise McpUnavailable("Tool config missing 'mcp_client_id'")
+    name = cfg.get("remote_tool_name") or cfg.get("name")
+    if not name:
+        raise McpUnavailable("Tool config missing 'remote_tool_name'")
+
     async with SessionLocal() as s:
         row = (
             await s.execute(
                 select(McpClient).where(
-                    McpClient.tenant_id == ctx.tenant_id, McpClient.id == cfg["mcp_client_id"]
+                    McpClient.tenant_id == ctx.tenant_id, McpClient.id == client_id
                 )
             )
         ).scalar_one_or_none()
     if row is None:
-        raise McpUnavailable(f"MCP client {cfg.get('mcp_client_id')!r} not found")
+        raise McpUnavailable(f"MCP client {client_id!r} not found")
     _client, tools = await _client_and_tools(row, ctx.tenant_id, ctx.project_id, auth_context_from(ctx))
-    name = cfg["remote_tool_name"]
     match = next((t for t in tools if t.name == name), None)
     if match is None:
         raise McpUnavailable(f"remote tool {name!r} not exposed by MCP server {row.name!r}")

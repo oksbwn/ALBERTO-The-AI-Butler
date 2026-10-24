@@ -211,7 +211,7 @@ class MemoryCuratorService:
 
         from alberto.services.runtime import build_compile_context
 
-        ctx = await build_compile_context(session, tenant_id=tenant_id, project_id=project_id)
+        ctx = await build_compile_context(session, tenant_id=tenant_id, project_id=project_id, load_tools=False)
         chosen = override or ctx.default_model_id or ctx.default_model
         model = resolve_model(chosen, ctx=ctx)
 

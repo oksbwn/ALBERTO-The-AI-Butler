@@ -10,7 +10,7 @@ is exposed as the `meta` attribute (DB column name "metadata").
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
@@ -388,6 +388,78 @@ class Channel(PkTimestamp, Base):
     key: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # --- Integrations v3: workflow-independent routing -------------------------------------
+    # A Channel is a communication connection. Where its messages go is explicit:
+    #   target_type: master_agent (default for new channels) | subagent | workflow
+    #   target_id:   agent id / workflow id (null for master_agent)
+    # `workflow_id` is retained for compatibility with pre-v3 channels (mirrors target_id when
+    # target_type == "workflow"). routing_state "needs_review" marks a legacy channel that relied
+    # on the removed first-active-workflow fallback; it is NEVER auto-routed.
+    # `routes`: optional exact command rules [{"command": "/status", "target_type", "target_id"}].
+    # `state`: adapter runtime state (poll offset, diagnostics). Never holds secrets.
+    target_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    routing_state: Mapped[str] = mapped_column(String(20), default="ok")
+    routes: Mapped[list] = mapped_column(JSON, default=list)
+    state: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ChannelIdentity(PkTimestamp, Base):
+    """Binds a verified external provider identity (Telegram user, email address) on ONE
+    channel to ONE Alberto user. Never inferred from display names/email lookalikes."""
+
+    __tablename__ = "channel_identities"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "provider_user_id", name="uq_channel_identity_provider_user"),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    channel_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider_user_id: Mapped[str] = mapped_column(String(200))
+    provider_chat_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    display_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|verified|revoked
+    verified_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class ChannelPairing(PkTimestamp, Base):
+    """One-time pairing challenge. Only the SHA-256 of the code is stored."""
+
+    __tablename__ = "channel_pairings"
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    channel_id: Mapped[str] = mapped_column(String(36), index=True)
+    identity_id: Mapped[str] = mapped_column(String(36), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), index=True)
+    expires_at: Mapped[datetime] = mapped_column()
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    consumed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class ChannelEvent(PkTimestamp, Base):
+    """Inbound event ledger: provider-event dedup + safe delivery/diagnostic metadata.
+    Message bodies are NOT stored."""
+
+    __tablename__ = "channel_events"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "provider_event_id", name="uq_channel_event_provider_id"),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    channel_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider_event_id: Mapped[str] = mapped_column(String(200))
+    direction: Mapped[str] = mapped_column(String(10), default="inbound")
+    # received|processing|delivered|delivery_failed|pairing_required|quarantined|rejected|failed|interrupted
+    status: Mapped[str] = mapped_column(String(24), default="received", index=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    route: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    thread_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
 
 
 class HandoffRequest(PkTimestamp, Base):
@@ -710,3 +782,161 @@ class RegisteredModel(PkTimestamp, Base):
     temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
     top_p: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class ToolApprovalRequest(PkTimestamp, Base):
+    """Human-in-the-loop (HITL) approval request persisted in SQLite."""
+
+    __tablename__ = "tool_approval_requests"
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    user_role: Mapped[str] = mapped_column(String(40), default="viewer")
+    originating_agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    originating_workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    caller_type: Mapped[str] = mapped_column(String(40), default="assistant")
+    tool_id: Mapped[str] = mapped_column(String(120), index=True)
+    tool_name: Mapped[str] = mapped_column(String(120))
+    operation: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    tool_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    arguments_hash: Mapped[str] = mapped_column(String(64), index=True)
+    arguments_scrubbed: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Status: pending | approved | rejected | consumed | cancelled | expired
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(index=True)
+    decided_by: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    decision_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ToolAnalysisJob(PkTimestamp, Base):
+    """Durable tool discovery / classification job persisted in SQLite."""
+
+    __tablename__ = "tool_analysis_jobs"
+    __table_args__ = (
+        Index("ix_tool_analysis_jobs_lookup", "tenant_id", "project_id", "tool_id", "schema_fingerprint"),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    tool_id: Mapped[str] = mapped_column(String(120), index=True)
+    schema_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    # Status: pending | running | completed | failed
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_retries: Mapped[int] = mapped_column(Integer, default=3)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class AutomationSession(PkTimestamp, Base):
+    """Persistent conversational workflow authoring session."""
+
+    __tablename__ = "automation_sessions"
+    __table_args__ = (
+        Index("ix_auto_sessions_tenant_project", "tenant_id", "project_id"),
+        Index("ix_auto_sessions_status", "status"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    title: Mapped[str] = mapped_column(String(255), default="New Automation")
+    requirements: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(50), default="drafting")  # drafting | clarifying | ready_for_approval | approved | discarded
+    strategy: Mapped[str] = mapped_column(String(50), default="single_agent")  # deterministic | single_agent | multi_agent | hybrid
+
+    # Persistent conversational authoring state
+    clarification_turns: Mapped[list] = mapped_column(JSON, default=list)
+    current_proposal: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    validation_results: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    @property
+    def requirement(self) -> str:
+        return self.requirements
+
+    @requirement.setter
+    def requirement(self, val: str) -> None:
+        self.requirements = val
+
+    @property
+    def clarifications(self) -> list:
+        return self.clarification_turns or []
+
+    @clarifications.setter
+    def clarifications(self, val: list) -> None:
+        self.clarification_turns = val
+
+    @property
+    def proposal(self) -> dict | None:
+        return self.current_proposal
+
+    @proposal.setter
+    def proposal(self, val: dict | None) -> None:
+        self.current_proposal = val
+
+    @property
+    def proposed_agents(self) -> list:
+        return (self.current_proposal or {}).get("proposed_agents", [])
+
+    @proposed_agents.setter
+    def proposed_agents(self, val: list) -> None:
+        p = dict(self.current_proposal or {})
+        p["proposed_agents"] = val
+        self.current_proposal = p
+
+    @property
+    def validation_status(self) -> str:
+        return (self.validation_results or {}).get("status", "pending")
+
+    @validation_status.setter
+    def validation_status(self, val: str) -> None:
+        vr = dict(self.validation_results or {})
+        vr["status"] = val
+        self.validation_results = vr
+
+    @property
+    def validation_errors(self) -> list:
+        return (self.validation_results or {}).get("errors", [])
+
+    @validation_errors.setter
+    def validation_errors(self, val: list) -> None:
+        vr = dict(self.validation_results or {})
+        vr["errors"] = val
+        self.validation_results = vr
+
+    @property
+    def current_plan(self) -> dict | None:
+        return (self.metadata_json or {}).get("current_plan")
+
+    @current_plan.setter
+    def current_plan(self, val: dict | None) -> None:
+        mj = dict(self.metadata_json or {})
+        mj["current_plan"] = val
+        self.metadata_json = mj
+
+
+class WorkflowRepairAttempt(PkTimestamp, Base):
+    """Durable tracking of autonomous failure repair attempts to prevent loops across restarts."""
+
+    __tablename__ = "workflow_repair_attempts"
+    __table_args__ = (
+        Index("ix_repair_attempts_wf_fingerprint", "workflow_id", "failure_fingerprint", "workflow_revision"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    workflow_id: Mapped[str] = mapped_column(String(36), index=True)
+    workflow_revision: Mapped[int] = mapped_column(Integer, default=1)
+    failure_fingerprint: Mapped[str] = mapped_column(String(128), index=True)
+    source_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    repair_status: Mapped[str] = mapped_column(String(50), default="attempted")  # attempted | repaired | blocked | failed
+    last_attempt_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+    repair_outcome: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+

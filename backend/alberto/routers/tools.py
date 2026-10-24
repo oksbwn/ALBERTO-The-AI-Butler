@@ -47,6 +47,7 @@ async def list_tools(project_id: str, session: AsyncSession = Depends(get_sessio
     # Built-ins are project defaults: make sure this project has them before listing (idempotent),
     # so every project - including freshly imported ones - always has the platform capabilities.
     await ToolService.ensure_builtins(session, tenant_id, project_id)
+    await ToolService.ensure_mcp_tools(session, tenant_id, project_id)
     return await ToolService.list(session, tenant_id, project_id)
 
 
@@ -103,6 +104,38 @@ async def test_tool(project_id: str, tool_id: str, body: ToolTestIn, session: As
     tool = await ToolService.get(session, tenant_id, tool_id)
     if tool is None:
         raise HTTPException(404, "Tool not found")
+    if not tool.enabled:
+        raise HTTPException(400, f"Cannot test disabled tool '{tool.name}'. Enable it first.")
+
+    from alberto.services.tool_policy import ToolPolicyService
+
+    user_context = {"user_id": user.id, "email": user.email, "role": user.role, "roles": [user.role]}
+    exec_context = {"arguments": body.args, "approval_id": body.approval_id}
+    decision = await ToolPolicyService.evaluate_execution(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        tool_id=tool.id,
+        caller_type="test_endpoint",
+        caller_id=user.id,
+        user_context=user_context,
+        execution_context=exec_context,
+        session=session,
+    )
+    if not decision.allowed:
+        if decision.requires_approval:
+            return {
+                "ok": False,
+                "requires_approval": True,
+                "approval_request_id": decision.approval_request_id,
+                "error": decision.reason,
+                "effect": decision.effect,
+                "risk": decision.risk,
+            }
+        raise HTTPException(403, detail=decision.reason)
+
+    if body.approval_id:
+        ToolPolicyService.consume_approval(body.approval_id)
+
     cfg = {**(tool.config or {}), "name": tool.name, "kind": tool.kind, "auth_provider_id": tool.auth_provider_id or (tool.config or {}).get("auth_provider_id")}
     # Console tests run AS the current user, so a PER-USER auth provider resolves the tester's own
     # connected credential (end_user_id keys the per-user bundle - the same id the MCP PAT resolves

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forge/nodes/delay",
+  "type": "object",
+  "properties": {
+    "seconds": { "type": "number", "minimum": 0, "default": 1 },
+    "unit": { "type": "string", "enum": ["seconds", "minutes", "hours", "days"], "default": "seconds" }
+  },
+  "$comment": "ports: in:any, out:any"
+}

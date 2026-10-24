@@ -245,6 +245,7 @@ class ToolUpdate(BaseModel):
 class ToolTestIn(BaseModel):
     args: dict[str, Any] = {}
     context: dict[str, Any] | None = None
+    approval_id: str | None = None
 
 
 # --- tool sets (describable groups of tools; organize the UI + expose over MCP) ---

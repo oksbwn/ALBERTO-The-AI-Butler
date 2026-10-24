@@ -82,28 +82,75 @@ async def list_clients(project_id: str, session: AsyncSession = Depends(get_sess
     return [{**_out(m), "connector_slug": owned.get(m.id)} for m in rows]
 
 
+def _validate_stdio_security(transport: str | None, command: str | None, user: CurrentUser) -> None:
+    if transport == "stdio":
+        from alberto.config import settings
+
+        if not settings.enable_mcp_stdio:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "MCP stdio transport is disabled by deployment policy (FORGE_ENABLE_MCP_STDIO=false).",
+            )
+        if getattr(user, "role", None) != "admin":
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Configuring MCP stdio executable commands requires administrator privileges.",
+            )
+        cmd = (command or "").strip()
+        if not cmd or any(c in cmd for c in (";", "&", "|", "`", "$", ">", "<", "\n")):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Invalid or unsafe executable command for MCP stdio. Shell metacharacters are forbidden.",
+            )
+        if not settings.mcp_stdio_allowed_commands:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "MCP stdio configuration is blocked: mcp_stdio_allowed_commands is empty or unconfigured. A nonempty command allowlist is required.",
+            )
+        if cmd not in settings.mcp_stdio_allowed_commands:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"MCP stdio command {cmd!r} is not in the allowed commands list.",
+            )
+
+
 @router.post("", status_code=201)
 async def create_client(project_id: str, body: McpClientIn, session: AsyncSession = Depends(get_session),
                         tenant_id: str = Depends(current_tenant_id),
-                        _: CurrentUser = Depends(require_role("editor"))):
+                        user: CurrentUser = Depends(require_role("editor"))):
+    _validate_stdio_security(body.transport, body.command, user)
     m = McpClient(tenant_id=tenant_id, project_id=project_id, name=body.name, transport=body.transport,
                   url=body.url, command=body.command, args=body.args, headers_ref=body.headers_ref,
                   enabled=body.enabled, auth_provider_id=body.auth_provider_id)
     session.add(m)
     await session.commit()
     await session.refresh(m)
+    try:
+        from alberto.services.mcp_discovery import McpDiscoveryService
+        await McpDiscoveryService.discover_and_update(
+            session=session,
+            client_row=m,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            context={"end_user_id": user.id},
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger("alberto.routers.mcp_clients").warning(f"Initial discovery failed for {m.name}: {e}")
     return _out(m)
 
 
 @router.patch("/{client_id}")
 async def update_client(project_id: str, client_id: str, body: McpClientPatch, session: AsyncSession = Depends(get_session),
                         tenant_id: str = Depends(current_tenant_id),
-                        _: CurrentUser = Depends(require_role("editor"))):
+                        user: CurrentUser = Depends(require_role("editor"))):
     m = (await session.execute(
         select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
     )).scalar_one_or_none()
     if m is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
+    if m.transport == "stdio":
+        _validate_stdio_security(m.transport, m.command, user)
     if body.name is not None:
         m.name = body.name
     if body.enabled is not None:
@@ -119,6 +166,17 @@ async def update_client(project_id: str, client_id: str, body: McpClientPatch, s
         m.auth_provider_id = body.auth_provider_id or None
     if body.learning_enabled is not None:
         m.learning_enabled = body.learning_enabled
+    if body.enabled is not None or body.disabled_tools is not None:
+        from alberto.models import Tool
+        existing_tools = list((await session.execute(
+            select(Tool).where(Tool.tenant_id == tenant_id, Tool.project_id == project_id, Tool.kind == "mcp")
+        )).scalars().all())
+        disabled_set = set(m.disabled_tools or [])
+        client_enabled = m.enabled
+        for t in existing_tools:
+            if (t.config or {}).get("mcp_client_id") == m.id:
+                remote_name = (t.config or {}).get("remote_tool_name") or t.name
+                t.enabled = client_enabled and (remote_name not in disabled_set)
     await session.commit()
     await session.refresh(m)
     # Drop the cached connection so running agents pick up the new config (audit F12).
@@ -224,7 +282,7 @@ async def list_remote_tools(project_id: str, client_id: str, session: AsyncSessi
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
     # A server behind a per-user auth provider only has THIS caller's token to answer with.
     try:
-        tools = await discover_tools(row, tenant_id, project_id, {"end_user_id": str(user.id)})
+        tools = await discover_tools(row, tenant_id, project_id, {"end_user_id": user.id})
     except McpUnavailable as e:
         return {"ok": False, "error": str(e)}
     except Exception as e:  # noqa: BLE001 - surface connect/auth errors to the UI, don't 500
@@ -243,8 +301,66 @@ async def delete_client(project_id: str, client_id: str, session: AsyncSession =
     )).scalar_one_or_none()
     if m is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
+    from sqlalchemy import delete
+
+    from alberto.models import Tool, ToolSetMember
+    from alberto.services.tools import ToolService
+    tools = list((await session.execute(
+        select(Tool).where(Tool.tenant_id == tenant_id, Tool.project_id == project_id, Tool.kind == "mcp")
+    )).scalars().all())
+
+    # Guard: prevent removing integration if any tools are actively used
+    mcp_tool_ids = [t.id for t in tools if (t.config or {}).get("mcp_client_id") == client_id]
+    mcp_tool_names = [t.name for t in tools if (t.config or {}).get("mcp_client_id") == client_id]
+    usages = await ToolService.get_tool_usages(session, tenant_id, project_id, mcp_tool_ids, mcp_tool_names)
+    if usages:
+        items_desc = ", ".join(f"{u['target_type']} '{u['target_name']}'" for u in usages[:5])
+        if len(usages) > 5:
+            items_desc += f" and {len(usages) - 5} more"
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Cannot remove integration: {len(usages)} workflow(s) or agent(s) ({items_desc}) are currently using its tools. Please remove or replace these tools before removing the integration.",
+        )
+
+    for t in tools:
+        if (t.config or {}).get("mcp_client_id") == client_id:
+            await ToolService.delete(session, t)
+
+    # Clean up associated ToolSet if any
+    from alberto.models import ToolSet
+    ts_slug = f"mcp-{client_id[:8]}"
+    ts = (await session.execute(
+        select(ToolSet).where(
+            ToolSet.tenant_id == tenant_id,
+            ToolSet.project_id == project_id,
+            (ToolSet.slug == ts_slug) | (ToolSet.name == m.name),
+        )
+    )).scalars().first()
+    if ts is not None:
+        await session.execute(delete(ToolSetMember).where(ToolSetMember.tool_set_id == ts.id))
+        await session.delete(ts)
+
+    # Purge Knowledge Graph projections for this integration and its tools
+    try:
+        from alberto.knowledge.graph import get_graph_adapter, make_entity_id
+        adapter = get_graph_adapter()
+        await adapter.delete_entity(tenant_id, project_id, make_entity_id(tenant_id, project_id, m.name))
+        await adapter.delete_entity(tenant_id, project_id, make_entity_id(tenant_id, project_id, f"int:{m.name}"))
+        await adapter.delete_entities_by_source(tenant_id, project_id, f"mcp:{client_id}")
+        await adapter.delete_entities_by_source(tenant_id, project_id, f"integration:{m.name}")
+        for t in tools:
+            if (t.config or {}).get("mcp_client_id") == client_id:
+                await adapter.delete_entities_by_source(tenant_id, project_id, f"tool:{t.id}")
+                await adapter.delete_entity(tenant_id, project_id, make_entity_id(tenant_id, project_id, f"tool:{t.name}"))
+    except Exception as e:
+        import logging
+        logging.getLogger("alberto.routers.mcp_clients").debug(
+            f"Knowledge graph cleanup skipped/failed for integration {m.name}: {e}"
+        )
+
     await session.delete(m)
     await session.commit()
     from alberto.tools.mcp import invalidate_client
     await invalidate_client(client_id)
     return {"ok": True}
+

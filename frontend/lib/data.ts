@@ -23,9 +23,12 @@ export const fmtUSD = (v: number | null | undefined): string => {
 
 export const NODE_CATALOG = [
   { group: "Flow", color: "var(--io-control)", items: [
+    { type: "inject", icon: "play", label: "Inject", desc: "Manual trigger / message input" },
+    { type: "debug", icon: "eye", label: "Debug", desc: "Inspect msg payload" },
+    { type: "delay", icon: "clock", label: "Delay", desc: "Wait for a specified duration" },
     { type: "start", icon: "n_start", label: "Start", desc: "Entry marker" },
     { type: "end", icon: "n_end", label: "End", desc: "Terminal node" },
-    { type: "router", icon: "n_router", label: "Router", desc: "Conditional branch" },
+    { type: "router", icon: "n_router", label: "Router", desc: "Conditional branch / switch" },
     { type: "loop", icon: "n_loop", label: "Loop", desc: "Bounded iteration" },
     { type: "parallel_fanout", icon: "n_fanout", label: "Fan-out", desc: "Map over a list" },
     { type: "join", icon: "n_join", label: "Join", desc: "Wait-for-all / reduce" },
@@ -366,12 +369,13 @@ export const PROJECT_NAV: NavEntry[] = [
     id: "automate",
     section: "Automate",
     icon: "workflow",
-    help: "Workflows, agents, and custom components.",
+    help: "Conversational workflow engineering with Automation Manager, visual workflows, agents, and components.",
     items: [
+      { id: "playground", label: "Playground", icon: "playground", help: "AI Automation Manager Studio: conversational design, safe testing, and execution." },
       { id: "workflows", label: "Workflows", icon: "workflow", countKey: "workflows", help: "Visual workflow builder & graph canvas." },
       { id: "agents", label: "Agents", icon: "bot", countKey: "agents", help: "Autonomous agent presets and prompts." },
       { id: "components", label: "Components", icon: "grid", countKey: "components", help: "Interactive UI chat widgets." },
-      { id: "playground", label: "Playground", icon: "playground", help: "Test workflows live with token metering." },
+      { id: "traces", label: "Executions", icon: "activity", help: "Execution traces, monitoring, and troubleshooting." },
     ],
   },
   {
@@ -394,11 +398,11 @@ export const PROJECT_NAV: NavEntry[] = [
     icon: "plug",
     help: "Connectors, tools, and auth.",
     items: [
-      { id: "connectors", label: "Connectors", icon: "plug", countKey: "connectors", help: "Integrations (Slack, Gmail, IoT, etc.)." },
+      { id: "integrations-playground", label: "Playground", icon: "playground", help: "Interactive test bench for REST, MCP tools and channels with HITL approval." },
+      { id: "integrations", label: "Integrations", icon: "plug", countKey: "connectors", help: "Unified Integrations (Connectors, MCP, Channels, Custom API)." },
       { id: "tools", label: "Tools", icon: "tools", countKey: "tools", help: "REST, Code, SQL, and custom tools." },
-      { id: "auth", label: "Auth Providers", icon: "shield-check", countKey: "auth", help: "Credentials, OAuth, and API tokens." },
       { id: "triggers", label: "Triggers", icon: "bolt", help: "Webhooks, pollers, and scheduled routines." },
-      { id: "channels", label: "Channels", icon: "mail", help: "Email and communication channels." },
+      { id: "auth", label: "Auth & Credentials", icon: "key", help: "Authentication providers and shared OAuth 2.0 app credentials." },
     ],
   },
   {

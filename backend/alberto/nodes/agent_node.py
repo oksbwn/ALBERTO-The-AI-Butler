@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain.tools import ToolRuntime
 
 from alberto.engine.context import CompileContext
 from alberto.engine.middleware_compiler import build_middleware
@@ -357,6 +358,121 @@ def _ensure_memory_middleware(middleware: list[Any], config: dict, ctx: CompileC
     return out
 
 
+def _wrap_tool_for_agent(
+    inner_tool: Any,
+    tool_id: str,
+    agent_name: str,
+    agent_cfg: dict,
+    ctx: CompileContext,
+) -> Any:
+    """Enforce central ToolPolicyService evaluation on agent-initiated tool calls (GAP-SEC-01).
+
+    Ensures caller identity, association verification, static entitlements, and runtime
+    HITL approval checks (e.g. for delete or critical risk operations) are strictly evaluated
+    before the agent executes the underlying tool.
+    """
+    from langchain_core.tools import StructuredTool
+
+    from alberto.tools.materialize import _accepts_runtime
+
+    inner_coro = getattr(inner_tool, "coroutine", None)
+    inner_func = getattr(inner_tool, "func", None)
+    target_fn = inner_coro or inner_func
+    pass_runtime = _accepts_runtime(target_fn) if target_fn else False
+
+    async def _policy_wrapped(runtime: ToolRuntime | None = None, **kwargs):
+        # Fast-pass for offline/unit tests where tenant_id and project_id are omitted
+        if not getattr(ctx, "tenant_id", None) or not getattr(ctx, "project_id", None):
+            if inner_coro is not None:
+                return await (inner_coro(runtime=runtime, **kwargs) if pass_runtime else inner_coro(**kwargs))
+            if inner_func is not None:
+                return inner_func(runtime=runtime, **kwargs) if pass_runtime else inner_func(**kwargs)
+            return await inner_tool.ainvoke(kwargs)
+
+        user_context = ctx.end_user if isinstance(ctx.end_user, dict) else ({"id": str(ctx.end_user)} if ctx.end_user else {})
+        state = getattr(runtime, "state", {}) if runtime else {}
+        run_ctx = getattr(ctx, "run_context", {}) or {}
+        exec_ctx = {
+            "arguments": kwargs,
+            "approval_id": state.get("approval_id") or run_ctx.get("approval_id"),
+            "approved": state.get("approved") or state.get("human_approved") or run_ctx.get("approved"),
+        }
+
+        from alberto.services.tool_policy import ToolPolicyService
+        decision = await ToolPolicyService.evaluate_execution(
+            tenant_id=ctx.tenant_id,
+            project_id=ctx.project_id,
+            tool_id=tool_id,
+            caller_type="subagent",
+            caller_id=agent_name,
+            subagent_config=agent_cfg,
+            user_context=user_context,
+            execution_context=exec_ctx,
+        )
+
+        if not decision.allowed:
+            if decision.requires_approval:
+                return (
+                    f"Tool '{decision.tool_name or getattr(inner_tool, 'name', tool_id)}' requires Human-in-the-Loop approval before execution. "
+                    f"Approval request created: {decision.approval_request_id}. Execution paused."
+                )
+            return f"Tool execution policy violation: {decision.reason}"
+
+        if inner_coro is not None:
+            return await (inner_coro(runtime=runtime, **kwargs) if pass_runtime else inner_coro(**kwargs))
+        if inner_func is not None:
+            return inner_func(runtime=runtime, **kwargs) if pass_runtime else inner_func(**kwargs)
+        return await inner_tool.ainvoke(kwargs)
+
+    def _policy_wrapped_sync(runtime: ToolRuntime | None = None, **kwargs):
+        if not getattr(ctx, "tenant_id", None) or not getattr(ctx, "project_id", None):
+            if inner_func is not None:
+                return inner_func(runtime=runtime, **kwargs) if pass_runtime else inner_func(**kwargs)
+            raise RuntimeError(f"Tool {getattr(inner_tool, 'name', tool_id)!r} does not support synchronous execution.")
+
+        from alberto.services.tool_policy import ToolPolicyService
+        allowed = ToolPolicyService.check_sync(
+            ctx=ctx,
+            tool_id=tool_id,
+            caller_type="subagent",
+            caller_id=agent_name,
+            subagent_config=agent_cfg,
+        )
+        if not allowed:
+            return f"Tool execution policy violation: tool '{getattr(inner_tool, 'name', tool_id)}' not allowed for agent '{agent_name}'."
+        if inner_func is not None:
+            return inner_func(runtime=runtime, **kwargs) if pass_runtime else inner_func(**kwargs)
+        raise RuntimeError(f"Tool {getattr(inner_tool, 'name', tool_id)!r} does not support synchronous execution.")
+
+    tool_name = getattr(inner_tool, "name", None) or tool_id
+    tool_desc = getattr(inner_tool, "description", None) or ""
+    tool_schema = getattr(inner_tool, "args_schema", None)
+
+    return StructuredTool.from_function(
+        func=_policy_wrapped_sync if inner_func is not None else None,
+        coroutine=_policy_wrapped,
+        name=tool_name,
+        description=tool_desc,
+        args_schema=tool_schema,
+    )
+
+
+def _resolve_and_secure_agent_tools(
+    tool_refs: list[str] | None,
+    toolsets: list[str] | None,
+    agent_name: str,
+    agent_cfg: dict,
+    ctx: CompileContext,
+) -> list[Any]:
+    ids = ctx.resolve_tool_ids(tool_refs, toolsets)
+    out: list[Any] = []
+    for tid in ids:
+        raw_t = ctx.tool_registry.get(tid)
+        if raw_t is not None:
+            out.append(_wrap_tool_for_agent(raw_t, tid, agent_name, agent_cfg, ctx))
+    return out
+
+
 def build_subagents(subagents_cfg: list[dict], ctx: CompileContext, default_model: Any = None) -> list[dict]:
     """Convert subagent configs to the SubAgent dict shape SubAgentMiddleware expects.
 
@@ -372,11 +488,12 @@ def build_subagents(subagents_cfg: list[dict], ctx: CompileContext, default_mode
         if "workflow_ref" in sa:
             continue  # TODO(phase: subworkflow): wrap compiled workflow as CompiledSubAgent
         name = sa["name"]
+        secured_tools = _resolve_and_secure_agent_tools(sa.get("tools"), sa.get("toolsets"), name, sa, ctx)
         spec: dict[str, Any] = {
             "name": name,
             "description": sa.get("description", ""),
             "system_prompt": sa.get("system_prompt") or sa.get("description") or f"You are the {name} agent.",
-            "tools": _dedup_tools_by_name(ctx.tools_for(ctx.resolve_tool_ids(sa.get("tools"), sa.get("toolsets")))),
+            "tools": _dedup_tools_by_name(secured_tools),
             "model": resolve_model(sa["model"], ctx) if sa.get("model") else (default_model or resolve_model(None, ctx)),
         }
         sub_mw = build_middleware(sa["middleware"], ctx) if sa.get("middleware") else []
@@ -494,7 +611,8 @@ def _dynamic_field_middleware(config: dict, ctx: CompileContext, base_prompt: st
 
 
 def _common_kwargs(config: dict, ctx: CompileContext) -> dict:
-    tools = list(ctx.tools_for(ctx.resolve_tool_ids(config.get("tools"), config.get("toolsets"))))
+    agent_name = config.get("name") or "agent"
+    tools = list(_resolve_and_secure_agent_tools(config.get("tools"), config.get("toolsets"), agent_name, config, ctx))
     # Built-in knowledge access (RAG / Q&A) attached straight to the agent via its
     # `knowledge` config - no separate Tool row needed (see tools/builtin.py).
     if config.get("knowledge"):
@@ -542,13 +660,19 @@ def _common_kwargs(config: dict, ctx: CompileContext) -> dict:
 
 def _resolve_config(config: dict, ctx: CompileContext) -> dict:
     """If the node mirrors a saved agent (`agent_ref`), the live preset drives it - so
-    edits in the Agents tab take effect without re-saving the workflow. Falls back to the
-    node's own (snapshot) config when the preset is missing/unresolved."""
+    edits in the Agents tab take effect without re-saving the workflow. Preserves pipeline-specific
+    node invocation parameters (task_prompt, output_key, response_format) configured on this
+    specific workflow step. Falls back to the node's own config when preset is missing."""
     ref = config.get("agent_ref")
     if ref:
         preset = (getattr(ctx, "agent_presets", None) or {}).get(ref)
         if preset:
-            return dict(preset)
+            merged = dict(preset)
+            merged["agent_ref"] = ref
+            for key in ("task_prompt", "output_key", "response_format", "output_schema", "structured_output"):
+                if key in config and config[key] is not None:
+                    merged[key] = config[key]
+            return merged
     return config
 
 
@@ -600,9 +724,71 @@ def agent_factory(config: dict, ctx: CompileContext):
 
         kwargs: dict[str, Any] = dict(common)
         kwargs["middleware"] = middleware
-        return create_agent(**kwargs)
+        raw_agent = create_agent(**kwargs)
+    else:
+        raw_agent = create_agent(**common)
 
-    return create_agent(**common)
+    task_prompt = config.get("task_prompt") or config.get("prompt")
+    rf = config.get("response_format") or {}
+    output_key = config.get("output_key") or (rf.get("output_key") if rf.get("mode") == "structured" else None)
+
+    if not task_prompt and not output_key:
+        return raw_agent
+
+    async def _pipeline_node(state: dict) -> dict:
+        from langchain_core.messages import HumanMessage
+
+        from alberto.auth_providers.templates import render_template
+
+        agent_state = dict(state or {})
+        if task_prompt:
+            rendered = render_template(task_prompt, {"state": dict(state or {})})
+            if rendered is not None and not isinstance(rendered, str):
+                rendered = str(rendered)
+            if rendered:
+                existing_msgs = list(agent_state.get("messages") or [])
+                agent_state["messages"] = [*existing_msgs, HumanMessage(content=rendered)]
+
+        result = await raw_agent.ainvoke(agent_state)
+        out: dict[str, Any] = dict(result or {})
+        if output_key:
+            parsed = _extract_structured_data(result)
+            if parsed is not None:
+                out[output_key] = parsed
+        return out
+
+    return _pipeline_node
+
+
+def _extract_structured_data(res: dict) -> Any:
+    """Extract structured data from an agent execution result dictionary."""
+    msgs = res.get("messages") or []
+    if not msgs:
+        return None
+    last = msgs[-1]
+    sr = getattr(last, "structured_response", None)
+    if sr is not None:
+        return sr
+    content = getattr(last, "content", None)
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, str):
+        text = content.strip()
+        import json
+        import re
+
+        m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+        if m:
+            text = m.group(1).strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+    for tc in getattr(last, "tool_calls", []) or []:
+        args = tc.get("args")
+        if isinstance(args, dict):
+            return args
+    return None
 
 
 def _summary(config: dict) -> list[str]:
@@ -623,6 +809,10 @@ def _summary(config: dict) -> list[str]:
         line2 += f" · MCP {n_mcp}"
     if flavor == "deep_agent":
         line2 += f" · subagents {len(config.get('subagents', []) or [])}"
+    rf = config.get("response_format") or {}
+    out_k = config.get("output_key") or (rf.get("output_key") if rf.get("mode") == "structured" else None)
+    if out_k:
+        line2 += f" · out: {out_k}"
     return [str(model), line2]
 
 

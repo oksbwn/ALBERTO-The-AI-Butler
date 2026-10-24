@@ -17,10 +17,10 @@ const CAT_COLOR: Record<string, string> = {
 function summarize(type: string, c: Record<string, any>): string[] {
   switch (type) {
     case "agent":
-    case "deep_agent":
-      // Show only the model on the card - tools / middleware / components / knowledge are
-      // all partial here; the right-hand inspector shows the full config.
-      return [String(c.model || "-")];
+    case "deep_agent": {
+      const outKey = c.output_key || c.response_format?.output_key;
+      return outKey ? [String(c.model || "-"), `→ ${outKey}`] : [String(c.model || "-")];
+    }
     case "router":
       return [`expr · ${c.expression || "-"}`, Object.keys(c.cases || {}).concat(c.default ? ["default"] : []).join(" · ")];
     case "llm":
@@ -32,10 +32,12 @@ function summarize(type: string, c: Record<string, any>): string[] {
     case "tool_call":
       return [String(c.tool_id || "-")];
     case "retrieval": {
-      const lines: string[] = [];
-      if (c.include_docs !== false) lines.push(`docs top_k ${c.top_k ?? 5}${c.hybrid ? " · hybrid" : ""}${c.rerank ? " · rerank" : ""}`);
-      if (c.include_qa) lines.push(`Q&A top_k ${c.qa_top_k ?? 3}`);
-      return lines.length ? lines : ["no sources"];
+      const parts: string[] = [];
+      if (c.include_memory !== false) parts.push("memory");
+      if (c.include_graph !== false) parts.push("graph");
+      if (c.include_docs !== false) parts.push("docs");
+      if (c.include_qa) parts.push("Q&A");
+      return [parts.join(" + ") || "no sources"];
     }
     case "human_input":
       return [(c.prompt || "").slice(0, 34), (c.allowed_decisions || ["approve", "reject"]).join(" · ")];
@@ -43,6 +45,12 @@ function summarize(type: string, c: Record<string, any>): string[] {
       return [`${c.method || "POST"} ${String(c.url || "").slice(0, 26)}`];
     case "emit_event":
       return [`channel · ${c.channel || ""}`];
+    case "inject":
+      return [c.topic ? `topic: ${c.topic}` : "manual trigger", `${c.payload_type || "json"}`];
+    case "debug":
+      return [`inspect: ${c.target || "msg.payload"}`, c.active === false ? "muted" : "active"];
+    case "delay":
+      return [`wait: ${c.seconds || 1} ${c.unit || "s"}`];
     default:
       return [];
   }
@@ -61,10 +69,7 @@ function HandleStack({ ports, dir }: { ports: { id: string; io_type: string }[];
       {ports.map((p, i) => (
         <Handle
           key={p.id}
-          // With a single port per side (every Forge node today), omit the id so this is
-          // React Flow's *default* handle - then loaded edges (which carry no handle id)
-          // always attach, with no id-matching that can silently drop the edge.
-          id={n > 1 ? p.id : undefined}
+          id={p.id || (dir === "in" ? "in" : "out")}
           type={dir === "in" ? "target" : "source"}
           position={dir === "in" ? Position.Left : Position.Right}
           style={{
@@ -127,6 +132,36 @@ export function ForgeNode({ id, data, selected }: NodeProps) {
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderBottom: "1px solid var(--line)", background: "var(--bg-3)", borderRadius: "var(--r-lg) var(--r-lg) 0 0", borderLeft: `3px solid ${meta.color}` }}>
         <Icon name={meta.icon} size={16} style={{ color: meta.color, flexShrink: 0 }} />
         <span className="t-h3 truncate" style={{ flex: 1, fontFamily: "var(--font-display)" }}>{title}</span>
+        {type === "inject" && (
+          <button
+            type="button"
+            className="iconbtn"
+            title="Inject message now"
+            aria-label="Inject message now"
+            style={{ width: 20, height: 20, color: "var(--accent)", border: "1px solid var(--accent)", borderRadius: 4, background: "var(--bg-1)", padding: 0 }}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              const event = new CustomEvent("alberto-inject-trigger", { detail: { nodeId: id, config } });
+              window.dispatchEvent(event);
+            }}
+          >
+            <Icon name="play" size={10} />
+          </button>
+        )}
+        {type === "debug" && (
+          <span
+            className="chip chip-mono"
+            style={{
+              fontSize: 10,
+              height: 18,
+              padding: "0 4px",
+              borderColor: config.active === false ? "var(--line)" : "var(--accent)",
+              color: config.active === false ? "var(--fg-2)" : "var(--accent)",
+            }}
+          >
+            {config.active === false ? "off" : "on"}
+          </span>
+        )}
         <span className="typechip">{type}</span>
       </div>
       {/* body */}
@@ -225,6 +260,39 @@ export function ForgeNode({ id, data, selected }: NodeProps) {
               </pre>
             </div>
           )}
+        </div>
+      )}
+      {status && (
+        <div
+          style={{
+            position: "absolute",
+            left: 8,
+            bottom: -18,
+            fontSize: 10.5,
+            fontFamily: "var(--font-mono)",
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            color:
+              status === "running" ? "var(--accent)" :
+              status === "done" ? "var(--ok)" :
+              status === "error" ? "var(--err)" :
+              status === "waiting" ? "var(--warn)" : "var(--fg-2)",
+          }}
+        >
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background:
+                status === "running" ? "var(--accent)" :
+                status === "done" ? "var(--ok)" :
+                status === "error" ? "var(--err)" :
+                status === "waiting" ? "var(--warn)" : "var(--fg-2)",
+            }}
+          />
+          <span>{status === "done" ? "completed" : status}</span>
         </div>
       )}
     </div>

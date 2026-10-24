@@ -481,7 +481,15 @@ class Settings(BaseSettings):
     # localhost during dev, an internal service, an on-prem host - WITHOUT disabling the SSRF
     # guard globally (so the app still boots in production). Matches a host or any parent
     # domain. Per-project override: project.config.egress.allow_private_hosts.
-    egress_allow_private_hosts: Annotated[list[str], NoDecode] = []
+    egress_allow_private_hosts: Annotated[list[str], NoDecode] = [
+        "127.0.0.1",
+        "localhost",
+        "192.168.0.0/16",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "*.local",
+        "homeassistant.local",
+    ]
 
     # --- Rate limits / quotas (per tenant). 0 = unlimited. Per-tenant overrides may
     # live in tenant.settings (max_runs_per_minute / max_runs_per_day). ---
@@ -583,6 +591,8 @@ class Settings(BaseSettings):
             problems.append("FORGE_BOOTSTRAP_ADMIN_PASSWORD is the dev default - set a real one.")
         if not self.egress_block_private:
             problems.append("FORGE_EGRESS_BLOCK_PRIVATE must stay true outside dev (SSRF guard).")
+        if self.auth_rate_limit_per_minute <= 0:
+            problems.append("FORGE_AUTH_RATE_LIMIT_PER_MINUTE must be > 0 outside dev/test environments.")
 
         if self.enable_code_tools and not self.allow_unsandboxed_code_tools:
             problems.append(

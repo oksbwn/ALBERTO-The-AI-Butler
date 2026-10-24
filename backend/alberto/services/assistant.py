@@ -137,22 +137,34 @@ async def _default_agent_model(session, tenant_id: str, project_id: str) -> str:
     raise ValueError("No model configured or available. Please configure a default model in project settings or model registry.")
 
 
-def build_assistant_tools(tenant_id: str, project_id: str, mutated: list) -> list:
+def build_assistant_tools(tenant_id: str, project_id: str, mutated: list, current_user: Any = None) -> list:
     """StructuredTools bound to one project. `mutated` collects created-resource notes."""
     from langchain_core.tools import StructuredTool
 
     async def list_resources() -> str:
-        """List everything in this project: tools, workflows, agents, auth providers, knowledge sources, and Q&A pairs. Use this to answer 'what do I have' and before deciding what to build."""
+        """List everything in this project: MCP integrations, connectors, tools, workflows, agents, auth providers, knowledge sources, and Q&A pairs. Use this to answer 'what do I have' and before deciding what to build."""
+        from alberto.models import ConnectorInstall, McpClient
         async with SessionLocal() as s:
             def names(rows, attr="name"):
                 return [getattr(r, attr) for r in rows] or ["(none)"]
+            mcps = (await s.execute(select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.project_id == project_id))).scalars().all()
+            conns = (await s.execute(select(ConnectorInstall).where(ConnectorInstall.tenant_id == tenant_id, ConnectorInstall.project_id == project_id))).scalars().all()
             tools = (await s.execute(select(Tool).where(Tool.tenant_id == tenant_id, Tool.project_id == project_id))).scalars().all()
             wfs = (await s.execute(select(Workflow).where(Workflow.tenant_id == tenant_id, Workflow.project_id == project_id))).scalars().all()
             agents = (await s.execute(select(Agent).where(Agent.tenant_id == tenant_id, Agent.project_id == project_id))).scalars().all()
             aps = (await s.execute(select(AuthProvider).where(AuthProvider.tenant_id == tenant_id, AuthProvider.project_id == project_id))).scalars().all()
             srcs = (await s.execute(select(KbSource).where(KbSource.tenant_id == tenant_id, KbSource.project_id == project_id))).scalars().all()
             qas = (await s.execute(select(QaPair).where(QaPair.tenant_id == tenant_id, QaPair.project_id == project_id))).scalars().all()
+            mcp_items = []
+            for m in mcps:
+                is_ha = "8123" in (m.url or "") or m.name.upper() == "HA" or "homeassistant" in (m.url or "").lower()
+                label = f"{m.name} (Home Assistant)" if is_ha else m.name
+                status_str = "enabled" if m.enabled else "disabled"
+                mcp_items.append(f"{label} ({m.transport}, {m.url or 'local'}) [{status_str}]")
+            conn_items = [f"{c.name or c.slug} [{c.status}] (version {c.version})" for c in conns] or ["(none)"]
             return json.dumps({
+                "mcp_integrations": mcp_items or ["(none)"],
+                "connectors": conn_items,
                 "tools": [f"{t.name} ({t.kind})" for t in tools] or ["(none)"],
                 "workflows": [f"{w.name} [{w.status}]" for w in wfs] or ["(none)"],
                 "agents": names(agents), "auth_providers": [f"{a.name} ({a.kind})" for a in aps] or ["(none)"],
@@ -716,7 +728,7 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list) -> lis
             "required": ["verdict", "issues"],
         }
         async with SessionLocal() as s:
-            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id)
+            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id, load_tools=False)
         model = resolve_model(_assistant_model_ref(ctx), ctx)
         # Offline (fake) model can't actually judge anything - returning 'pass' would be a false
         # green. Report 'unverified' so the caller knows the build was NOT independently checked (F7).
@@ -759,6 +771,58 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list) -> lis
         mutated.append({"kind": "workflow_deleted", "name": wf.name})
         return f"Deleted workflow '{wf.name}' (id {wf.id}) and its run history."
 
+    async def delegate_tool_execution(tool_id_or_capability: str, parameters_json: str = "{}", approval_id: str = "") -> str:
+        """Execute an external tool securely by delegating to the Tool Manager system agent.
+        The Master Agent has NO direct external tool access; all external tool execution must be
+        mediated by Tool Manager. Tool Manager resolves the tool, verifies activation, caller
+        entitlements, and human approval before execution. Pass tool_id_or_capability, optional
+        parameters_json, and optional approval_id if resuming an approved execution."""
+        from alberto.services.tool_manager import ToolManagerService
+        try:
+            params = json.loads(parameters_json) if parameters_json else {}
+        except Exception:
+            params = {}
+        user_ctx = {
+            "user_id": getattr(current_user, "id", None),
+            "tenant_id": getattr(current_user, "tenant_id", tenant_id),
+            "role": getattr(current_user, "role", "assistant"),
+            "email": getattr(current_user, "email", None),
+        } if current_user else {"role": "assistant", "tenant_id": tenant_id}
+        exec_ctx = {"approval_id": approval_id} if approval_id else {}
+        res = await ToolManagerService.execute_delegated_tool(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            tool_id_or_capability=tool_id_or_capability,
+            parameters=params,
+            user_context=user_ctx,
+            execution_context=exec_ctx,
+        )
+        return json.dumps(res)
+
+    async def delegate_automation_management(requirement: str, session_id: str = "") -> str:
+        """Delegate workflow design, authoring, validation, or troubleshooting to the Automation Manager system subagent.
+        Automation Manager discovers project capabilities, structures multi-agent or deterministic pipelines,
+        proposes specialist agents, and validates low-code graph schemas."""
+        from alberto.services.automation_manager import AutomationManagerService
+        async with SessionLocal() as s:
+            if not session_id:
+                auth_sess = await AutomationManagerService.create_session(
+                    session=s,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    user_id=getattr(current_user, "id", None),
+                    requirement=requirement,
+                )
+                session_id = auth_sess.id
+            result = await AutomationManagerService.process_message(
+                session=s,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                session_id=session_id,
+                message=requirement,
+            )
+            return json.dumps(result.model_dump())
+
     def mk(fn, name):
         return StructuredTool.from_function(coroutine=fn, name=name, parse_docstring=False)
 
@@ -786,6 +850,8 @@ def build_assistant_tools(tenant_id: str, project_id: str, mutated: list) -> lis
         mk(test_workflow, "test_workflow"),
         mk(evaluate_build, "evaluate_build"),
         mk(delete_workflow, "delete_workflow"),
+        mk(delegate_tool_execution, "delegate_tool_execution"),
+        mk(delegate_automation_management, "delegate_automation_management"),
     ]
 
 
@@ -805,6 +871,7 @@ What you can do (use your tools to actually do these - don't just describe them)
 - MULTI-INTENT questions ("one message asks two things"): prefer ONE agent with config.knowledge enabled (rag and/or qa) - it searches each sub-question separately and composes one answer - over a classifier→router, which answers only one part. For parallel specialists, use classifier multi_label=true + router multi=true + a synthesizer agent before end (see the forge-platform skill).
 - Verify and judge your own work (test_workflow, then evaluate_build).
 - Delete a workflow to clean up duplicates (delete_workflow - the run PAUSES for human approval before deleting).
+- Execute external tools via Tool Manager (delegate_tool_execution - pass tool_id_or_capability, optional parameters_json, and optional approval_id; the Master Agent has no direct external tool access, all external tool execution must be mediated by Tool Manager).
 
 How Forge concepts work, so you can explain them:
 - A WORKFLOW is a graph of nodes wired start → … → end. Messages flow through. Common nodes: \
@@ -867,7 +934,7 @@ def _assistant_model_ref(ctx) -> str:
 
 class AssistantService:
     @staticmethod
-    async def _build_agent(*, tenant_id: str, project_id: str, checkpointer, mutated: list, model_override: str | None = None):
+    async def _build_agent(*, tenant_id: str, project_id: str, checkpointer, mutated: list, model_override: str | None = None, current_user: Any = None):
         # Deep agent: adds planning (write_todos), virtual files, summarization, skills,
         # and HITL on top of the Forge tools - so it can take a multi-step request,
         # build, verify with test_workflow, judge with evaluate_build, and keep
@@ -877,7 +944,7 @@ class AssistantService:
         from langchain.agents.middleware import ModelFallbackMiddleware
 
         async with SessionLocal() as s:
-            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id)
+            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id, load_tools=False)
             proj = (await s.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
             ctx.project_config = (proj.config or {}) if proj else {}
 
@@ -900,7 +967,7 @@ class AssistantService:
         from alberto.nodes.agent_node import MemoryRecallMiddleware
         middleware.append(MemoryRecallMiddleware(tenant_id=tenant_id, project_id=project_id))
 
-        tools = build_assistant_tools(tenant_id, project_id, mutated)
+        tools = build_assistant_tools(tenant_id, project_id, mutated, current_user=current_user)
         kwargs: dict[str, Any] = {
             "model": model,
             "tools": tools,
@@ -956,14 +1023,18 @@ class AssistantService:
                 if retrieval_meta:
                     trace_meta["retrieval"] = retrieval_meta
                 is_curator = persona == "memory_curator"
+                is_mgr = persona in ("tool_manager", "integration_manager")
+                is_auto_mgr = persona == "automation_manager"
+                trace_name = "memory_curator" if is_curator else ("tool_manager" if is_mgr else ("automation_manager" if is_auto_mgr else "assistant"))
+                actor_name = "Memory Curator" if is_curator else ("Integration Manager" if is_mgr else ("Automation Manager" if is_auto_mgr else "System"))
                 trace = Trace(
                     tenant_id=tenant_id, project_id=project_id, workflow_id=None,
                     run_id=f"assistant-{_uuid.uuid4()}", thread_id=thread_id,
-                    name="memory_curator" if is_curator else "assistant", status=status,
+                    name=trace_name, status=status,
                     started_at=datetime.utcnow(), ended_at=datetime.utcnow(),
                     latency_ms=latency_ms, total_tokens=tokens, total_cost_usd=cost,
-                    source="memory_curator" if is_curator else "assistant",
-                    actor="Memory Curator" if is_curator else "System",
+                    source=trace_name,
+                    actor=actor_name,
                     user_message=(user_message or None), ai_response=(ai_response or None),
                     error=(error or None),
                     meta=trace_meta,
@@ -1050,7 +1121,7 @@ class AssistantService:
     async def _fast_stream(
         *, tenant_id: str, project_id: str, messages: list[dict],
         thread_id: str | None = None, model: str | None = None,
-        persona: str | None = None,
+        persona: str | None = None, current_user: Any = None,
     ) -> AsyncIterator[dict]:
         import time
 
@@ -1060,7 +1131,7 @@ class AssistantService:
 
         tracer = ForgeTracer()
         async with SessionLocal() as s:
-            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id)
+            ctx = await build_compile_context(s, tenant_id=tenant_id, project_id=project_id, load_tools=False)
             proj = (await s.execute(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))).scalar_one_or_none()
             ctx.project_config = (proj.config or {}) if proj else {}
 
@@ -1068,16 +1139,63 @@ class AssistantService:
             model_inst = resolve_model(primary_ref, ctx, params={"thinking": False})
 
             user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") in ("user", "human")), "")
-            user_lower = user_msg.lower()
 
-            # Hermes-style on-demand tool injection:
-            # Only inject tools when query asks for project resources/automations
+            # Fast mode tool binding & live integration / workflow context
+            is_tool_mgr = persona in ("tool_manager", "integration_manager")
+            is_assistant = persona in (None, "", "assistant")
+            is_auto_mgr = persona == "automation_manager"
+
             tools_to_bind = []
-            if any(w in user_lower for w in ("what workflow", "what automation", "list workflow", "list resource", "what do i have", "my tools", "my agents")):
-                all_tools = build_assistant_tools(tenant_id, project_id, [])
-                tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow")]
+            if is_tool_mgr or is_assistant or is_auto_mgr:
+                all_tools = build_assistant_tools(tenant_id, project_id, [], current_user=current_user)
+                tools_to_bind = [t for t in all_tools if t.name in ("list_resources", "describe_workflow", "delegate_tool_execution")]
 
             runnable = model_inst.bind_tools(tools_to_bind) if tools_to_bind else model_inst
+
+            integration_context = ""
+            if is_tool_mgr or is_assistant:
+                try:
+                    from alberto.models import ConnectorInstall, McpClient, Tool
+                    mcps = (await s.execute(select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.project_id == project_id))).scalars().all()
+                    conns = (await s.execute(select(ConnectorInstall).where(ConnectorInstall.tenant_id == tenant_id, ConnectorInstall.project_id == project_id))).scalars().all()
+                    tools = (await s.execute(select(Tool).where(Tool.tenant_id == tenant_id, Tool.project_id == project_id))).scalars().all()
+
+                    mcp_lines = []
+                    for m in mcps:
+                        is_ha = "8123" in (m.url or "") or m.name.upper() == "HA" or "homeassistant" in (m.url or "").lower()
+                        label = f"{m.name} (Home Assistant)" if is_ha else m.name
+                        status = "enabled" if m.enabled else "disabled"
+                        m_tools = [t.name for t in tools if t.kind == "mcp" and (t.name.startswith("ha_") if is_ha else True)]
+                        tool_sample = ", ".join(m_tools[:8]) + (f" (+{len(m_tools) - 8} more)" if len(m_tools) > 8 else "")
+                        mcp_lines.append(f"- MCP Client: {label} [{status}] | Transport: {m.transport} | URL: {m.url or '(none)'} | Registered Tools ({len(m_tools)}): {tool_sample or '(none)'}")
+
+                    conn_lines = [f"- Connector: {c.name or c.slug} [{c.status}] (version {c.version})" for c in conns]
+
+                    integration_context = (
+                        "\n\n[PROJECT REGISTERED INTEGRATIONS & MCP REGISTRY]\n"
+                        f"Active MCP Servers ({len(mcps)}):\n" + ("\n".join(mcp_lines) if mcp_lines else "None\n") +
+                        f"\nInstalled Connectors ({len(conns)}):\n" + ("\n".join(conn_lines) if conn_lines else "None\n") +
+                        f"\nTotal Registered Tools in Registry: {len(tools)}"
+                    )
+                except Exception as ie:
+                    log.warning("Failed to build live integration context: %s", ie)
+
+            workflow_context = ""
+            if is_auto_mgr or is_assistant:
+                try:
+                    from alberto.models import Workflow
+                    wfs = (await s.execute(select(Workflow).where(Workflow.tenant_id == tenant_id, Workflow.project_id == project_id))).scalars().all()
+                    wf_lines = [
+                        f"- Workflow '{w.name}' (ID: {w.id}) | Status: {w.status} | Version: {w.active_version or 1} | Nodes: {len((w.executable or {}).get('nodes', []))}"
+                        for w in wfs
+                    ]
+                    workflow_context = (
+                        "\n\n[PROJECT WORKFLOW REGISTRY]\n"
+                        f"Total Workflows in this Project: {len(wfs)}\n"
+                        + ("\n".join(wf_lines) if wf_lines else "No workflows exist in this project yet.\n")
+                    )
+                except Exception as we:
+                    log.warning("Failed to build live workflow context: %s", we)
 
             if persona == "memory_curator":
                 fast_sys_prompt = (
@@ -1100,6 +1218,25 @@ class AssistantService:
                     "Your duty is to classify user queries, analyze user requests, and explain how intents are routed across Alberto's tools and workflows. "
                     "Be clear, precise, and concise."
                 )
+            elif persona in ("tool_manager", "integration_manager"):
+                fast_sys_prompt = (
+                    "You are Alberto's Integration Manager Sub-Agent. "
+                    "Your duty is to inspect, manage, and explain tools, MCP servers, connectors, "
+                    "communication channels, and execution policies. "
+                    "You help users test tool parameters, diagnose connectivity issues, verify authentication, "
+                    "and understand Human-In-The-Loop approval requirements. "
+                    "Be clear, precise, and technically accurate. Check the registered integrations and MCP servers list before answering."
+                )
+            elif persona == "automation_manager":
+                fast_sys_prompt = (
+                    "You are Alberto's Automation Manager Sub-Agent. "
+                    "Your duty is to design, generate, validate, troubleshoot, and optimize workflows and automations. "
+                    "You understand Alberto's low-code designer schemas, node catalogs, triggers, specialist agents, and tools. "
+                    "You have direct access to the project's workflow registry and capabilities. "
+                    "Answer questions about existing workflows, workflow counts, execution states, and automation designs directly and factually using the provided Project Workflow Registry. "
+                    "You choose the simplest execution strategy that satisfies the user's requirements. "
+                    "Be clear, precise, and technically accurate."
+                )
             elif persona and persona != "assistant":
                 clean_name = persona.replace("_", " ").title()
                 fast_sys_prompt = (
@@ -1112,9 +1249,17 @@ class AssistantService:
                     "Be natural, warm, and concise (1-3 sentences). Answer questions directly. "
                     "Always preserve user-provided technical terms, product names, acronyms, and model identifiers exactly as stated. "
                     "Never substitute, normalize, or autocorrect them with more common, popular, or phonetically similar alternatives unless the user explicitly tells you to. "
+                    "SMART HOME CONTROL & INTEGRATIONS: You do NOT have a direct physical connection to devices. Instead, you delegate all device actions, light toggles, sensors, and external tools to the Integration Manager via the `delegate_tool_execution` tool. "
+                    "For smart home actions with Home Assistant (HA), call `delegate_tool_execution(tool_id_or_capability='ha_manage_pipeline', parameters_json='{\"action\": \"process\", \"sentence\": \"<user command>\"}'). "
+                    "If tool execution returns READ_ONLY_MODE, explain to the user that the Home Assistant MCP server has Read-Only Mode enabled and must be disabled in the ha-mcp add-on settings to allow smart home control. "
                     "If the user asks for multi-step automation design or deep reasoning, "
                     "mention they can toggle Deep Thinking mode or ask you to execute it."
                 )
+
+            if integration_context:
+                fast_sys_prompt = f"{fast_sys_prompt}{integration_context}"
+            if workflow_context:
+                fast_sys_prompt = f"{fast_sys_prompt}{workflow_context}"
 
             # 1. Unified Knowledge & Memory Recall
             recalled_block = ""
@@ -1303,7 +1448,7 @@ class AssistantService:
     async def stream(
         *, tenant_id: str, project_id: str, messages: list[dict],
         thread_id: str | None = None, checkpointer=None, model: str | None = None,
-        thinking: bool = False, persona: str | None = None,
+        thinking: bool = False, persona: str | None = None, current_user: Any = None,
     ) -> AsyncIterator[dict]:
         import time
 
@@ -1311,7 +1456,7 @@ class AssistantService:
         if not thinking:
             async for frame in AssistantService._fast_stream(
                 tenant_id=tenant_id, project_id=project_id, messages=messages,
-                thread_id=thread_id, model=model, persona=persona,
+                thread_id=thread_id, model=model, persona=persona, current_user=current_user,
             ):
                 yield frame
             return
@@ -1319,7 +1464,7 @@ class AssistantService:
         mutated: list = []
         try:
             agent = await AssistantService._build_agent(
-                tenant_id=tenant_id, project_id=project_id, checkpointer=checkpointer, mutated=mutated, model_override=model,
+                tenant_id=tenant_id, project_id=project_id, checkpointer=checkpointer, mutated=mutated, model_override=model, current_user=current_user,
             )
         except Exception as e:  # noqa: BLE001
             yield {"event": "error", "data": {"message": f"assistant init failed: {e}"}}

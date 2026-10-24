@@ -87,6 +87,9 @@ def retrieval_factory(cfg: dict, ctx: CompileContext):
     qa_kinds = cfg.get("qa_kinds") or None
     # When nothing relevant is found, inject an explicit note so a grounded agent knows
     # to say it doesn't have the answer rather than fall back to model world-knowledge.
+    include_memory = cfg.get("include_memory", True)
+    include_graph = cfg.get("include_graph", True)
+    memory_top_k = cfg.get("memory_top_k", 5)
     announce_empty = cfg.get("announce_empty", False)
     # When set, also write "yes"/"no" (found anything?) to this state key so a downstream
     # router can branch found → agent / not-found → escalation. Optional; key must be
@@ -98,6 +101,7 @@ def retrieval_factory(cfg: dict, ctx: CompileContext):
 
         from alberto.db.base import SessionLocal
         from alberto.services.knowledge import KnowledgeService
+        from alberto.services.unified_memory import UnifiedMemoryManager
 
         query = _last_user_text(state.get("messages") or [])
         if not query:
@@ -105,9 +109,32 @@ def retrieval_factory(cfg: dict, ctx: CompileContext):
 
         blocks: list[str] = []
         async with SessionLocal() as s:
-            # Embed the query ONCE and reuse the vector for both doc search and Q&A
-            # scoring. Skip entirely when neither source is enabled, so a node configured
-            # to do nothing makes no embedding API call.
+            # 1. Recall Unified Memory: curated memory facts + knowledge graph entities
+            um_sources: list[str] = []
+            if include_memory:
+                um_sources.append("memory")
+            if include_graph:
+                um_sources.append("graph")
+
+            if um_sources:
+                try:
+                    um_records = await UnifiedMemoryManager.recall(
+                        session=s,
+                        tenant_id=ctx.tenant_id,
+                        project_id=ctx.project_id,
+                        query=query,
+                        sources=um_sources,
+                        top_k=memory_top_k,
+                    )
+                    for rec in um_records:
+                        src_label = "Memory" if rec.source in ("sqlite_memory", "chroma_memory", "memory") else "Knowledge Graph"
+                        blocks.append(f"[{src_label}] {rec.content}")
+                except Exception as e:  # noqa: BLE001
+                    from alberto.util.metrics import incr
+
+                    incr("retrieval.unified_memory_error", detail=str(e))
+
+            # 2. Embed the query ONCE and reuse the vector for both doc search and Q&A scoring
             embedder = qvec = None
             if include_docs or include_qa:
                 try:
@@ -175,13 +202,20 @@ def retrieval_factory(cfg: dict, ctx: CompileContext):
 
 def _retrieval_summary(c: dict) -> list[str]:
     """Glanceable canvas lines: which sources this retrieval node pulls from."""
-    lines: list[str] = []
+    parts: list[str] = []
+    if c.get("include_memory", True):
+        parts.append("memory")
+    if c.get("include_graph", True):
+        parts.append("graph")
+    if c.get("include_docs", True):
+        parts.append("docs")
+    if c.get("include_qa", False):
+        parts.append("Q&A")
+    lines: list[str] = ["unified: " + " + ".join(parts)] if parts else ["no sources enabled"]
     if c.get("include_docs", True):
         flags = ("" if not c.get("hybrid") else " · hybrid") + ("" if not c.get("rerank") else " · rerank")
-        lines.append(f"docs top_k {c.get('top_k', 5)}{flags}")
-    if c.get("include_qa"):
-        lines.append(f"Q&A top_k {c.get('qa_top_k', 3)}")
-    return lines or ["no sources enabled"]
+        lines.append(f"top_k {c.get('top_k', 5)}{flags}")
+    return lines
 
 
 register(NodeSpec(

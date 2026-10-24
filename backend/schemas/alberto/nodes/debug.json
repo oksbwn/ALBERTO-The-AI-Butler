@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forge/nodes/debug",
+  "type": "object",
+  "properties": {
+    "target": { "type": "string", "default": "payload" },
+    "active": { "type": "boolean", "default": true },
+    "to_sidebar": { "type": "boolean", "default": true },
+    "complete": { "type": "boolean", "default": false },
+    "terminal": { "type": "boolean", "default": false }
+  },
+  "$comment": "ports: in:any, out:any"
+}

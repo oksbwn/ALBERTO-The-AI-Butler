@@ -14,6 +14,7 @@ const P: Record<string, string> = {
   agents: '<circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/>',
   tools: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2-2z"/>',
   auth: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.4"/>',
+  key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 2.5 2.5"/>',
   knowledge: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 1 6.5 18H19v3H6.5A2.5 2.5 0 0 1 4 20.5z"/>',
   playground: '<path d="M5 4v16l13-8z"/>',
   traces: '<path d="M4 5h16M4 5v6a2 2 0 0 0 2 2h4M10 13v6M14 5v2a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v2"/><circle cx="10" cy="19" r="1.6"/><circle cx="20" cy="19" r="1.6"/>',

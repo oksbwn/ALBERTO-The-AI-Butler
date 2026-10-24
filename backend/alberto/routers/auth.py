@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,7 +46,17 @@ def _auth_throttle(request: Request, email: str | None = None) -> None:
     empty. `auth_rate_limit_per_minute` is the per-email rate; 0 disables both."""
     rate = settings.auth_rate_limit_per_minute
     if rate <= 0:
-        return
+        # Bypass (rate <= 0) is permitted ONLY in an explicitly isolated testing environment
+        is_isolated_test = (
+            settings.environment.lower() in ("test", "testing")
+            or "test_e2e" in str(settings.database_url)
+            or os.getenv("TESTING", "").lower() in ("true", "1")
+            or os.getenv("ALBERTO_TEST_MODE", "").lower() in ("true", "1")
+        )
+        if not is_isolated_test or settings.enforce_security:
+            rate = 10  # Enforce production/standard rate limit floor
+        else:
+            return
     ip = client_ip(request) or "unknown"
     checks = [(f"auth:ip:{ip}", rate * 10)]
     if email:

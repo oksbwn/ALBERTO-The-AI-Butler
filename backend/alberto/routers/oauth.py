@@ -8,6 +8,7 @@ and stores them as a secret. The AuthResolver then auto-refreshes on expiry.
 
 from __future__ import annotations
 
+import json
 from html import escape
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -79,6 +80,100 @@ async def oauth_start(
     return {"authorize_url": url}
 
 
+def _oauth_html(
+    title: str,
+    message: str,
+    status_code: int = 200,
+    is_success: bool = True,
+    ap_id: str | None = None,
+    error: str | None = None,
+) -> HTMLResponse:
+    event_payload = json.dumps({
+        "type": "alberto:oauth_complete",
+        "status": "success" if is_success else "error",
+        "ap_id": ap_id,
+        "error": error,
+    })
+    close_script = "setTimeout(function() { window.close(); }, 1200);" if is_success else ""
+    icon = "✅" if is_success else "❌"
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{escape(title)} - Alberto</title>
+    <style>
+        body {{
+            background: #090a0f;
+            color: #eceef4;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }}
+        .card {{
+            background: #141724;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 28px 32px;
+            max-width: 440px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+        }}
+        .icon {{
+            font-size: 36px;
+            margin-bottom: 16px;
+        }}
+        h2 {{
+            margin: 0 0 10px;
+            font-size: 20px;
+            font-weight: 600;
+        }}
+        p {{
+            margin: 0 0 16px;
+            font-size: 14px;
+            color: #9ba1b6;
+            line-height: 1.5;
+        }}
+        .note {{
+            font-size: 12px;
+            color: #686f87;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">{icon}</div>
+        <h2>{escape(title)}</h2>
+        <p>{escape(message)}</p>
+        <div class="note">This window will close automatically. You can return to Alberto.</div>
+    </div>
+    <script>
+        (function() {{
+            var payload = {event_payload};
+            try {{
+                if (window.opener && !window.opener.closed) {{
+                    var targetOrigin = window.location.origin;
+                    try {{
+                        if (window.opener.location && window.opener.location.origin) {{
+                            targetOrigin = window.opener.location.origin;
+                        }}
+                    }} catch (err) {{}}
+                    window.opener.postMessage(payload, targetOrigin);
+                    {close_script}
+                }}
+            }} catch (e) {{}}
+        }})();
+    </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html, status_code=status_code)
+
+
 @router.get("/v1/oauth/callback", response_class=HTMLResponse)
 async def oauth_callback(
     code: str | None = None, state: str | None = None, error: str | None = None,
@@ -87,15 +182,25 @@ async def oauth_callback(
     # Every interpolated value below is provider/redirect-controlled, so HTML-escape it to
     # avoid reflected XSS on the API origin's callback page (audit S9).
     if error:
-        return HTMLResponse(f"<h3>Authorization failed</h3><p>{escape(error)}</p>", status_code=400)
+        return _oauth_html("Authorization failed", error, status_code=400, is_success=False, error=error)
     if not code or not state:
-        return HTMLResponse("<h3>Missing code/state</h3>", status_code=400)
+        return _oauth_html(
+            "Missing authorization parameters",
+            "Missing code or state parameters from authorization response.",
+            status_code=400,
+            is_success=False,
+            error="missing_code_or_state",
+        )
     try:
         claims = decode_token(state, expected_type="oauth_state")
     except TokenError:
-        # Don't reflect the decode error detail on this public callback page; the generic
-        # message is enough for the user and the specifics aren't security-relevant to them.
-        return HTMLResponse("<h3>Invalid or expired state</h3>", status_code=400)
+        return _oauth_html(
+            "Invalid or expired state",
+            "The authorization state has expired or is invalid.",
+            status_code=400,
+            is_success=False,
+            error="invalid_state",
+        )
     tenant_id, project_id, ap_id = claims["tid"], claims["pid"], claims["ap"]
     ap = await _load(session, tenant_id, project_id, ap_id)
     cfg = ap.config or {}
@@ -125,9 +230,13 @@ async def oauth_callback(
         data=form, headers=headers, timeout=30, follow_redirects=True,
     )
     if r.status_code >= 400:
-        return HTMLResponse(
-            f"<h3>Token exchange failed ({escape(str(r.status_code))})</h3><pre>{escape(r.text[:500])}</pre>",
+        return _oauth_html(
+            f"Token exchange failed ({r.status_code})",
+            r.text[:300],
             status_code=400,
+            is_success=False,
+            ap_id=ap_id,
+            error=f"exchange_failed_{r.status_code}",
         )
     body = r.json()
     import time as _t
@@ -148,7 +257,13 @@ async def oauth_callback(
     # The per-user dims this consent was for, carried through the signed state. Discovery below
     # has to ask the server AS THAT USER - it is the only credential that exists.
     note = await _finish_connector_connect(session, tenant_id, project_id, ap_id, claims.get("ctx"))
-    return HTMLResponse(f"<h3>✅ Connected</h3><p>You can close this window and return to Forge.{note}</p>")
+    return _oauth_html(
+        "Connected successfully",
+        f"You can close this window and return to Alberto.{note}",
+        status_code=200,
+        is_success=True,
+        ap_id=ap_id,
+    )
 
 
 async def _finish_connector_connect(session, tenant_id: str, project_id: str, ap_id: str,

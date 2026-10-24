@@ -372,6 +372,24 @@ class ConnectorInstaller:
             session.add(row)
             await session.commit()
             await session.refresh(row)
+
+            if tool_ids:
+                try:
+                    import asyncio
+
+                    from alberto.services.tool_manager import ToolManagerService
+
+                    asyncio.create_task(
+                        ToolManagerService.analyze_discovered_tools(
+                            tenant_id=tenant_id,
+                            project_id=project_id,
+                            tool_ids=tool_ids,
+                            integration_name=manifest.name,
+                        )
+                    )
+                except Exception as e:
+                    log.warning("Could not schedule Tool Manager discovery analysis: %s", e)
+
             return row
         except IntegrityError as e:
             # The duplicate check above is a read, and `POST /{slug}/connect` installs on demand -
@@ -853,10 +871,21 @@ class ConnectorInstaller:
                 select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == install.mcp_client_id)
             )).scalar_one_or_none()
             if client is not None:
+                try:
+                    from alberto.knowledge.graph import get_graph_adapter, make_entity_id
+                    adapter = get_graph_adapter()
+                    await adapter.delete_entity(tenant_id, install.project_id, make_entity_id(tenant_id, install.project_id, client.name))
+                    await adapter.delete_entity(tenant_id, install.project_id, make_entity_id(tenant_id, install.project_id, f"int:{client.name}"))
+                    await adapter.delete_entities_by_source(tenant_id, install.project_id, f"mcp:{install.mcp_client_id}")
+                    await adapter.delete_entities_by_source(tenant_id, install.project_id, f"integration:{client.name}")
+                except Exception as e:
+                    import logging
+                    logging.getLogger("alberto.connectors.install").debug(f"Knowledge graph cleanup failed: {e}")
                 await session.delete(client)
                 await session.commit()
                 from alberto.tools.mcp import invalidate_client
                 await invalidate_client(install.mcp_client_id)
+
 
         if install.tool_set_id:
             ts = await ToolSetService.get(session, tenant_id, install.tool_set_id)
@@ -882,12 +911,26 @@ class ConnectorInstaller:
             log.info("connector uninstall: keeping %s's shared credentials (still used by %s)",
                      install.slug, shared)
         else:
-            # Clear the whole GROUP's credentials, not just the names this install happens to
-            # have recorded. When two connectors share a vendor app only the FIRST one records
-            # the secret names, so uninstalling that one first (kept, correctly, because a
-            # sibling remained) and then the sibling would otherwise leave the credential
-            # orphaned in the store forever with no install left to point at it.
+            # Check if any other active AuthProvider in this project still references any secret
+            other_aps = (await session.execute(
+                select(AuthProvider).where(
+                    AuthProvider.tenant_id == tenant_id,
+                    AuthProvider.project_id == install.project_id,
+                    AuthProvider.id != (install.auth_provider_id or ""),
+                )
+            )).scalars().all()
+            referenced_by_ap: set[str] = set()
+            for other_ap in other_aps:
+                ap_cfg = other_ap.config or {}
+                for ref in (ap_cfg.get("client_id_ref"), ap_cfg.get("client_secret_ref"), other_ap.credentials_ref):
+                    if ref and isinstance(ref, str) and ref.startswith("secret://proj/"):
+                        referenced_by_ap.add(ref.split("secret://proj/")[-1])
+
+            # Clear the whole GROUP's credentials, unless referenced by another active provider
             for name in self._group_secret_names(install):
+                if name in referenced_by_ap:
+                    log.info("connector uninstall: keeping secret %s referenced by active provider", name)
+                    continue
                 try:
                     await self.secrets.write(
                         session, tenant_id=tenant_id, project_id=install.project_id,

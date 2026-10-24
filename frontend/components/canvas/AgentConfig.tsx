@@ -102,6 +102,99 @@ export function AgentConfig({ config, onChange, tools = [], toolSets = [], agent
         </div>
       )}
 
+      {/* Pipeline Step Parameters (available both for bound saved agents and inline agents) */}
+      <Section
+        label="Task Prompt (Pipeline Mode)"
+        hint={
+          boundId
+            ? "Task instruction for this workflow step. The agent retains its full persona, instructions, and tool access from the saved preset."
+            : "When used as a node in a workflow pipeline, render this prompt dynamically. Supports {{state.<var>}} syntax."
+        }
+      >
+        <textarea
+          className="textarea"
+          rows={3}
+          value={config.task_prompt || ""}
+          placeholder="Analyze ticket {{state.ticket}} and extract category and urgency…"
+          onChange={(e) => set({ task_prompt: e.target.value })}
+        />
+      </Section>
+
+      <CollapsibleSection
+        label="Structured Output (Pipeline)"
+        badge={config.response_format?.mode === "structured" || config.output_key ? "active" : undefined}
+        hint="Constrain agent output to a JSON Schema and unpack it directly into workflow state for downstream routers/tools."
+      >
+        <div className="col gap2">
+          <label className="row gap2" style={{ cursor: "pointer" }}>
+            <Toggle
+              on={config.response_format?.mode === "structured"}
+              onChange={(on) => {
+                if (on) {
+                  const existingSchema = config.response_format?.schema || {
+                    title: "Output",
+                    type: "object",
+                    properties: { result: { type: "string" } },
+                    required: ["result"],
+                  };
+                  set({
+                    response_format: {
+                      mode: "structured",
+                      schema: existingSchema,
+                    },
+                    output_key: config.output_key || "output",
+                  });
+                } else {
+                  set({
+                    response_format: undefined,
+                    output_key: undefined,
+                  });
+                }
+              }}
+            />
+            <span className="t-body-sm">Enable Structured Output</span>
+          </label>
+          {config.response_format?.mode === "structured" && (
+            <div className="col gap2" style={{ paddingLeft: 6 }}>
+              <Field label="State Output Key" help="State variable name to assign parsed JSON (e.g. state.triage).">
+                <input
+                  className="input"
+                  type="text"
+                  value={config.output_key || config.response_format?.output_key || "output"}
+                  placeholder="e.g. triage"
+                  onChange={(e) => {
+                    const key = e.target.value.trim();
+                    set({
+                      output_key: key,
+                      response_format: { ...config.response_format, output_key: key },
+                    });
+                  }}
+                />
+              </Field>
+              <Field label="JSON Schema" help="JSON Schema specifying the output shape.">
+                <textarea
+                  className="textarea mono"
+                  rows={6}
+                  style={{ fontSize: 12 }}
+                  defaultValue={JSON.stringify(config.response_format?.schema ?? {}, null, 2)}
+                  placeholder={'{\n  "type": "object",\n  "properties": { "intent": { "type": "string" } }\n}'}
+                  onChange={(e) => {
+                    try {
+                      const parsed = JSON.parse(e.target.value.trim());
+                      set({
+                        response_format: { ...config.response_format, schema: parsed },
+                      });
+                    } catch {
+                      /* keep last valid */
+                    }
+                  }}
+                />
+              </Field>
+            </div>
+          )}
+        </div>
+      </CollapsibleSection>
+
       {!boundId && (
       <>
       <Section label="Flavor">
@@ -287,6 +380,7 @@ export function AgentConfig({ config, onChange, tools = [], toolSets = [], agent
           </div>
         </Section>
       )}
+
 
       <CollapsibleSection label="Middleware stack" badge={mwCount ? `${mwCount} active` : undefined}
         hint="Order = execution order (the onion). Drag-free reorder with the arrows.">

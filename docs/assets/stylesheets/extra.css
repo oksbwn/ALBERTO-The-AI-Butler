@@ -1,0 +1,65 @@
+/* Alberto Documentation Custom Stylesheet */
+
+:root {
+  --md-primary-fg-color: #2563eb;
+  --md-primary-fg-color--light: #3b82f6;
+  --md-primary-fg-color--dark: #1d4ed8;
+  --md-accent-fg-color: #3b82f6;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #3b82f6;
+  --md-accent-fg-color: #60a5fa;
+}
+
+/* Screenshot image styling */
+.doc-screenshot {
+  display: block;
+  margin: 1.5rem auto;
+  border-radius: 8px;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  max-width: 100%;
+  height: auto;
+}
+
+[data-md-color-scheme="slate"] .doc-screenshot {
+  box-shadow: 0 4px 25px rgba(0, 0, 0, 0.4);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Screenshot caption */
+.doc-caption {
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--md-default-fg-color--light);
+  margin-top: -0.8rem;
+  margin-bottom: 1.6rem;
+  font-style: italic;
+}
+
+/* HTTP method badges */
+.badge-get, .badge-post, .badge-put, .badge-delete, .badge-patch {
+  font-family: monospace;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  display: inline-block;
+  text-transform: uppercase;
+}
+
+.badge-get { background: rgba(34, 197, 94, 0.15); color: #16a34a; border: 1px solid rgba(34, 197, 94, 0.3); }
+.badge-post { background: rgba(59, 130, 246, 0.15); color: #2563eb; border: 1px solid rgba(59, 130, 246, 0.3); }
+.badge-put { background: rgba(245, 158, 11, 0.15); color: #d97706; border: 1px solid rgba(245, 158, 11, 0.3); }
+.badge-delete { background: rgba(239, 68, 68, 0.15); color: #dc2626; border: 1px solid rgba(239, 68, 68, 0.3); }
+.badge-patch { background: rgba(168, 85, 247, 0.15); color: #9333ea; border: 1px solid rgba(168, 85, 247, 0.3); }
+
+/* Mermaid diagram container */
+.mermaid {
+  margin: 1.5rem 0;
+  background: var(--md-default-bg-color);
+  padding: 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--md-default-fg-color--lightest);
+}

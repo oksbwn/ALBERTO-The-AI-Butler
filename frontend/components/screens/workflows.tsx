@@ -12,7 +12,7 @@ import { ForgeNode, NodeTypesContext } from "../canvas/ForgeNode";
 import { AgentConfig, CollapsibleSection } from "../canvas/AgentConfig";
 import { EdgeOverlay } from "../canvas/EdgeOverlay";
 import { WorkflowTestPanel } from "../canvas/WorkflowTestPanel";
-import { FieldsForm, ModelSelect, MultiSelectChips, type FieldSpec } from "../canvas/ConfigForm";
+import { FieldsForm, ModelSelect, MultiSelectChips, VariablePicker, type FieldSpec, type UpstreamSource } from "../canvas/ConfigForm";
 import { Field, Toggle } from "../primitives";
 import { VersionHistory } from "../version-history";
 import { ImportExport } from "../import-export";
@@ -26,6 +26,73 @@ function stripRunData(nds: FlowNode[]): FlowNode[] {
     const { status, debug, ...data } = n.data;
     return { ...n, data };
   });
+}
+
+function getUpstreamOutputs(selectedId: string | null, nodes: FlowNode[], edges: FlowEdge[]): UpstreamSource[] {
+  if (!selectedId) return [];
+  const inMap: Record<string, string[]> = {};
+  for (const e of edges) {
+    if (!inMap[e.target]) inMap[e.target] = [];
+    inMap[e.target].push(e.source);
+  }
+  const visited = new Set<string>();
+  const queue = [...(inMap[selectedId] || [])];
+  const upstreamNodeIds: string[] = [];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    upstreamNodeIds.push(cur);
+    if (inMap[cur]) queue.push(...inMap[cur]);
+  }
+
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const sources: UpstreamSource[] = [
+    {
+      nodeId: "flow",
+      nodeName: "Flow State",
+      keys: ["msg", "payload", "topic", "metadata", "messages"],
+    },
+  ];
+
+  for (const id of upstreamNodeIds) {
+    const n = byId.get(id);
+    if (!n) continue;
+    const t = n.data.nodeType;
+    const cfg = n.data.config || {};
+    const keys: string[] = [];
+    if (t === "inject") {
+      keys.push("payload", "topic", "msg", "metadata");
+    } else if (t === "transform") {
+      keys.push(cfg.output_key || "payload", "msg");
+    } else if (t === "classifier") {
+      keys.push(cfg.output_key || "intent");
+    } else if (t === "tool_call") {
+      keys.push(cfg.output_key || "result", "payload");
+    } else if (t === "llm") {
+      keys.push(cfg.output_key || "result", "messages");
+    } else if (t === "agent" || t === "deep_agent") {
+      keys.push("messages", "tool_calls");
+    } else if (t === "human_input") {
+      keys.push(cfg.output_key || "decision");
+    } else if (t === "webhook_in") {
+      keys.push("payload", "body", "headers");
+    } else if (t === "parallel_fanout") {
+      keys.push(cfg.item_key || "item");
+    } else if (t === "join") {
+      keys.push(cfg.output_key || "results", "items");
+    } else {
+      keys.push("payload", "output");
+    }
+    sources.push({
+      nodeId: n.id,
+      nodeName: cfg.name || n.id,
+      nodeType: t,
+      keys: Array.from(new Set(keys)),
+    });
+  }
+
+  return sources;
 }
 
 function EditableName({
@@ -116,7 +183,7 @@ function EditableName({
 }
 
 /* ============ WORKFLOWS LIST ============ */
-export function WorkflowsScreen({ project, onOpen }: { project: any; onOpen: (w: Workflow) => void }) {
+export function WorkflowsScreen({ project, onOpen, onNav }: { project: any; onOpen: (w: Workflow) => void; onNav?: (screen: string) => void }) {
   const [wfs, setWfs] = useState<Workflow[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -173,6 +240,11 @@ export function WorkflowsScreen({ project, onOpen }: { project: any; onOpen: (w:
             <div className="fg-1" style={{ marginTop: 3 }}>Visual graphs compiled to LangGraph. Build agents, routers, tools, and HITL on the canvas.</div>
           </div>
           <div className="row gap2">
+            {onNav && (
+              <button className="btn btn-secondary" onClick={() => onNav("playground")}>
+                <Icon name="sparkles" size={15} /> AI Studio
+              </button>
+            )}
             <ImportExport project={project} type="workflow" typeLabel="workflow" size="md" onImported={reload}
               items={wfs.map((w) => ({ id: w.id, name: w.name || "Untitled workflow", sub: `${(w.executable?.nodes || []).length} nodes` }))} />
             <button className="btn btn-primary" onClick={create} disabled={busy}><Icon name="plus" size={15} />{busy ? "Creating…" : "New workflow"}</button>
@@ -519,11 +591,16 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
     snapshot();
     setDirty(true);
     const sn = nodes.find((n) => n.id === params.source);
+    const tn = nodes.find((n) => n.id === params.target);
+    const sp = registry[sn?.data.nodeType || ""]?.output_ports || [];
+    const tp = registry[tn?.data.nodeType || ""]?.input_ports || [];
     const fromRouterCase = !!params.sourceHandle?.startsWith("case:") && sn?.data.nodeType === "router";
+    const sHandle = params.sourceHandle || (fromRouterCase ? params.sourceHandle : (sp[0]?.id || "out"));
+    const tHandle = params.targetHandle || (tp[0]?.id || "in");
     // Dragging from a router's case row wires that case to the target node - the canvas
     // edge is the picture, config.cases/default is what the compiler routes on.
-    if (params.sourceHandle?.startsWith("case:") && sn?.data.nodeType === "router") {
-      const key = params.sourceHandle.slice(5);
+    if (sHandle?.startsWith("case:") && sn?.data.nodeType === "router") {
+      const key = sHandle.slice(5);
       setNodes((nds) => nds.map((n) => {
         if (n.id !== params.source) return n;
         const cfg = { ...(n.data.config || {}) };
@@ -532,20 +609,17 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
         return { ...n, data: { ...n.data, config: cfg } };
       }));
     }
-    const sp = registry[sn?.data.nodeType || ""]?.output_ports || [];
-    const io = (sp.find((p) => p.id === params.sourceHandle) || sp[0])?.io_type || "any";
+    const io = (sp.find((p) => p.id === sHandle) || sp[0])?.io_type || "any";
     // Non-blocking type hint: LangGraph edges are control flow (data moves via shared state),
     // so a mismatch is allowed - but surface it so the user knows the port types differ.
-    const tn = nodes.find((n) => n.id === params.target);
-    const tp = registry[tn?.data.nodeType || ""]?.input_ports || [];
-    const tio = (tp.find((p) => p.id === params.targetHandle) || tp[0])?.io_type || "any";
+    const tio = (tp.find((p) => p.id === tHandle) || tp[0])?.io_type || "any";
     if (!ioCompatible(io, tio)) {
       setConnWarning(`Connected ${io} → ${tio}: the port types differ. It still works (data flows through shared state), just double-check this is intended.`);
       window.setTimeout(() => setConnWarning(null), 6000);
     }
     setEdges((eds) => addEdge(
-      { ...params, style: { stroke: IO_COLOR[io] || "var(--io-any)", strokeWidth: 2 } },
-      fromRouterCase ? eds.filter((e) => !(e.source === params.source && e.sourceHandle === params.sourceHandle)) : eds,
+      { ...params, sourceHandle: sHandle, targetHandle: tHandle, style: { stroke: IO_COLOR[io] || "var(--io-any)", strokeWidth: 2 } },
+      fromRouterCase ? eds.filter((e) => !(e.source === params.source && e.sourceHandle === sHandle)) : eds,
     ));
   }, [isValidConnection, nodes, registry, setEdges, setNodes, snapshot]);
 
@@ -690,7 +764,10 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
 
   const palette = useMemo(() => {
     const groups: Record<string, NodeType[]> = {};
-    Object.values(registry).forEach((nt) => { (groups[nt.category] = groups[nt.category] || []).push(nt); });
+    Object.values(registry).forEach((nt) => {
+      if (nt.type === "start" || nt.type === "end") return;
+      (groups[nt.category] = groups[nt.category] || []).push(nt);
+    });
     return groups;
   }, [registry]);
 
@@ -722,7 +799,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
             {dirty && saveState === "idle" && <span title="Unsaved changes" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", marginLeft: 4 }} />}
           </button>
           <button className="btn btn-ghost btn-sm" onClick={async () => { await save(); onRun(); }}><Icon name="playground" size={14} />Playground</button>
-          <button className="btn btn-primary btn-sm" onClick={() => setTestOpen(true)}><Icon name="play" size={14} />{running ? "Testing…" : "Test"}</button>
+          <button className="btn btn-primary btn-sm" onClick={() => setTestOpen(true)} title="Run Workflow"><Icon name="play" size={14} />{running ? "Running…" : "Run"}</button>
         </div>
       </div>
 
@@ -812,7 +889,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
                 <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="var(--canvas-grid)" />
                 <Controls />
                 <MiniMap pannable zoomable style={{ background: "var(--bg-1)" }} nodeColor={(n) => NODE_META[(n.data as any)?.nodeType]?.color || "var(--fg-2)"} />
-                <EdgeOverlay nodes={flowNodes} edges={edges} onRemove={removeEdge} />
+                <EdgeOverlay nodes={flowNodes} edges={edges} selectedNodeId={selId} onRemove={removeEdge} />
               </ReactFlow>
             ) : (
               <div className="col center" style={{ width: "100%", height: "100%", color: "var(--fg-2)" }}>Loading canvas…</div>
@@ -867,6 +944,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
             <NodeInspector
               node={selected}
               nodes={nodes}
+              edges={edges}
               tools={tools}
               toolSets={toolSets}
               agents={agents}
@@ -897,9 +975,160 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
   );
 }
 
+function TransformForm({
+  c,
+  set,
+  upstreamSources,
+}: {
+  c: Record<string, any>;
+  set: (p: Record<string, any>) => void;
+  upstreamSources?: UpstreamSource[];
+}) {
+  const [mode, setMode] = useState<"simple" | "advanced">(c.operations ? "simple" : "advanced");
+  const ops: Array<{ type: string; target: string; value?: any; from?: string; to?: string }> = Array.isArray(c.operations) ? c.operations : [];
+
+  const addOp = () => {
+    const next = [...ops, { type: "set", target: "payload.status", value: "active" }];
+    set({ operations: next });
+  };
+
+  const updateOp = (idx: number, patch: Partial<(typeof ops)[0]>) => {
+    const next = ops.map((op, i) => (i === idx ? { ...op, ...patch } : op));
+    set({ operations: next });
+  };
+
+  const removeOp = (idx: number) => {
+    const next = ops.filter((_, i) => i !== idx);
+    set({ operations: next });
+  };
+
+  return (
+    <div className="col gap3">
+      <div className="row spread" style={{ borderBottom: "1px solid var(--line)", paddingBottom: 6 }}>
+        <span className="t-micro">Transform Mode</span>
+        <div className="row gap1">
+          <button
+            type="button"
+            className="chip"
+            style={{
+              cursor: "pointer",
+              background: mode === "simple" ? "var(--accent)" : "var(--bg-3)",
+              color: mode === "simple" ? "var(--fg-on-accent)" : "var(--fg-1)",
+              borderColor: mode === "simple" ? "var(--accent)" : "var(--line)",
+            }}
+            onClick={() => {
+              setMode("simple");
+              if (!c.operations) {
+                set({ operations: [{ type: "set", target: "payload.status", value: "active" }] });
+              }
+            }}
+          >
+            Simple (Rules)
+          </button>
+          <button
+            type="button"
+            className="chip"
+            style={{
+              cursor: "pointer",
+              background: mode === "advanced" ? "var(--accent)" : "var(--bg-3)",
+              color: mode === "advanced" ? "var(--fg-on-accent)" : "var(--fg-1)",
+              borderColor: mode === "advanced" ? "var(--accent)" : "var(--line)",
+            }}
+            onClick={() => setMode("advanced")}
+          >
+            Advanced (JMESPath)
+          </button>
+        </div>
+      </div>
+
+      {mode === "simple" ? (
+        <div className="col gap2">
+          <div className="row spread">
+            <span className="t-body-sm fg-2">Operations</span>
+            <button type="button" className="btn btn-xs btn-secondary" onClick={addOp}>
+              <Icon name="plus" size={12} /> Add Operation
+            </button>
+          </div>
+          {ops.length === 0 ? (
+            <div className="field-help">No operations defined. Click "Add Operation" to configure field rules.</div>
+          ) : (
+            <div className="col gap2">
+              {ops.map((op, i) => (
+                <div key={i} className="card col gap1" style={{ padding: 8, background: "var(--bg-3)", border: "1px solid var(--line)" }}>
+                  <div className="row spread">
+                    <select
+                      className="select"
+                      style={{ height: 26, fontSize: 11, width: 100 }}
+                      value={op.type}
+                      onChange={(e) => updateOp(i, { type: e.target.value })}
+                    >
+                      <option value="set">Set</option>
+                      <option value="change">Change</option>
+                      <option value="move">Move</option>
+                      <option value="rename">Rename</option>
+                      <option value="delete">Delete</option>
+                    </select>
+                    <button type="button" className="iconbtn" style={{ width: 20, height: 20 }} onClick={() => removeOp(i)}>
+                      <Icon name="trash" size={12} />
+                    </button>
+                  </div>
+                  <div className="row gap1" style={{ alignItems: "center" }}>
+                    <input
+                      className="input mono"
+                      style={{ height: 26, fontSize: 11, flex: 1 }}
+                      placeholder="property (e.g. payload.item)"
+                      value={op.target || ""}
+                      onChange={(e) => updateOp(i, { target: e.target.value })}
+                    />
+                    <VariablePicker
+                      sources={upstreamSources}
+                      onSelect={(path) => updateOp(i, { target: path })}
+                    />
+                  </div>
+                  {op.type !== "delete" && (
+                    <div className="row gap1" style={{ alignItems: "center" }}>
+                      <span className="fg-2 mono-sm" style={{ fontSize: 10, width: 36 }}>to:</span>
+                      <input
+                        className="input mono"
+                        style={{ height: 26, fontSize: 11, flex: 1 }}
+                        placeholder={op.type === "rename" || op.type === "move" ? "new property name" : "value or expression"}
+                        value={op.value !== undefined ? String(op.value) : (op.to || "")}
+                        onChange={(e) => {
+                          if (op.type === "rename" || op.type === "move") {
+                            updateOp(i, { to: e.target.value });
+                          } else {
+                            updateOp(i, { value: e.target.value });
+                          }
+                        }}
+                      />
+                      <VariablePicker
+                        sources={upstreamSources}
+                        onSelect={(path) => {
+                          if (op.type === "rename" || op.type === "move") {
+                            updateOp(i, { to: path });
+                          } else {
+                            updateOp(i, { value: `{{${path}}}` });
+                          }
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <FieldsForm specs={NODE_FIELDS.transform} config={c} onPatch={set} upstreamSources={upstreamSources} />
+      )}
+    </div>
+  );
+}
+
 function NodeInspector({
   node,
   nodes,
+  edges,
   tools,
   toolSets,
   agents,
@@ -915,6 +1144,7 @@ function NodeInspector({
 }: {
   node: FlowNode;
   nodes: FlowNode[];
+  edges: FlowEdge[];
   tools: Tool[];
   toolSets: ToolSet[];
   agents: Agent[];
@@ -933,6 +1163,7 @@ function NodeInspector({
   const set = (patch: Record<string, any>) => onChange({ ...c, ...patch });
   const meta = NODE_META[type] || { label: type, color: "var(--fg-2)", icon: "n_agent" };
   const nodeIds = nodes.map((n) => n.id).filter((id) => id !== node.id);
+  const upstreamSources = useMemo(() => getUpstreamOutputs(node.id, nodes, edges), [node.id, nodes, edges]);
 
   return (
     <div className="col" style={{ gap: 14 }}>
@@ -951,7 +1182,7 @@ function NodeInspector({
 
       {type === "retrieval" && <RetrievalForm c={c} set={set} folders={dynamic?.kb_folders || []} kinds={dynamic?.qa_kinds || []} />}
 
-      {type === "router" && (
+      {(type === "router" || type === "switch") && (
         <RouterForm
           nodeId={node.id}
           c={c}
@@ -980,7 +1211,11 @@ function NodeInspector({
         </div>
       )}
 
-      {NODE_FIELDS[type] && <FieldsForm specs={NODE_FIELDS[type]} config={c} onPatch={set} dynamic={dynamic} />}
+      {type === "transform" || type === "change" ? (
+        <TransformForm c={c} set={set} upstreamSources={upstreamSources} />
+      ) : NODE_FIELDS[type] ? (
+        <FieldsForm specs={NODE_FIELDS[type]} config={c} onPatch={set} dynamic={dynamic} upstreamSources={upstreamSources} />
+      ) : null}
 
       {(type === "start" || type === "end") && <div className="fg-2 t-body-sm">No configuration for this node.</div>}
 
@@ -1060,6 +1295,18 @@ function ToolPicker({ tools, toolSets, value, onChange }: {
           <span>from <strong style={{ color: "var(--fg-1)" }}>{selectedGroup.label}</strong></span>
         </div>
       )}
+      {selected && !selected.enabled && (
+        <div className="row gap1" style={{ fontSize: 11.5, color: "#ef4444", marginTop: 2 }}>
+          <Icon name="alert" size={12} />
+          <span>This tool is disabled or inactive. Enable it in Integrations to execute.</span>
+        </div>
+      )}
+      {selected && selected.enabled && Boolean((selected as any).config?.requires_approval) && (
+        <div className="row gap1" style={{ fontSize: 11.5, color: "#f59e0b", marginTop: 2 }}>
+          <Icon name="shield" size={12} />
+          <span>Execution requires human-in-the-loop approval.</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -1136,9 +1383,38 @@ const NODE_FIELDS: Record<string, FieldSpec[]> = {
     { key: "dedupe_key", label: "Dedupe key JMESPath", widget: "text", placeholder: "id", help: "Unique id within each item so it fires only once." },
     { key: "message_path", label: "Message JMESPath (optional)", widget: "text", placeholder: "title", help: "Path within an item for the message text (empty = the whole item)." },
   ],
+  inject: [
+    { key: "topic", label: "Topic (msg.topic)", widget: "text", placeholder: "home.status", help: "Topic identifier for message routing." },
+    { key: "payload_type", label: "Payload type", widget: "select", options: [
+      { value: "json", label: "JSON Object" },
+      { value: "string", label: "String" },
+      { value: "number", label: "Number" },
+      { value: "boolean", label: "Boolean" },
+      { value: "timestamp", label: "Current Timestamp" },
+    ]},
+    { key: "payload", label: "Payload (msg.payload)", widget: "textarea", placeholder: "{\n  \"status\": \"active\"\n}", help: "Message payload content injected into workflow." },
+    { key: "repeat", label: "Repeat interval (seconds, 0=manual)", widget: "number", min: 0, step: 1 },
+  ],
+  debug: [
+    { key: "target", label: "Inspect property", widget: "select", options: [
+      { value: "payload", label: "msg.payload" },
+      { value: "msg", label: "Complete msg object" },
+      { value: "topic", label: "msg.topic" },
+      { value: "messages", label: "messages (chat history)" },
+    ], help: "Which state property to inspect and print in the debug sidebar." },
+    { key: "active", label: "Debug active", widget: "toggle", help: "Mute debug output without disconnecting the node." },
+  ],
+  delay: [
+    { key: "seconds", label: "Delay duration", widget: "number", min: 0.1, step: 0.5 },
+    { key: "unit", label: "Unit", widget: "select", options: [
+      { value: "seconds", label: "Seconds" },
+      { value: "minutes", label: "Minutes" },
+      { value: "hours", label: "Hours" },
+    ]},
+  ],
 };
 // Node types that render a real form (agent/router/llm/tool_call have bespoke forms; the rest come from NODE_FIELDS).
-const FORM_NODES = new Set<string>(["agent", "deep_agent", "router", "llm", "tool_call", "retrieval", "start", "end", ...Object.keys(NODE_FIELDS)]);
+const FORM_NODES = new Set<string>(["agent", "deep_agent", "router", "switch", "llm", "tool_call", "retrieval", "start", "end", "transform", "change", "inject", "debug", "delay", ...Object.keys(NODE_FIELDS)]);
 
 /** State keys written by upstream-capable nodes, with the values they can take -
  *  shown in the router form so users branch on real values, not made-up labels. */
@@ -1168,8 +1444,24 @@ function stateWriters(nodes: FlowNode[]): { key: string; values: string[]; from:
 function RetrievalForm({ c, set, folders, kinds }: { c: Record<string, any>; set: (p: Record<string, any>) => void; folders: string[]; kinds: string[] }) {
   const ragOn = c.include_docs !== false; // RAG on unless explicitly turned off
   const qaOn = !!c.include_qa;
+  const memoryOn = c.include_memory !== false;
+  const graphOn = c.include_graph !== false;
   return (
     <div className="col" style={{ gap: 18 }}>
+      <CollapsibleSection label="Unified Memory" badge={memoryOn || graphOn ? "active" : undefined}
+        hint="Automatically ground workflow steps with curated facts from Memory Curator and entity relations from Knowledge Graph.">
+        <div className="col gap2">
+          <label className="row gap2" style={{ cursor: "pointer" }}>
+            <Toggle on={memoryOn} onChange={(on) => set({ include_memory: on })} />
+            <span className="t-body-sm">Include Curated Memories (Facts &amp; Preferences)</span>
+          </label>
+          <label className="row gap2" style={{ cursor: "pointer" }}>
+            <Toggle on={graphOn} onChange={(on) => set({ include_graph: on })} />
+            <span className="t-body-sm">Include Knowledge Graph (Entities &amp; Relations)</span>
+          </label>
+        </div>
+      </CollapsibleSection>
+
       <CollapsibleSection label="Knowledge" badge={ragOn ? "enabled" : undefined}
         hint="Pull the most relevant document chunks from your knowledge base into context for a grounded agent.">
         <div className="col gap2">
@@ -1274,8 +1566,24 @@ function RouterForm({
   onCaseRename: (nodeId: string, oldKey: string, newKey: string) => void;
   onCaseRemove: (nodeId: string, key: string) => void;
 }) {
+  const [mode, setMode] = useState<"rules" | "expression">(c.rules ? "rules" : "expression");
+  const rules: Array<{ property: string; op: string; value: any; target: string }> = Array.isArray(c.rules) ? c.rules : [];
   const cases: Record<string, string> = c.cases || {};
   const rows = Object.entries(cases);
+
+  const addRule = () => {
+    const next = [...rules, { property: "payload.status", op: "eq", value: "active", target: nodeIds[0] || "" }];
+    set({ rules: next });
+  };
+  const updateRule = (idx: number, patch: Partial<(typeof rules)[0]>) => {
+    const next = rules.map((r, i) => (i === idx ? { ...r, ...patch } : r));
+    set({ rules: next });
+  };
+  const removeRule = (idx: number) => {
+    const next = rules.filter((_, i) => i !== idx);
+    set({ rules: next });
+  };
+
   const setCase = (k: string, v: string) => {
     set({ cases: { ...cases, [k]: v } });
     onCaseTarget(nodeId, k, v);
@@ -1305,44 +1613,158 @@ function RouterForm({
     return `case_${i}`;
   };
   const addCase = () => setCase(nextCaseKey(), "");
+
   return (
     <div className="col gap3">
-      <div>
-        <div className="field-label">Expression (over state)</div>
-        <input className="input mono" value={c.expression || ""} placeholder="intent" list="router-state-keys" onChange={(e) => set({ expression: e.target.value })} />
-        <datalist id="router-state-keys">{writers.map((w) => <option key={w.key} value={w.key} />)}</datalist>
-        {writers.length > 0 ? (
-          <div className="field-help">
-            Keys written upstream: {writers.map((w) => `${w.key} (${w.values.slice(0, 4).join("/") || "…"}, from ${w.from})`).join(" · ")}
-          </div>
-        ) : (
-          <div className="field-help" style={{ color: "var(--warn)" }}>
-            ⚠ No node in this workflow writes a routable state key yet. Add a Classifier (writes a label), or set a route/decision flag on Retrieval or Human Input - otherwise every run takes the Default path.
-          </div>
-        )}
-      </div>
-      <div>
-        <div className="field-label">Cases - when the expression VALUE equals… → go to</div>
-        {activeWriter && (
-          <div className="field-help" style={{ marginBottom: 6 }}>
-            '{activeWriter.key}' takes the values: <b>{activeWriter.values.join(", ") || "(set by " + activeWriter.from + ")"}</b> - use those exact values as case keys.
-          </div>
-        )}
-        <div className="col gap2">
-          {rows.map(([k, v], i) => (
-            <div key={i} className="row gap2">
-              <input className="input mono" style={{ flex: 1 }} value={k} onChange={(e) => renameCase(k, e.target.value)} />
-              <Icon name="chevright" size={14} style={{ color: "var(--fg-2)" }} />
-              <select className="select" style={{ flex: 1 }} value={v} onChange={(e) => setCase(k, e.target.value)}>
-                <option value="">target…</option>
-                {nodeIds.map((id) => <option key={id} value={id}>{id}</option>)}
-              </select>
-              <button className="iconbtn" onClick={() => removeCase(k)}><Icon name="trash" size={14} /></button>
-            </div>
-          ))}
-          <button className="btn btn-secondary btn-sm" style={{ alignSelf: "flex-start" }} onClick={addCase}><Icon name="plus" size={13} />Add case</button>
+      <div className="row spread" style={{ borderBottom: "1px solid var(--line)", paddingBottom: 6 }}>
+        <span className="t-micro">Routing Mode</span>
+        <div className="row gap1">
+          <button
+            type="button"
+            className="chip"
+            style={{
+              cursor: "pointer",
+              background: mode === "rules" ? "var(--accent)" : "var(--bg-3)",
+              color: mode === "rules" ? "var(--fg-on-accent)" : "var(--fg-1)",
+              borderColor: mode === "rules" ? "var(--accent)" : "var(--line)",
+            }}
+            onClick={() => {
+              setMode("rules");
+              if (!c.rules) {
+                set({ rules: [{ property: "payload.status", op: "eq", value: "active", target: nodeIds[0] || "" }] });
+              }
+            }}
+          >
+            Simple Rules
+          </button>
+          <button
+            type="button"
+            className="chip"
+            style={{
+              cursor: "pointer",
+              background: mode === "expression" ? "var(--accent)" : "var(--bg-3)",
+              color: mode === "expression" ? "var(--fg-on-accent)" : "var(--fg-1)",
+              borderColor: mode === "expression" ? "var(--accent)" : "var(--line)",
+            }}
+            onClick={() => setMode("expression")}
+          >
+            Expression
+          </button>
         </div>
       </div>
+
+      {mode === "rules" ? (
+        <div className="col gap3">
+          <div className="row spread">
+            <span className="t-body-sm fg-2">Switch Conditions</span>
+            <button type="button" className="btn btn-xs btn-secondary" onClick={addRule}>
+              <Icon name="plus" size={12} /> Add Rule
+            </button>
+          </div>
+          {rules.length === 0 ? (
+            <div className="field-help">No rules configured. Messages will follow the default target.</div>
+          ) : (
+            <div className="col gap2">
+              {rules.map((r, i) => (
+                <div key={i} className="card col gap1" style={{ padding: 8, background: "var(--bg-3)", border: "1px solid var(--line)" }}>
+                  <div className="row spread">
+                    <span className="mono-sm fg-2" style={{ fontSize: 11 }}>Rule #{i + 1}</span>
+                    <button type="button" className="iconbtn" style={{ width: 20, height: 20 }} onClick={() => removeRule(i)}>
+                      <Icon name="trash" size={12} />
+                    </button>
+                  </div>
+                  <input
+                    className="input mono"
+                    style={{ height: 26, fontSize: 11 }}
+                    placeholder="property (e.g. payload.status)"
+                    value={r.property || ""}
+                    onChange={(e) => updateRule(i, { property: e.target.value })}
+                  />
+                  <div className="row gap1">
+                    <select
+                      className="select"
+                      style={{ height: 26, fontSize: 11, flex: 1 }}
+                      value={r.op}
+                      onChange={(e) => updateRule(i, { op: e.target.value })}
+                    >
+                      <option value="eq">== (equals)</option>
+                      <option value="neq">!= (not equals)</option>
+                      <option value="contains">contains</option>
+                      <option value="gt">&gt; (greater than)</option>
+                      <option value="lt">&lt; (less than)</option>
+                      <option value="exists">exists</option>
+                      <option value="empty">is empty</option>
+                      <option value="true">is true</option>
+                      <option value="false">is false</option>
+                    </select>
+                    {!["exists", "empty", "true", "false"].includes(r.op) && (
+                      <input
+                        className="input mono"
+                        style={{ height: 26, fontSize: 11, flex: 1 }}
+                        placeholder="value"
+                        value={r.value !== undefined ? String(r.value) : ""}
+                        onChange={(e) => updateRule(i, { value: e.target.value })}
+                      />
+                    )}
+                  </div>
+                  <div className="row gap1" style={{ alignItems: "center" }}>
+                    <span className="fg-2 mono-sm" style={{ fontSize: 10, width: 44 }}>route →</span>
+                    <select
+                      className="select"
+                      style={{ height: 26, fontSize: 11, flex: 1 }}
+                      value={r.target || ""}
+                      onChange={(e) => updateRule(i, { target: e.target.value })}
+                    >
+                      <option value="">Select target node…</option>
+                      {nodeIds.map((id) => <option key={id} value={id}>{id}</option>)}
+                    </select>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          <div>
+            <div className="field-label">Expression (over state)</div>
+            <input className="input mono" value={c.expression || ""} placeholder="intent" list="router-state-keys" onChange={(e) => set({ expression: e.target.value })} />
+            <datalist id="router-state-keys">{writers.map((w) => <option key={w.key} value={w.key} />)}</datalist>
+            {writers.length > 0 ? (
+              <div className="field-help">
+                Keys written upstream: {writers.map((w) => `${w.key} (${w.values.slice(0, 4).join("/") || "…"}, from ${w.from})`).join(" · ")}
+              </div>
+            ) : (
+              <div className="field-help" style={{ color: "var(--warn)" }}>
+                ⚠ No node in this workflow writes a routable state key yet. Add a Classifier (writes a label), or set a route/decision flag on Retrieval or Human Input - otherwise every run takes the Default path.
+              </div>
+            )}
+          </div>
+          <div>
+            <div className="field-label">Cases - when the expression VALUE equals… → go to</div>
+            {activeWriter && (
+              <div className="field-help" style={{ marginBottom: 6 }}>
+                '{activeWriter.key}' takes the values: <b>{activeWriter.values.join(", ") || "(set by " + activeWriter.from + ")"}</b> - use those exact values as case keys.
+              </div>
+            )}
+            <div className="col gap2">
+              {rows.map(([k, v], i) => (
+                <div key={i} className="row gap2">
+                  <input className="input mono" style={{ flex: 1 }} value={k} onChange={(e) => renameCase(k, e.target.value)} />
+                  <Icon name="chevright" size={14} style={{ color: "var(--fg-2)" }} />
+                  <select className="select" style={{ flex: 1 }} value={v} onChange={(e) => setCase(k, e.target.value)}>
+                    <option value="">target…</option>
+                    {nodeIds.map((id) => <option key={id} value={id}>{id}</option>)}
+                  </select>
+                  <button className="iconbtn" onClick={() => removeCase(k)}><Icon name="trash" size={14} /></button>
+                </div>
+              ))}
+              <button className="btn btn-secondary btn-sm" style={{ alignSelf: "flex-start" }} onClick={addCase}><Icon name="plus" size={13} />Add case</button>
+            </div>
+          </div>
+        </>
+      )}
+
       <div>
         <div className="field-label">Default target</div>
         <select className="select" value={c.default || ""} onChange={(e) => { set({ default: e.target.value }); onCaseTarget(nodeId, "__default__", e.target.value); }}>
@@ -1351,7 +1773,7 @@ function RouterForm({
         </select>
         {!c.default && (
           <div className="field-help" style={{ color: "var(--warn)" }}>
-            ⚠ No default: if the expression value matches no case, the run ends silently with no answer.
+            ⚠ No default: if no rules match, the run ends silently.
           </div>
         )}
       </div>
@@ -1361,8 +1783,7 @@ function RouterForm({
           <span className="field-label" style={{ margin: 0 }}>Route to every match (multi)</span>
         </label>
         <div className="field-help">
-          For list-valued expressions (a multi-label Classifier): run EVERY matching case in parallel,
-          then converge the branches on one synthesizer agent before End.
+          For list-valued expressions or multiple matching rules: run EVERY matching case in parallel.
         </div>
       </div>
     </div>

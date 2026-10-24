@@ -114,8 +114,12 @@ def _merge_references(references: str | None, parent_id: str | None) -> str:
 def parse_inbound(payload: Any) -> dict:
     """Normalize an inbound email (raw MIME or provider dict) to a common shape."""
     if isinstance(payload, dict):
-        # Provider inbound-parse fields vary; accept the common ones.
-        sender = payload.get("from") or payload.get("sender") or payload.get("From", "")
+        # Provider inbound-parse fields vary: prioritize envelope sender over From header to prevent spoofing
+        envelope_sender = (parseaddr(payload.get("sender") or "")[1] or str(payload.get("sender") or "")).strip().lower()
+        from_raw = payload.get("from") or payload.get("From", "")
+        from_addr = (parseaddr(from_raw)[1] or str(from_raw or "")).strip().lower()
+        effective_sender = envelope_sender if envelope_sender else from_addr
+        sender = effective_sender
         subject = payload.get("subject") or payload.get("Subject", "")
         text = payload.get("text") or payload.get("body-plain") or payload.get("stripped-text") or payload.get("TextBody") or ""
         if not (text or "").strip():
@@ -126,7 +130,7 @@ def parse_inbound(payload: Any) -> dict:
         msg_id = payload.get("message-id") or payload.get("Message-Id") or payload.get("MessageID")
         references = payload.get("References") or payload.get("references")
         in_reply_to = payload.get("In-Reply-To") or payload.get("in-reply-to")
-        return {"from_addr": parseaddr(sender)[1] or sender, "from_name": parseaddr(sender)[0],
+        return {"from_addr": parseaddr(sender)[1] or sender, "from_name": parseaddr(from_raw)[0] or (payload.get("from_name") or ""),
                 "subject": subject, "text": (text or "").strip(), "message_id": msg_id,
                 "references": references,
                 "thread_ref": _thread_ref(references, in_reply_to, msg_id)}
@@ -236,3 +240,78 @@ async def send_reply(channel, parsed: dict, answer: str) -> bool:
 
     await retry_send(_attempt, label=f"email->{parsed['from_addr']}")
     return True
+
+
+# ---------------------------------------------------------------------------------------------
+# Integrations v3 - inbound authenticity + independent outbound send
+# ---------------------------------------------------------------------------------------------
+
+def _verify_import():
+    import base64
+    import hashlib
+    import hmac
+    import time
+    return base64, hashlib, hmac, time
+
+
+def verify_inbound(secret: str | None, verification: dict | None, headers: Any, payload: Any,
+                   *, now: float | None = None, max_skew_s: int = 300) -> tuple[bool, str | None, str | None]:
+    """Check that an inbound email webhook really came from the configured provider.
+
+    Returns (verified, method, error). `verification` = channel.config["verification"]:
+      {"provider": "mailgun" | "basic_auth" | "shared_secret", "secret_ref": "secret://..."}
+    - mailgun:        HMAC-SHA256(signing_key, timestamp+token) == signature (form fields) and the
+                      timestamp is within `max_skew_s` (replay window).
+    - basic_auth:     Authorization: Basic <user:pass> equals the stored secret ("user:pass").
+                      This is how Postmark and SendGrid Inbound Parse (https://user:pass@host URL)
+                      authenticate - neither signs the payload.
+    - shared_secret:  X-Alberto-Webhook-Secret header equals the stored secret (for relays).
+    No `verification` configured => (False, None, None): the transport is UNVERIFIED. The sender
+    address in a From header is never proof of identity (the gateway quarantines such mail).
+    A configured-but-failing check => (False, method, reason): callers must reject the request."""
+    if not verification or not verification.get("provider"):
+        return False, None, None
+    base64, hashlib, hmac, time = _verify_import()
+    provider = str(verification["provider"]).lower()
+    if not secret:
+        return False, provider, "verification secret not available"
+    get = headers.get if hasattr(headers, "get") else (lambda k, d=None: d)
+    if provider == "mailgun":
+        data = payload if isinstance(payload, dict) else {}
+        # Mailgun nests the signature under "signature" in JSON payloads, flat in form posts.
+        sig_obj = data.get("signature") if isinstance(data.get("signature"), dict) else data
+        ts, token, sig = str(sig_obj.get("timestamp", "")), str(sig_obj.get("token", "")), str(sig_obj.get("signature", ""))
+        if not (ts and token and sig):
+            return False, provider, "missing mailgun signature fields"
+        try:
+            if abs((now if now is not None else time.time()) - float(ts)) > max_skew_s:
+                return False, provider, "stale mailgun timestamp"
+        except ValueError:
+            return False, provider, "bad mailgun timestamp"
+        expected = hmac.new(secret.encode(), (ts + token).encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return False, provider, "bad mailgun signature"
+        return True, provider, None
+    if provider == "basic_auth":
+        auth = get("authorization") or get("Authorization") or ""
+        scheme, _, b64 = auth.partition(" ")
+        if scheme.lower() != "basic" or not b64:
+            return False, provider, "missing basic auth"
+        try:
+            supplied = base64.b64decode(b64).decode()
+        except Exception:  # noqa: BLE001
+            return False, provider, "malformed basic auth"
+        if not hmac.compare_digest(supplied, secret):
+            return False, provider, "bad basic auth"
+        return True, provider, None
+    if provider == "shared_secret":
+        supplied = get("x-alberto-webhook-secret") or get("X-Alberto-Webhook-Secret") or ""
+        if not hmac.compare_digest(supplied, secret):
+            return False, provider, "bad shared secret"
+        return True, provider, None
+    return False, provider, f"unsupported verification provider {provider!r}"
+
+
+async def send_outbound(channel, to_addr: str, subject: str, body: str) -> bool:
+    """Independent (non-reply) email via the same SMTP path/secret resolution as send_reply."""
+    return await send_reply(channel, {"from_addr": to_addr, "subject": subject or "Message from Alberto"}, body)

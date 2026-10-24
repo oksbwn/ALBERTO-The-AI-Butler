@@ -142,17 +142,31 @@ class McpDiscoveryService:
         await session.commit()
         await session.refresh(client_row)
 
-        # Project capabilities into LadybugDB Knowledge Graph
+        # Synchronize discovered tools to the Tool registry and ToolSet
+        try:
+            await cls.sync_tools_to_registry(
+                session=session,
+                client_row=client_row,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                discovered_tools=discovered_tools,
+            )
+        except Exception as e:
+            logger.warning("Failed to sync MCP tools to registry: %s", e)
+
+        # Project capabilities into LadybugDB Knowledge Graph via GraphManagerService
         try:
             from alberto.knowledge.graph import (
                 GraphEntity,
                 GraphRelationship,
-                get_graph_adapter,
                 make_entity_id,
                 make_relationship_id,
             )
+            from alberto.services.graph_manager import GraphManagerService
 
-            adapter = get_graph_adapter()
+            entities: list[GraphEntity] = []
+            relationships: list[GraphRelationship] = []
+
             # 1. Integration entity node
             integration_ent = GraphEntity(
                 id=make_entity_id(tenant_id, project_id, client_row.name),
@@ -165,7 +179,7 @@ class McpDiscoveryService:
                 source=f"mcp:{client_row.id}",
                 confidence=1.0,
             )
-            await adapter.create_or_update_entity(integration_ent)
+            entities.append(integration_ent)
 
             # 2. Capability entity nodes and PROVIDES relationships
             for t in discovered_tools:
@@ -181,7 +195,7 @@ class McpDiscoveryService:
                     source=f"mcp:{client_row.id}:{t['name']}",
                     confidence=1.0,
                 )
-                await adapter.create_or_update_entity(cap_ent)
+                entities.append(cap_ent)
 
                 rel = GraphRelationship(
                     id=make_relationship_id(tenant_id, project_id, integration_ent.id, cap_ent.id, "PROVIDES"),
@@ -193,9 +207,44 @@ class McpDiscoveryService:
                     source=f"mcp:{client_row.id}",
                     confidence=1.0,
                 )
-                await adapter.create_or_update_relationship(rel)
+                relationships.append(rel)
+
+            await GraphManagerService.apply_resolved(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                resolved_entities=entities,
+                resolved_relationships=relationships,
+            )
         except Exception as e:
-            logger.warning("Failed to project MCP capabilities to LadybugDB: %s", e)
+            logger.warning("Failed to project MCP capabilities to LadybugDB via GraphManagerService: %s", e)
+
+        # Trigger event-driven tool analysis in background if tools are present
+        try:
+            import asyncio
+
+            from sqlalchemy import select
+
+            from alberto.models import Tool
+            from alberto.services.tool_manager import ToolManagerService
+
+            t_rows = (await session.execute(
+                select(Tool.id).where(
+                    Tool.tenant_id == tenant_id,
+                    Tool.project_id == project_id,
+                    Tool.kind == "mcp",
+                )
+            )).scalars().all()
+            if t_rows:
+                asyncio.create_task(
+                    ToolManagerService.analyze_discovered_tools(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        tool_ids=list(t_rows),
+                        integration_name=client_row.name,
+                    )
+                )
+        except Exception as e:
+            logger.debug("Could not schedule MCP Tool Manager analysis: %s", e)
 
         return {
             "client_id": client_row.id,
@@ -207,3 +256,130 @@ class McpDiscoveryService:
             "changed_tools": changed_tools,
             "last_discovered_at": now.isoformat(),
         }
+
+    @classmethod
+    async def sync_tools_to_registry(
+        cls,
+        session: AsyncSession,
+        client_row: McpClient,
+        tenant_id: str,
+        project_id: str,
+        discovered_tools: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
+        """Materialize or update discovered MCP tools in the project Tool table and ToolSet."""
+        from sqlalchemy import select
+
+        from alberto.models import Tool, ToolSet, ToolSetMember
+
+        if discovered_tools is None:
+            caps = client_row.capabilities or {}
+            discovered_tools = caps.get("tools") or []
+
+        if not discovered_tools:
+            return []
+
+        # 1. Ensure ToolSet exists for this MCP integration
+        ts_slug = f"mcp-{client_row.id[:8]}"
+        ts = (await session.execute(
+            select(ToolSet).where(
+                ToolSet.tenant_id == tenant_id,
+                ToolSet.project_id == project_id,
+                (ToolSet.slug == ts_slug) | (ToolSet.name == client_row.name),
+            )
+        )).scalars().first()
+
+        if ts is None:
+            ts = ToolSet(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                name=client_row.name,
+                slug=ts_slug,
+                description=f"Tools discovered from MCP integration {client_row.name}",
+                icon="plug-zap",
+                is_default=False,
+                exposed=True,
+            )
+            session.add(ts)
+            await session.flush()
+
+        # 2. Query existing Tool rows for this MCP client
+        existing_tools = list((await session.execute(
+            select(Tool).where(
+                Tool.tenant_id == tenant_id,
+                Tool.project_id == project_id,
+                Tool.kind == "mcp",
+            )
+        )).scalars().all())
+
+        have_by_remote = {
+            (t.config or {}).get("remote_tool_name"): t
+            for t in existing_tools
+            if (t.config or {}).get("mcp_client_id") == client_row.id
+        }
+
+        disabled_set = set(client_row.disabled_tools or [])
+        materialized_tool_ids: list[str] = []
+
+        for t in discovered_tools:
+            remote_name = t.get("name") or ""
+            if not remote_name:
+                continue
+            desc = (t.get("description") or "").strip()
+            schema = t.get("input_schema") or {}
+            is_enabled = client_row.enabled and (remote_name not in disabled_set)
+
+            tool = have_by_remote.get(remote_name)
+            if tool is not None:
+                cfg = dict(tool.config or {})
+                cfg.update({
+                    "description": desc,
+                    "mcp_client_id": client_row.id,
+                    "remote_tool_name": remote_name,
+                    "input_schema": schema,
+                })
+                tool.config = cfg
+                tool.auth_provider_id = client_row.auth_provider_id
+                tool.enabled = is_enabled
+                materialized_tool_ids.append(tool.id)
+            else:
+                new_tool = Tool(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    name=remote_name,
+                    kind="mcp",
+                    config={
+                        "name": remote_name,
+                        "kind": "mcp",
+                        "description": desc,
+                        "mcp_client_id": client_row.id,
+                        "remote_tool_name": remote_name,
+                        "input_schema": schema,
+                    },
+                    auth_provider_id=client_row.auth_provider_id,
+                    enabled=is_enabled,
+                )
+                session.add(new_tool)
+                await session.flush()
+                materialized_tool_ids.append(new_tool.id)
+
+        # 3. Ensure membership in ToolSet
+        if materialized_tool_ids and ts:
+            existing_members = set((await session.execute(
+                select(ToolSetMember.tool_id).where(
+                    ToolSetMember.tenant_id == tenant_id,
+                    ToolSetMember.tool_set_id == ts.id,
+                )
+            )).scalars().all())
+
+            for tid in materialized_tool_ids:
+                if tid not in existing_members:
+                    session.add(ToolSetMember(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        tool_set_id=ts.id,
+                        tool_id=tid,
+                    ))
+
+        await session.commit()
+        return materialized_tool_ids
+

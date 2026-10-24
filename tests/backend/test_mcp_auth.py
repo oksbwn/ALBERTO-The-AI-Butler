@@ -78,10 +78,12 @@ async def test_stdio_transport_never_gets_http_auth():
     row.command = "echo"
     from alberto.config import settings
     settings.enable_mcp_stdio = True
+    settings.mcp_stdio_allowed_commands = ["echo"]
     try:
         conn = await mcp_mod._connection_for(row, tenant, project)
     finally:
         settings.enable_mcp_stdio = False
+        settings.mcp_stdio_allowed_commands = []
     assert "auth" not in conn
 
 

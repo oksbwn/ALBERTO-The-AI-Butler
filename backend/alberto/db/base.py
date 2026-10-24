@@ -119,6 +119,13 @@ def _ensure_new_columns(conn) -> None:
             "superseded_by": "VARCHAR(36)",
             "metadata": "JSON DEFAULT '{}'",
         },
+        "channels": {
+            "target_type": "VARCHAR(20)",
+            "target_id": "VARCHAR(36)",
+            "routing_state": "VARCHAR(20) NOT NULL DEFAULT 'ok'",
+            "routes": "JSON DEFAULT '[]'",
+            "state": "JSON DEFAULT '{}'",
+        },
     }
     inspector = inspect(conn)
     for table, columns in wanted.items():
@@ -142,6 +149,35 @@ def _ensure_new_columns(conn) -> None:
                 )
             except Exception:
                 pass
+
+    backfill_channel_routing(conn)
+
+
+def backfill_channel_routing(conn) -> None:
+    """Integrations v3 legacy-channel routing backfill (idempotent, non-destructive).
+
+    Only touches rows whose `target_type` was never set (pre-v3 channels):
+      A. explicit workflow_id  -> target_type=workflow, target_id=workflow_id (behaviour preserved)
+      B. no workflow_id        -> routing_state='needs_review'; target_type stays NULL. These
+         channels may have relied on the removed first-active-workflow fallback, so they are
+         neither bound to an arbitrary workflow nor silently switched to the Master Agent.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspect(conn)
+    if "channels" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("channels")}
+    if not {"target_type", "target_id", "routing_state"} <= cols:
+        return
+    conn.execute(text(
+        "UPDATE channels SET target_type = 'workflow', target_id = workflow_id, routing_state = 'ok' "
+        "WHERE target_type IS NULL AND workflow_id IS NOT NULL"
+    ))
+    conn.execute(text(
+        "UPDATE channels SET routing_state = 'needs_review' "
+        "WHERE target_type IS NULL AND workflow_id IS NULL"
+    ))
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

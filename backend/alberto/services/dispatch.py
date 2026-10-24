@@ -5,8 +5,11 @@ Shared by the webhook route, the scheduler, the email poller, and chat channels.
 
 from __future__ import annotations
 
+from typing import Any
+
+import inspect
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
@@ -67,6 +70,8 @@ async def dispatch_trigger(run_service: RunService, trigger: Trigger, payload, *
             t = await s.get(Trigger, trigger.id)
             if t is not None:
                 t.last_fired_at = datetime.utcnow()
+                if (t.config or {}).get("run_at"):
+                    t.enabled = False
                 await s.commit()
     # Offload to the worker queue when configured (webhook/schedule need no synchronous
     # reply); otherwise run inline. Either way per-tenant concurrency is bounded (audit P1).
@@ -123,24 +128,59 @@ async def run_due_schedules(run_service: RunService) -> int:
 
     Each due trigger is CLAIMED atomically before running - re-fetch, re-check due, and stamp
     last_fired_at in one transaction - so a second scheduler tick or replica that also saw it
-    due finds it already claimed and skips it (no duplicate scheduled runs). Mirrors the
-    app_event poller's claim (audit F9); schedules previously stamped only inside dispatch."""
+    due finds it already claimed and skips it (no duplicate scheduled runs).
+    For one-time triggers (run_at), the Run record is created in the SAME transaction as the
+    claim, guaranteeing crash-safe durability without losing execution on restart.
+    """
     async with SessionLocal() as s:
         due = await TriggerService.due_schedule_triggers(s)
     fired = 0
     for trig in due:
+        run_id = None
+        is_one_time = False
         async with SessionLocal() as s:
             t = await s.get(Trigger, trig.id)
             if t is None or not TriggerService.is_due(t):
                 continue  # already claimed by a concurrent tick / no longer due
             t.last_fired_at = datetime.utcnow()
+            is_one_time = bool((t.config or {}).get("run_at"))
+            if is_one_time:
+                # Atomically claim trigger and create durable Run record in SQLite
+                run_input = TriggerService.build_input(t, None)
+                end_user = {"id": t.run_as_user_id} if t.run_as_user_id else None
+                run = await run_service.create_run(
+                    s,
+                    tenant_id=t.tenant_id,
+                    project_id=t.project_id,
+                    workflow_id=t.workflow_id,
+                    input=run_input,
+                    end_user=end_user,
+                    source="schedule",
+                )
+                run_id = run.id
+                t.enabled = False
+                t.meta = {
+                    **(t.meta or {}),
+                    "one_time_run_id": run_id,
+                    "dispatch_status": "dispatched",
+                    "dispatched_at": datetime.utcnow().isoformat(),
+                }
             await s.commit()
+
         try:
-            await dispatch_trigger(run_service, trig, None, stamp=False)
+            if is_one_time and run_id:
+                from alberto.queue import enqueue_run
+                if not await enqueue_run(run_id, trig.tenant_id, trig.project_id):
+                    await run_service.run_to_completion(
+                        run_id=run_id, tenant_id=trig.tenant_id, project_id=trig.project_id,
+                    )
+            else:
+                await dispatch_trigger(run_service, trig, None, stamp=False)
             fired += 1
         except Exception:  # noqa: BLE001 - one bad schedule must not stop the rest
             log.exception("schedule trigger %s failed", trig.id)
     return fired
+
 
 
 async def run_due_app_events(run_service: RunService) -> int:
@@ -263,3 +303,103 @@ async def run_due_source_syncs() -> int:
     async with SessionLocal() as s:
         results = await SourceSyncCoordinator.execute_due_sync_jobs(s)
     return len([r for r in results if r.get("ok")])
+
+
+_FAULT_HOOK_AFTER_CLAIM: Any = None
+
+
+async def run_due_delays(run_service: RunService, lease_seconds: int = 30) -> int:
+    """Resume runs paused at a durable Delay node whose deadline has passed.
+    
+    Crash-Safe Guarantee:
+    - Atomically claims the continuation with a renewable lease (status="claimed", claimed_at).
+    - Preserves continuation metadata in Thread.meta across worker crashes.
+    - If a crash occurs before or during resume, subsequent scheduler sweeps reclaim expired leases.
+    - Purged permanently only upon terminal run completion in RunService._finalize.
+    """
+    from alberto.models import Run, Thread
+    now = datetime.now(timezone.utc)
+    resumed_count = 0
+    async with SessionLocal() as session:
+        runs = list((await session.execute(
+            select(Run).where(Run.status == "interrupted")
+        )).scalars())
+
+    for r_entry in runs:
+        claimed = False
+        async with SessionLocal() as session:
+            th = await session.get(Thread, r_entry.thread_id)
+            if not th or not th.meta:
+                continue
+            delay_key = f"delay_continuation_{r_entry.id}"
+            delay_info = (th.meta or {}).get(delay_key)
+            if not delay_info or not isinstance(delay_info, dict):
+                continue
+            deadline_str = delay_info.get("deadline")
+            if not deadline_str:
+                continue
+            try:
+                deadline = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
+                if deadline.tzinfo is not None:
+                    now_tz = datetime.now(deadline.tzinfo)
+                    is_due = deadline <= now_tz
+                else:
+                    is_due = deadline <= datetime.now(timezone.utc).replace(tzinfo=None)
+            except Exception:
+                continue
+
+            if not is_due:
+                continue
+
+            # Check if already claimed and lease is still active
+            status = delay_info.get("status")
+            claimed_at_str = delay_info.get("claimed_at")
+            if status == "claimed" and claimed_at_str:
+                try:
+                    claimed_at = datetime.fromisoformat(claimed_at_str.replace("Z", "+00:00"))
+                    if claimed_at.tzinfo is not None:
+                        now_tz = datetime.now(claimed_at.tzinfo)
+                        lease_active = (now_tz - claimed_at).total_seconds() < lease_seconds
+                    else:
+                        lease_active = (datetime.now(timezone.utc).replace(tzinfo=None) - claimed_at).total_seconds() < lease_seconds
+                    if lease_active:
+                        continue
+                except Exception:
+                    pass
+
+            r = await session.get(Run, r_entry.id)
+            if not r or r.status != "interrupted":
+                continue
+
+            # Atomically claim with lease WITHOUT removing continuation from Thread.meta!
+            th_meta = dict(th.meta)
+            updated_info = dict(delay_info)
+            updated_info["status"] = "claimed"
+            updated_info["claimed_at"] = now.isoformat()
+            th_meta[delay_key] = updated_info
+            th.meta = th_meta
+            await session.commit()
+            claimed = True
+
+        if not claimed:
+            continue
+
+        # Optional test fault-injection hook
+        if _FAULT_HOOK_AFTER_CLAIM is not None:
+            if inspect.iscoroutinefunction(_FAULT_HOOK_AFTER_CLAIM):
+                await _FAULT_HOOK_AFTER_CLAIM(r_entry.id)
+            else:
+                _FAULT_HOOK_AFTER_CLAIM(r_entry.id)
+
+        try:
+            await run_service.resume(
+                run_id=r_entry.id,
+                tenant_id=r_entry.tenant_id,
+                project_id=r_entry.project_id,
+                value={"delayed": True},
+            )
+            resumed_count += 1
+        except Exception:
+            log.exception("Failed to resume delayed run %s", r_entry.id)
+
+    return resumed_count

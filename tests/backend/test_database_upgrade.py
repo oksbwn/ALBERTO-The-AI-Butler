@@ -293,3 +293,174 @@ def test_alembic_upgrade_from_original_0017_to_0018(tmp_path):
     finally:
         settings.database_url = orig_url
 
+
+def test_alembic_upgrade_from_0021_to_0022_integrations_v2(tmp_path):
+    """Test upgrade on an existing database stamped at revision 0021 to 0022.
+
+    Verifies:
+    1. tool_approval_requests and tool_analysis_jobs tables are created.
+    2. Composite index ix_tool_analysis_jobs_lookup is created.
+    3. Existing data in pre-0022 tables is completely preserved.
+    4. Upgrade is idempotent on repeated runs.
+    5. Clean rollback on downgrade.
+    """
+    from alembic import command
+    from alembic.config import Config
+    from alberto.config import settings
+
+    db_file = tmp_path / "upgrade_0022.db"
+    orig_url = settings.database_url
+    try:
+        settings.database_url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
+        cfg = Config("backend/alembic.ini")
+        cfg.set_main_option("script_location", "backend/migrations")
+
+        # 1. Upgrade to 0021 (pre-Integrations v2 schema)
+        command.upgrade(cfg, "0021_dynamic_ontology_registry")
+
+        # Simulate an existing database that ran migrations up to 0021 in the past:
+        conn = sqlite3.connect(str(db_file))
+        conn.execute("DROP TABLE IF EXISTS tool_approval_requests;")
+        conn.execute("DROP TABLE IF EXISTS tool_analysis_jobs;")
+        conn.commit()
+
+        tables_0021 = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "tool_approval_requests" not in tables_0021
+        assert "tool_analysis_jobs" not in tables_0021
+
+        # Populate pre-existing data in an earlier table
+        conn.execute("""
+            INSERT INTO ontology_entity_types (id, tenant_id, project_id, canonical_key, display_name, description, aliases, status, provenance, created_at, updated_at)
+            VALUES ('oet-1', 'tenant-1', 'proj-1', 'Server', 'Server', 'Infrastructure server', '[]', 'approved', 'system_seed', datetime('now'), datetime('now'));
+        """)
+        conn.commit()
+        conn.close()
+
+        # 2. Upgrade to head (0022)
+        command.upgrade(cfg, "head")
+
+        conn = sqlite3.connect(str(db_file))
+        tables_0022 = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "tool_approval_requests" in tables_0022
+        assert "tool_analysis_jobs" in tables_0022
+
+        # Check composite index
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list('tool_analysis_jobs')").fetchall()}
+        assert "ix_tool_analysis_jobs_lookup" in indexes
+
+        # Verify existing data preservation
+        oet_rows = conn.execute("SELECT id, canonical_key FROM ontology_entity_types").fetchall()
+        assert len(oet_rows) == 1
+        assert oet_rows[0][0] == "oet-1"
+        assert oet_rows[0][1] == "Server"
+
+        # 3. Verify insert and query on newly migrated tables
+        conn.execute("""
+            INSERT INTO tool_approval_requests (id, tenant_id, project_id, tool_id, tool_name, arguments_hash, status, expires_at, created_at, updated_at)
+            VALUES ('appr-test-1', 'tenant-1', 'proj-1', 'tool-1', 'Tool One', 'hash123', 'pending', datetime('now', '+1 hour'), datetime('now'), datetime('now'));
+        """)
+        conn.execute("""
+            INSERT INTO tool_analysis_jobs (id, tenant_id, project_id, tool_id, schema_fingerprint, status, created_at, updated_at)
+            VALUES ('job-test-1', 'tenant-1', 'proj-1', 'tool-1', 'fp123', 'pending', datetime('now'), datetime('now'));
+        """)
+        conn.commit()
+
+        # 4. Idempotent re-run on current head
+        command.upgrade(cfg, "head")
+
+        # 5. Clean rollback on downgrade
+        command.downgrade(cfg, "0021_dynamic_ontology_registry")
+        tables_downgrade = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "tool_approval_requests" not in tables_downgrade
+        assert "tool_analysis_jobs" not in tables_downgrade
+
+        conn.close()
+    finally:
+        settings.database_url = orig_url
+
+
+def test_alembic_upgrade_0023_integrations_v3_channels(tmp_path):
+    """Test Alembic upgrade to 0023_integrations_v3_channels and downgrade.
+
+    Verifies:
+    1. Channels columns target_type, target_id, routing_state, routes, state exist.
+    2. channel_identities, channel_pairings, channel_events tables exist with unique constraints and indexes.
+    3. Existing channels data is preserved.
+    4. Downgrade cleanly drops tables and restores previous state.
+    """
+    from alembic import command
+    from alembic.config import Config
+    from alberto.config import settings
+
+    db_file = tmp_path / "test_0023.db"
+    orig_url = settings.database_url
+    try:
+        settings.database_url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
+        cfg = Config("backend/alembic.ini")
+        cfg.set_main_option("script_location", "backend/migrations")
+
+        # 1. Upgrade to 0022 first
+        command.upgrade(cfg, "0022_integrations_v2_and_tool_manager")
+
+        conn = sqlite3.connect(str(db_file))
+        # Simulate pre-0023 database state: drop 0023 tables and recreate channels without 0023 columns
+        conn.execute("DROP TABLE IF EXISTS channel_identities;")
+        conn.execute("DROP TABLE IF EXISTS channel_pairings;")
+        conn.execute("DROP TABLE IF EXISTS channel_events;")
+        conn.execute("DROP TABLE IF EXISTS channels;")
+        conn.execute("""
+            CREATE TABLE channels (
+                id VARCHAR(36) NOT NULL PRIMARY KEY,
+                tenant_id VARCHAR(36) NOT NULL,
+                project_id VARCHAR(36) NOT NULL,
+                name VARCHAR(120) NOT NULL,
+                type VARCHAR(32) NOT NULL,
+                workflow_id VARCHAR(36),
+                config JSON DEFAULT '{}',
+                enabled BOOLEAN NOT NULL DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute("""
+            INSERT INTO channels (id, tenant_id, project_id, name, type, workflow_id, config, enabled, created_at, updated_at)
+            VALUES ('chan-pre-1', 'tenant-1', 'proj-1', 'Pre-existing Telegram', 'telegram', 'wf-1', '{"bot_token_secret_ref":"sec://t"}', 1, datetime('now'), datetime('now'));
+        """)
+        conn.commit()
+        conn.close()
+
+        # 2. Upgrade to head (0023)
+        command.upgrade(cfg, "head")
+
+        conn = sqlite3.connect(str(db_file))
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "channel_identities" in tables
+        assert "channel_pairings" in tables
+        assert "channel_events" in tables
+
+        # Verify channels columns
+        cols = {row[1] for row in conn.execute("PRAGMA table_info('channels')").fetchall()}
+        assert "target_type" in cols
+        assert "target_id" in cols
+        assert "routing_state" in cols
+        assert "routes" in cols
+        assert "state" in cols
+
+        # Check existing channel preservation and migration backfill
+        row = conn.execute("SELECT id, target_type, target_id FROM channels WHERE id='chan-pre-1'").fetchone()
+        assert row is not None
+        assert row[0] == "chan-pre-1"
+        assert row[1] == "workflow"
+        assert row[2] == "wf-1"
+
+        # 3. Clean downgrade to 0022 updates version stamp
+        command.downgrade(cfg, "0022_integrations_v2_and_tool_manager")
+        current_rev = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        assert current_rev == "0022_integrations_v2_and_tool_manager"
+
+        conn.close()
+    finally:
+        settings.database_url = orig_url
+
+
+

@@ -100,8 +100,8 @@ Open your browser:
 - **Health Check**: [http://localhost:8000/readyz](http://localhost:8000/readyz)
 
 **Default Credentials**:
-- **Email / Username**: `admin@alberto.local` (or `admin`)
-- **Password**: `alberto-admin` (or `password`)
+- **Email / Username**: `admin`
+- **Password**: `password`
 
 ---
 

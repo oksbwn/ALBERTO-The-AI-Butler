@@ -35,3 +35,24 @@ async def test_memory_builtin_tools():
     await remember.ainvoke({"text": "The launch date is March 2027."})
     out = await recall.ainvoke({"query": "when is the launch?"})
     assert "March 2027" in out
+
+
+async def test_remember_blocks_sensitive_credentials():
+    ctx = make_runtime_ctx(T, P)
+    remember = materialize_tool({"name": "remember", "kind": "builtin", "builtin": "remember"}, ctx)
+    res = await remember.ainvoke({"text": "User password: secretPassword123"})
+    assert "Error: Content contains sensitive credentials" in res
+
+
+async def test_remember_and_recall_graph_entity():
+    ctx = make_runtime_ctx(T, P)
+    remember = materialize_tool({"name": "remember", "kind": "builtin", "builtin": "remember"}, ctx)
+    recall = materialize_tool({"name": "recall", "kind": "builtin", "builtin": "recall"}, ctx)
+    res = await remember.ainvoke({
+        "key": "lab_bulb",
+        "value": "Smart LED bulb in the basement lab",
+        "target": "graph",
+    })
+    assert "Saved entity" in res or "Knowledge Graph" in res
+    out = await recall.ainvoke({"query": "lab_bulb"})
+    assert "lab_bulb" in out

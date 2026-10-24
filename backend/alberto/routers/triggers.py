@@ -105,7 +105,7 @@ async def list_triggers(
             # True only when you are seeing someone else's personal trigger because of your role.
             "visible_via_oversight": personal and not mine,
         }
-        if t.kind == "webhook_in" and t.key:
+        if t.kind in ("webhook_in", "integration_event") and t.key:
             item["webhook_url"] = f"{base}/v1/hooks/{t.key}"
         out.append(item)
     return out
