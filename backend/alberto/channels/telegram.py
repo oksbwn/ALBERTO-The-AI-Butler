@@ -223,10 +223,33 @@ def webhook_secret(channel_key: str) -> str:
     return hmac.new(channel_key.encode(), b"alberto-telegram-webhook", hashlib.sha256).hexdigest()
 
 
-def verify_webhook_secret(header_value: str | None, channel_key: str) -> bool:
+async def resolve_webhook_secret(channel) -> str:
+    """Resolve the webhook secret from SecretStore if configured, else fallback to deterministic HMAC."""
+    if not channel:
+        return ""
+    ref = (channel.config or {}).get("webhook_secret_ref")
+    if ref:
+        try:
+            val = await SecretStore().read_ref(tenant_id=channel.tenant_id, project_id=channel.project_id, ref=ref)
+            if val:
+                return str(val)
+        except Exception:
+            pass
+    return webhook_secret(channel.key)
+
+
+def verify_webhook_secret(header_value: str | None, channel_key: str, expected_secret: str | None = None) -> bool:
     if not header_value or not channel_key:
         return False
-    return hmac.compare_digest(header_value, webhook_secret(channel_key))
+    target = expected_secret if expected_secret is not None else webhook_secret(channel_key)
+    return hmac.compare_digest(header_value, target)
+
+
+async def verify_webhook_secret_for_channel(header_value: str | None, channel) -> bool:
+    if not header_value or not channel:
+        return False
+    expected = await resolve_webhook_secret(channel)
+    return hmac.compare_digest(header_value, expected)
 
 
 # --------------------------------------------------------------- transport ---
@@ -259,9 +282,8 @@ async def apply_transport(channel, token: str) -> str:
     """Make Telegram match the chosen transport (mutual exclusion). Returns the active transport."""
     transport = effective_transport(channel)
     if transport == "webhook":
-        if not _is_public_https(settings.public_base_url):
-            raise TelegramError("webhook transport needs a public https PUBLIC_BASE_URL; use polling for local deployments")
-        await set_webhook(token, webhook_url(channel.key), webhook_secret(channel.key))
+        secret = await resolve_webhook_secret(channel)
+        await set_webhook(token, webhook_url(channel.key), secret)
     else:
         await delete_webhook(token)  # polling is impossible while a webhook is registered
     return transport

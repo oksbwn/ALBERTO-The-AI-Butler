@@ -127,6 +127,13 @@ async def _store_telegram_token(session: AsyncSession, ch: Channel, token: str) 
     return f"secret://{name}"
 
 
+async def _store_telegram_webhook_secret(session: AsyncSession, ch: Channel, secret: str) -> str:
+    name = f"channel-telegram-webhook-{ch.key[:16]}"
+    await SecretStore().write(session, tenant_id=ch.tenant_id, project_id=ch.project_id,
+                              name=name, value=secret, kind="channel")
+    return f"secret://{name}"
+
+
 async def _telegram_connect(ch: Channel) -> None:
     """Sync Telegram's transport with the configured one; record outcome in channel.state."""
     token = await tg.resolve_token(ch)
@@ -181,7 +188,10 @@ async def create_channel(project_id: str, body: ChannelIn, session: AsyncSession
     except (ValueError, RoutingConfigError) as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     if token:
-        ch.config = {**ch.config, "bot_token_ref": await _store_telegram_token(session, ch, token)}
+        import secrets as _secrets
+        wh_secret = _secrets.token_urlsafe(32)
+        wh_ref = await _store_telegram_webhook_secret(session, ch, wh_secret)
+        ch.config = {**ch.config, "bot_token_ref": await _store_telegram_token(session, ch, token), "webhook_secret_ref": wh_ref}
         await session.commit()
         await session.refresh(ch)
         await _telegram_connect(ch)
@@ -502,7 +512,8 @@ async def telegram_webhook(key: str, request: Request, run_service: RunService =
     ch = await _resolve("telegram", key)
     if tg.effective_transport(ch) != "webhook":
         raise HTTPException(status.HTTP_409_CONFLICT, "channel is in polling mode")
-    if not tg.verify_webhook_secret(request.headers.get("x-telegram-bot-api-secret-token"), key):
+    secret_header = request.headers.get("x-telegram-bot-api-secret-token")
+    if not await tg.verify_webhook_secret_for_channel(secret_header, ch):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook secret")
     if not rate_limiter.allow(f"telegram:{key}", rate=300, per=60):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate limit exceeded")

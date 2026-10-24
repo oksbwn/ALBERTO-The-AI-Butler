@@ -390,11 +390,11 @@ class ChannelGatewayService:
         if cmd in ("/reset", "/new"):
             await ChannelGatewayService._bump_epoch(channel.id, msg)
             return await ChannelGatewayService._reply(channel, event_id, msg, "delivered",
-                                                      "Conversation reset. Starting fresh.", "session reset", route="reset")
+                                                      "Conversation reset. Starting fresh.", "session reset", route="reset", user_id=user.id)
         if cmd in ("/start", "/help") and channel.type == "telegram":
             return await ChannelGatewayService._reply(
                 channel, event_id, msg, "delivered",
-                "Paired. Just send a message to chat with Alberto. /reset starts a new conversation.", route="help")
+                "Paired. Just send a message to chat with Alberto. /reset starts a new conversation.", route="help", user_id=user.id)
         # 5. deterministic routing
         try:
             target_type, target_id, route_label, route_text = ChannelGatewayService.resolve_route(channel, text)
