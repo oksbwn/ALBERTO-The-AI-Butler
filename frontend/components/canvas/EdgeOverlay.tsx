@@ -38,7 +38,17 @@ function routerCaseY(cfg: any, edge: FlowEdge): number {
   return ROUTER_GEOM.header + ROUTER_GEOM.exprLine + (idx < 0 ? 0 : idx) * ROUTER_GEOM.rowH + ROUTER_GEOM.rowH / 2;
 }
 
-export function EdgeOverlay({ nodes, edges, onRemove }: { nodes: FlowNode[]; edges: FlowEdge[]; onRemove: (edge: FlowEdge) => void }) {
+export function EdgeOverlay({
+  nodes,
+  edges,
+  selectedNodeId,
+  onRemove,
+}: {
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  selectedNodeId?: string | null;
+  onRemove: (edge: FlowEdge) => void;
+}) {
   const byId = useMemo(() => Object.fromEntries(nodes.map((n) => [n.id, n])), [nodes]);
   const h = (n: any) => (n?.data?.nodeType === "router" ? routerHeight(n?.data?.config) : NODE_HEIGHT[n?.data?.nodeType] ?? 36);
   const edgeGeometry = (e: FlowEdge) => {
@@ -101,6 +111,43 @@ export function EdgeOverlay({ nodes, edges, onRemove }: { nodes: FlowNode[]; edg
           >
             <Icon name="x" size={10} />
           </button>
+        );
+      })}
+      {edges.map((e) => {
+        const geo = edgeGeometry(e);
+        if (!geo) return null;
+        const s = byId[e.source];
+        const isSelected = selectedNodeId && (e.source === selectedNodeId || e.target === selectedNodeId);
+        if (!isSelected) return null;
+        const badgeText =
+          e.sourceHandle?.startsWith("case:")
+            ? e.sourceHandle.slice(5)
+            : (e as any).label ||
+              (s?.data?.nodeType === "inject"
+                ? (s.data?.config?.topic ? `topic: ${s.data.config.topic}` : "payload")
+                : s?.data?.config?.output_key || "payload");
+        return (
+          <span
+            key={`${e.id}-badge`}
+            className="chip chip-mono fade-in"
+            style={{
+              position: "absolute",
+              left: geo.mx,
+              top: geo.my - 22,
+              transform: "translateX(-50%)",
+              fontSize: 10,
+              height: 18,
+              padding: "0 6px",
+              borderColor: "var(--accent)",
+              background: "var(--bg-1)",
+              color: "var(--fg-0)",
+              boxShadow: "var(--sh-1)",
+              pointerEvents: "none",
+              zIndex: 9,
+            }}
+          >
+            {badgeText}
+          </span>
         );
       })}
     </ViewportPortal>

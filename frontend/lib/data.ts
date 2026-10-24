@@ -23,9 +23,12 @@ export const fmtUSD = (v: number | null | undefined): string => {
 
 export const NODE_CATALOG = [
   { group: "Flow", color: "var(--io-control)", items: [
+    { type: "inject", icon: "play", label: "Inject", desc: "Manual trigger / message input" },
+    { type: "debug", icon: "eye", label: "Debug", desc: "Inspect msg payload" },
+    { type: "delay", icon: "clock", label: "Delay", desc: "Wait for a specified duration" },
     { type: "start", icon: "n_start", label: "Start", desc: "Entry marker" },
     { type: "end", icon: "n_end", label: "End", desc: "Terminal node" },
-    { type: "router", icon: "n_router", label: "Router", desc: "Conditional branch" },
+    { type: "router", icon: "n_router", label: "Router", desc: "Conditional branch / switch" },
     { type: "loop", icon: "n_loop", label: "Loop", desc: "Bounded iteration" },
     { type: "parallel_fanout", icon: "n_fanout", label: "Fan-out", desc: "Map over a list" },
     { type: "join", icon: "n_join", label: "Join", desc: "Wait-for-all / reduce" },

@@ -97,9 +97,9 @@ export function canvasToExecutable(
   edges: FlowEdge[],
   meta: { id: string; version?: number; state?: Record<string, any> },
 ): Record<string, any> {
-  // Entry: a Start marker, else a trigger node (webhook/schedule/email/app_event),
+  // Entry: a Start marker, else a trigger node (webhook/schedule/email/app_event/inject),
   // else a node with no incoming edge, else the first node.
-  const TRIGGERS = new Set(["webhook_in", "schedule", "email_in", "app_event"]);
+  const TRIGGERS = new Set(["webhook_in", "schedule", "email_in", "app_event", "inject"]);
   const hasIncoming = new Set(edges.map((e) => e.target));
   const start =
     nodes.find((n) => n.data.nodeType === "start") ||
@@ -141,18 +141,28 @@ export function canvasToFlow(canvas: any): { nodes: FlowNode[]; edges: FlowEdge[
   const byId: Record<string, FlowNode> = Object.fromEntries(nodes.map((n) => [n.id, n]));
   // Forge nodes use React Flow's default handle (one in/out per node), so edges carry no
   // handle id - they attach to the default handle. Any stored handle id is still honored.
-  const edges: FlowEdge[] = (canvas?.edges || []).map((e: any, i: number) => ({
-    id: e.id || `e${i}`,
-    source: e.source,
-    target: e.target,
-    sourceHandle: e.sourceHandle ?? e.source_handle ?? (
-      routerCaseFromEdge(byId[e.source], e as FlowEdge)
-        ? `${ROUTER_CASE_HANDLE}${routerCaseFromEdge(byId[e.source], e as FlowEdge)}`
-        : null
-    ),
-    targetHandle: e.targetHandle ?? e.target_handle ?? null,
-    label: e.label,
-  }));
+  const edges: FlowEdge[] = (canvas?.edges || []).map((e: any, i: number) => {
+    const rawSource = e.sourceHandle ?? e.source_handle ?? null;
+    const rawTarget = e.targetHandle ?? e.target_handle ?? null;
+    const routerCase = routerCaseFromEdge(byId[e.source], e as FlowEdge);
+    let sourceHandle = rawSource;
+    if (!sourceHandle) {
+      if (routerCase) {
+        sourceHandle = `${ROUTER_CASE_HANDLE}${routerCase}`;
+      } else if (e.source) {
+        sourceHandle = "out";
+      }
+    }
+    const targetHandle = rawTarget || (e.target ? "in" : null);
+    return {
+      id: e.id || `e${i}`,
+      source: e.source,
+      target: e.target,
+      sourceHandle,
+      targetHandle,
+      label: e.label,
+    };
+  });
   return { nodes, edges };
 }
 
@@ -162,7 +172,7 @@ export function starterWorkflow(): { canvas: any; nodes: FlowNode[]; edges: Flow
     { id: "start", type: "forge", position: { x: 80, y: 220 }, data: { nodeType: "start", config: {} } },
     { id: "end", type: "forge", position: { x: 520, y: 220 }, data: { nodeType: "end", config: {} } },
   ];
-  const edges: FlowEdge[] = [{ id: "e0", source: "start", target: "end" }];
+  const edges: FlowEdge[] = [{ id: "e0", source: "start", target: "end", sourceHandle: "out", targetHandle: "in" }];
   return { canvas: { nodes, edges, viewport: { x: 0, y: 0, zoom: 1 } }, nodes, edges };
 }
 

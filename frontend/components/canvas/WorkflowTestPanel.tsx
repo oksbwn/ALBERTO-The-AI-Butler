@@ -45,6 +45,14 @@ export interface LogEntry {
   summary: string;
 }
 
+export interface DebugMessageRecord {
+  id: string;
+  nodeId: string;
+  target: string;
+  payload: any;
+  timestamp: number;
+}
+
 export function redactSensitive(val: any): any {
   if (val === null || val === undefined) return val;
   if (typeof val === "string") {
@@ -207,7 +215,9 @@ export function WorkflowExecutionPanel({
   const [compDefs, setCompDefs] = useState<Record<string, ComponentT>>({});
   const [liveParts, setLiveParts] = useState<Part[]>([]);
 
-  const [viewerTab, setViewerTab] = useState<"output" | "nodes" | "activity" | "logs">("output");
+  const [debugEvents, setDebugEvents] = useState<DebugMessageRecord[]>([]);
+  const [selectedDebugNode, setSelectedDebugNode] = useState<string>("all");
+  const [viewerTab, setViewerTab] = useState<"output" | "debug" | "nodes" | "activity" | "logs">("output");
 
   const threadRef = useRef<string | null>(null);
   const activeRef = useRef(true);
@@ -228,6 +238,24 @@ export function WorkflowExecutionPanel({
       api.listComponents(project.id).then((cs) => setCompDefs(Object.fromEntries(cs.map((c) => [c.id, c])))).catch(() => {});
     }
   }, [project?.id]);
+
+  useEffect(() => {
+    const handleInject = (e: any) => {
+      const detail = e.detail || {};
+      const cfg = detail.config || {};
+      let val = cfg.payload;
+      if (typeof val === "object") {
+        try { val = JSON.stringify(val, null, 2); } catch {}
+      } else if (val === undefined || val === null) {
+        val = "{}";
+      }
+      setInputMode("json");
+      setInputVal(String(val));
+      setViewerTab("debug");
+    };
+    window.addEventListener("alberto-inject-trigger", handleInject);
+    return () => window.removeEventListener("alberto-inject-trigger", handleInject);
+  }, []);
 
   // Map sub-agent names to graph node IDs for live canvas illumination
   const subNameToId = useMemo(() => {
@@ -277,6 +305,7 @@ export function WorkflowExecutionPanel({
     setNodeSteps([]);
     setActivities([]);
     setRawLogs([]);
+    setDebugEvents([]);
     setInterruptPayload(null);
     setLiveParts([]);
     onResetRun?.();
@@ -310,6 +339,7 @@ export function WorkflowExecutionPanel({
     setNodeSteps([]);
     setActivities([]);
     setRawLogs([]);
+    setDebugEvents([]);
     setInterruptPayload(null);
     setLiveParts([]);
     actNameRef.current = {};
@@ -402,6 +432,17 @@ export function WorkflowExecutionPanel({
             acc.addComponent(f.data.payload as ComponentInstance);
             setLiveParts(acc.parts({ streaming: true }));
             addLog("custom", `Interactive component: ${(f.data.payload as any).name || "widget"}`);
+          } else if (f.event === "custom" && f.data?.channel === "debug" && f.data?.payload) {
+            const p = f.data.payload;
+            const rec: DebugMessageRecord = {
+              id: `dbg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              nodeId: p.node_id || "debug",
+              target: p.target || "payload",
+              payload: p.data,
+              timestamp: p.timestamp ? p.timestamp * 1000 : Date.now(),
+            };
+            setDebugEvents((prev) => [...prev, rec]);
+            addLog("debug", `[${rec.nodeId}] ${rec.target}`);
           } else if (f.event === "done") {
             const answer = f.data?.answer || "";
             setFinalAnswer(answer);
@@ -699,6 +740,14 @@ export function WorkflowExecutionPanel({
         </button>
         <button
           type="button"
+          className={`btn btn-xs btn-ghost ${viewerTab === "debug" ? "active-tab" : ""}`}
+          onClick={() => setViewerTab("debug")}
+          style={{ height: 28, borderRadius: 0, borderBottom: viewerTab === "debug" ? "2px solid var(--accent)" : "2px solid transparent", color: viewerTab === "debug" ? "var(--fg-0)" : "var(--fg-2)" }}
+        >
+          Debug ({debugEvents.length})
+        </button>
+        <button
+          type="button"
           className={`btn btn-xs btn-ghost ${viewerTab === "nodes" ? "active-tab" : ""}`}
           onClick={() => setViewerTab("nodes")}
           style={{ height: 28, borderRadius: 0, borderBottom: viewerTab === "nodes" ? "2px solid var(--accent)" : "2px solid transparent", color: viewerTab === "nodes" ? "var(--fg-0)" : "var(--fg-2)" }}
@@ -769,6 +818,67 @@ export function WorkflowExecutionPanel({
                 <div style={{ fontSize: 11, maxWidth: 280, marginTop: 4 }}>
                   Configure inputs above and click Run to execute this pipeline with full node telemetry.
                 </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {viewerTab === "debug" && (
+          <div className="col gap3">
+            <div className="row spread" style={{ alignItems: "center" }}>
+              <div className="row gap1" style={{ alignItems: "center" }}>
+                <span className="fg-2" style={{ fontSize: 11 }}>Filter node:</span>
+                <select
+                  className="select"
+                  style={{ height: 26, fontSize: 11, width: 150 }}
+                  value={selectedDebugNode}
+                  onChange={(e) => setSelectedDebugNode(e.target.value)}
+                >
+                  <option value="all">All debug nodes</option>
+                  {Array.from(new Set(debugEvents.map((d) => d.nodeId))).map((nid) => (
+                    <option key={nid} value={nid}>{nid}</option>
+                  ))}
+                </select>
+              </div>
+              <button
+                type="button"
+                className="btn btn-xs btn-ghost"
+                onClick={() => setDebugEvents([])}
+                style={{ height: 24, fontSize: 11 }}
+              >
+                Clear
+              </button>
+            </div>
+            {debugEvents.length === 0 ? (
+              <div className="col center" style={{ padding: 28, textAlign: "center", color: "var(--fg-2)" }}>
+                <Icon name="eye" size={24} style={{ marginBottom: 6, opacity: 0.6 }} />
+                <div style={{ fontSize: 12 }}>No debug messages recorded</div>
+                <div style={{ fontSize: 11, maxWidth: 280, marginTop: 4 }}>
+                  Connect a Debug node after any step to inspect messages in real time.
+                </div>
+              </div>
+            ) : (
+              <div className="col gap2">
+                {debugEvents
+                  .filter((d) => selectedDebugNode === "all" || d.nodeId === selectedDebugNode)
+                  .map((d) => (
+                    <div key={d.id} className="card col gap1" style={{ padding: 8, background: "var(--bg-3)", border: "1px solid var(--line)" }}>
+                      <div className="row spread" style={{ alignItems: "center", marginBottom: 2 }}>
+                        <div className="row gap1" style={{ alignItems: "center" }}>
+                          <span className="chip chip-mono" style={{ fontSize: 10, borderColor: "var(--accent)", color: "var(--accent)" }}>
+                            {d.nodeId}
+                          </span>
+                          <span className="mono-sm fg-1" style={{ fontSize: 11, fontWeight: 600 }}>
+                            {d.target}
+                          </span>
+                        </div>
+                        <span className="mono-sm fg-2" style={{ fontSize: 10 }}>
+                          {new Date(d.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <JsonViewer data={d.payload} rootLabel={`msg.${d.target}`} />
+                    </div>
+                  ))}
               </div>
             )}
           </div>
