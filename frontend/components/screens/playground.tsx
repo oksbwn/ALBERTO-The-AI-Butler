@@ -25,21 +25,10 @@ import {
 } from "@/lib/api";
 import { type Part } from "@/lib/chat-parts";
 import { buildNodeLabels, fmtUSD } from "@/lib/data";
-import { runWorkflowSSE, type StreamActivity } from "@/lib/run-stream";
-import { ComponentRenderer } from "../component-renderer";
 import { Icon } from "../icons";
-import { Markdown } from "../markdown";
 import { StatusPill } from "../primitives";
 import { ChatScreen } from "./chat";
-
-interface ChatMsg {
-  role: "user" | "assistant";
-  content?: string;
-  parts?: Part[];
-}
-interface Step {
-  node: string;
-}
+import { WorkflowExecutionPanel } from "../canvas/WorkflowTestPanel";
 
 export function PlaygroundScreen({
   project,
@@ -100,24 +89,10 @@ export function PlaygroundScreen({
   const [approving, setApproving] = useState(false);
   const [approvalResult, setApprovalResult] = useState<ApprovalResult | null>(null);
 
-  // Workflow Test & Run state (SSE)
+  // Workflow State for Orchestrator Runner
   const [wf, setWf] = useState<Workflow | null>(null);
   const [wfs, setWfs] = useState<Workflow[]>([]);
   const [loadErr, setLoadErr] = useState<string | null>(null);
-  const [testInput, setTestInput] = useState("");
-  const [testMsgs, setTestMsgs] = useState<ChatMsg[]>([]);
-  const [testStreaming, setTestStreaming] = useState("");
-  const [testSteps, setTestSteps] = useState<Step[]>([]);
-  const [testActivity, setTestActivity] = useState<StreamActivity[]>([]);
-  const [testRunning, setTestRunning] = useState(false);
-  const [testMeter, setTestMeter] = useState<{ tokens: number; cost: number } | null>(null);
-  const [compDefs, setCompDefs] = useState<Record<string, ComponentT>>({});
-  const [liveParts, setLiveParts] = useState<Part[]>([]);
-
-  const nodeLabels = useMemo(() => buildNodeLabels(wf), [wf]);
-  const testScrollRef = useRef<HTMLDivElement>(null);
-  const threadRef = useRef<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
   // Load project workflows and authoring sessions
   const loadSessions = useCallback(async () => {
@@ -136,7 +111,6 @@ export function PlaygroundScreen({
   useEffect(() => {
     if (!project?.id) return;
     loadSessions();
-    api.listComponents(project.id).then((cs) => setCompDefs(Object.fromEntries(cs.map((c) => [c.id, c])))).catch(() => {});
     api.listWorkflows(project.id)
       .then((ws) => {
         setWfs(ws);
@@ -147,9 +121,7 @@ export function PlaygroundScreen({
       .catch((e) => setLoadErr(String(e.message || e)));
   }, [project?.id, loadSessions]);
 
-  useEffect(() => {
-    testScrollRef.current?.scrollTo({ top: 1e9, behavior: "smooth" });
-  }, [testMsgs, testStreaming, testSteps, liveParts]);
+
 
   // Create new authoring session
   async function handleNewSession() {
@@ -228,80 +200,7 @@ export function PlaygroundScreen({
     if (onNav) onNav("workflows");
   }
 
-  // SSE Workflow execution runner
-  async function handleSendTestRun(textArg?: string) {
-    const text = (typeof textArg === "string" ? textArg : testInput).trim();
-    if (!text || !wf || testRunning || !project?.id) return;
-    if (typeof textArg !== "string") setTestInput("");
-    setTestMsgs((m) => [...m, { role: "user", content: text }]);
-    setTestStreaming("");
-    setTestSteps([]);
-    setTestActivity([]);
-    setTestMeter(null);
-    setTestRunning(true);
-    setLiveParts([]);
 
-    try {
-      const run = await api.createRun(
-        project.id,
-        wf.id,
-        { messages: [{ role: "user", content: text }] },
-        threadRef.current || undefined,
-      );
-      threadRef.current = run.thread_id;
-      const controller = new AbortController();
-      abortRef.current = controller;
-
-      const result = await runWorkflowSSE(
-        api.runStreamUrl(project.id, wf.id, run.id),
-        {
-          onText: (fullText, parts) => {
-            setTestStreaming(fullText);
-            setLiveParts(parts);
-          },
-          onNodeStep: (node) => {
-            setTestSteps((s) => (s.some((x) => x.node === node) ? s : [...s, { node }]));
-          },
-          onActivity: (act) => {
-            setTestActivity((prev) => {
-              const idx = prev.findIndex((x) => x.id === act.id);
-              if (idx >= 0) {
-                const next = [...prev];
-                next[idx] = act;
-                return next;
-              }
-              return [...prev, act];
-            });
-          },
-          onComponent: (comp, parts) => {
-            setLiveParts(parts);
-          },
-          onDone: (meter) => {
-            setTestMeter({ tokens: meter.tokens, cost: meter.cost });
-          },
-        },
-        controller.signal,
-      );
-
-      if (!result.interrupted) {
-        setTestMsgs((m) => [
-          ...m,
-          result.parts.length > 0
-            ? { role: "assistant", parts: result.parts }
-            : { role: "assistant", content: result.answer },
-        ]);
-      }
-    } catch (e: any) {
-      if (e?.name !== "AbortError") {
-        setTestMsgs((m) => [...m, { role: "assistant", content: `⚠ ${e.message || e}` }]);
-      }
-    } finally {
-      abortRef.current = null;
-      setTestStreaming("");
-      setTestRunning(false);
-      setLiveParts([]);
-    }
-  }
 
   // React Flow preview elements from proposal
   const previewNodes: Node[] = useMemo(() => {
@@ -721,140 +620,14 @@ export function PlaygroundScreen({
           </div>
         )}
 
-        {/* Tab 2: Workflow Execution Test & Runner (SSE) */}
+        {/* Tab 2: Workflow Execution Orchestrator Runner */}
         {activeTab === "workflow_test" && (
-          <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-            {/* Target Workflow Picker & Metrics */}
-            <div className="row spread" style={{ padding: "8px 16px", borderBottom: "1px solid var(--line)", background: "var(--bg-surface)", alignItems: "center" }}>
-              <div className="row gap2" style={{ alignItems: "center" }}>
-                <span className="fg-2" style={{ fontSize: 11.5 }}>Workflow:</span>
-                <select
-                  className="select"
-                  style={{ height: 28, fontSize: 12 }}
-                  value={wf?.id || ""}
-                  onChange={(e) => {
-                    const sel = wfs.find((w) => w.id === e.target.value) || null;
-                    setWf(sel);
-                    setTestMsgs([]);
-                    threadRef.current = null;
-                  }}
-                >
-                  {wfs.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name} ({w.status})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {testMeter && (
-                <span className="mono-sm fg-2" style={{ fontSize: 11 }}>
-                  {testMeter.tokens} tok · {fmtUSD(testMeter.cost)}
-                </span>
-              )}
-            </div>
-
-            {/* SSE Messages & Activity Area */}
-            <div ref={testScrollRef} className="scroll-y" style={{ flex: 1, padding: "16px 20px" }}>
-              <div className="col gap3">
-                {loadErr && (
-                  <div className="card" style={{ padding: 12, color: "var(--warn)", fontSize: 12 }}>
-                    {loadErr}
-                  </div>
-                )}
-                {testMsgs.map((m, i) => (
-                  <div
-                    key={i}
-                    className="row"
-                    style={{
-                      gap: 10,
-                      alignItems: "flex-start",
-                      flexDirection: m.role === "user" ? "row-reverse" : "row",
-                    }}
-                  >
-                    <div
-                      style={{
-                        maxWidth: "85%",
-                        padding: "8px 12px",
-                        borderRadius: 10,
-                        background: m.role === "user" ? "var(--accent)" : "var(--bg-card)",
-                        color: m.role === "user" ? "var(--fg-on-accent)" : "var(--fg-0)",
-                        border: m.role === "user" ? "none" : "1px solid var(--line)",
-                        fontSize: 13,
-                        lineHeight: "18px",
-                      }}
-                    >
-                      {m.content && <Markdown>{m.content}</Markdown>}
-                      {m.parts?.map((p, pi) =>
-                        p.kind === "text" ? (
-                          <Markdown key={pi}>{p.text}</Markdown>
-                        ) : (
-                          <ComponentRenderer
-                            key={pi}
-                            def={compDefs[p.inst.component_id] || { id: p.inst.component_id, name: p.inst.name, html: "", css: "" }}
-                            props={p.inst.props || {}}
-                            onAction={() => {}}
-                          />
-                        ),
-                      )}
-                    </div>
-                  </div>
-                ))}
-                {testStreaming && (
-                  <div className="row gap2" style={{ padding: "8px 12px", color: "var(--accent)" }}>
-                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", animation: "pulse 1s infinite" }} />
-                    <Markdown>{testStreaming}</Markdown>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Execution Input Bar */}
-            <div style={{ padding: "10px 16px", borderTop: "1px solid var(--line)", background: "var(--bg-glass)" }}>
-              <div className="row gap2">
-                <input
-                  className="input grow"
-                  placeholder="Message the workflow…"
-                  value={testInput}
-                  onChange={(e) => setTestInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendTestRun();
-                    }
-                  }}
-                  disabled={testRunning}
-                  style={{ height: 32, fontSize: 12.5 }}
-                />
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => {
-                    threadRef.current = null;
-                    setTestMsgs([]);
-                  }}
-                  style={{ height: 32 }}
-                >
-                  Reset
-                </button>
-                {testRunning ? (
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => {
-                      abortRef.current?.abort();
-                      setTestRunning(false);
-                    }}
-                    style={{ height: 32 }}
-                  >
-                    Stop
-                  </button>
-                ) : (
-                  <button className="btn btn-primary btn-sm" onClick={() => handleSendTestRun()} disabled={!testInput.trim()} style={{ height: 32 }}>
-                    <Icon name="play" size={13} /> Run
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
+          <WorkflowExecutionPanel
+            project={project}
+            workflow={wf}
+            wfs={wfs}
+            onSelectWorkflow={(selected) => setWf(selected)}
+          />
         )}
       </div>
 

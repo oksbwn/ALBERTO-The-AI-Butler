@@ -10,9 +10,6 @@ function isLocalWebHost(hostname: string) {
 
 function sseBase() {
   if (DIRECT_API) return DIRECT_API;
-  if (typeof window !== "undefined" && isLocalWebHost(window.location.hostname)) {
-    return "http://127.0.0.1:8000";
-  }
   return BASE;
 }
 
