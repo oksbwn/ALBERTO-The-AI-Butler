@@ -169,13 +169,13 @@ export function canvasToFlow(canvas: any): { nodes: FlowNode[]; edges: FlowEdge[
   return { nodes, edges };
 }
 
-/** A minimal runnable starter: start -> end. */
+/** A minimal runnable starter: inject -> debug. */
 export function starterWorkflow(): { canvas: any; nodes: FlowNode[]; edges: FlowEdge[] } {
   const nodes: FlowNode[] = [
-    { id: "start", type: "forge", position: { x: 80, y: 220 }, data: { nodeType: "start", config: {} } },
-    { id: "end", type: "forge", position: { x: 520, y: 220 }, data: { nodeType: "end", config: {} } },
+    { id: "inject_1", type: "forge", position: { x: 80, y: 220 }, data: { nodeType: "inject", config: { topic: "default", payload: {} } } },
+    { id: "debug_1", type: "forge", position: { x: 520, y: 220 }, data: { nodeType: "debug", config: {} } },
   ];
-  const edges: FlowEdge[] = [{ id: "e0", source: "start", target: "end", sourceHandle: "out", targetHandle: "in" }];
+  const edges: FlowEdge[] = [{ id: "e0", source: "inject_1", target: "debug_1", sourceHandle: "out", targetHandle: "in" }];
   return { canvas: { nodes, edges, viewport: { x: 0, y: 0, zoom: 1 } }, nodes, edges };
 }
 

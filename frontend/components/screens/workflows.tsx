@@ -764,7 +764,10 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
 
   const palette = useMemo(() => {
     const groups: Record<string, NodeType[]> = {};
-    Object.values(registry).forEach((nt) => { (groups[nt.category] = groups[nt.category] || []).push(nt); });
+    Object.values(registry).forEach((nt) => {
+      if (nt.type === "start" || nt.type === "end") return;
+      (groups[nt.category] = groups[nt.category] || []).push(nt);
+    });
     return groups;
   }, [registry]);
 
