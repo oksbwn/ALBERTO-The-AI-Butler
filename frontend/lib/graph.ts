@@ -101,7 +101,10 @@ export function canvasToExecutable(
   // else a node with no incoming edge, else the first node.
   const TRIGGERS = new Set(["webhook_in", "schedule", "email_in", "app_event", "inject"]);
   const hasIncoming = new Set(edges.map((e) => e.target));
+  const hasOutgoing = new Set(edges.map((e) => e.source));
   const start =
+    nodes.find((n) => n.data.nodeType === "start" && hasOutgoing.has(n.id)) ||
+    nodes.find((n) => TRIGGERS.has(n.data.nodeType) && hasOutgoing.has(n.id)) ||
     nodes.find((n) => n.data.nodeType === "start") ||
     nodes.find((n) => TRIGGERS.has(n.data.nodeType)) ||
     nodes.find((n) => !hasIncoming.has(n.id));

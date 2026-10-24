@@ -205,7 +205,15 @@ def validate_workflow(definition: dict) -> ValidationResult:
     # users aren't misled into thinking they take effect.
     _warn_unwired_agent_fields(res, nodes)
 
+    TRIGGER_TYPES = {"inject", "schedule", "start", "webhook_in", "email_in", "app_event"}
+    entry_candidates = {
+        n["id"] for n in nodes
+        if isinstance(n, dict) and n.get("type") in TRIGGER_TYPES and n.get("id") in node_ids
+    }
     if entry in node_ids:
+        entry_candidates.add(entry)
+
+    if entry_candidates:
         adj = _adjacency(definition)
         # Deep-agent sub-agents are wired by a "subagents" edge and run inside the supervisor
         # (agent-as-tool), not as standalone graph nodes - so they legitimately have no outgoing
@@ -216,7 +224,7 @@ def validate_workflow(definition: dict) -> ValidationResult:
             if e.get("source_handle") == "subagents" and e.get("target") in node_ids
         }
         reachable: set[str] = set()
-        stack = [entry]
+        stack = list(entry_candidates)
         while stack:
             u = stack.pop()
             if u in reachable or u == "__END__":
