@@ -74,6 +74,7 @@ export default defineConfig({
         /memory-graph\/.*\.spec\.ts/,
         /security\/.*\.spec\.ts/,
         /automation\/.*\.spec\.ts/,
+        /lifecycle\/.*\.spec\.ts/,
       ],
       use: {
         ...devices["Desktop Chrome"],
@@ -135,6 +136,7 @@ export default defineConfig({
           cwd: path.join(repoRoot, "frontend"),
           env: {
             ...process.env,
+            NODE_OPTIONS: "--max-old-space-size=4096",
             PORT: testPort,
             ALBERTO_API_URL: `http://127.0.0.1:${testBackendPort}`,
             FORGE_API_URL: `http://127.0.0.1:${testBackendPort}`,

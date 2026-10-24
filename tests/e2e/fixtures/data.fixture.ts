@@ -286,6 +286,14 @@ export class DataFixture {
     return res.json();
   }
 
+  async apiPut(path: string, data: any): Promise<any> {
+    const res = await this.apiContext.put(path, { data });
+    if (!res.ok()) {
+      throw new Error(`PUT ${path} failed (${res.status()}): ${await res.text()}`);
+    }
+    return res.json();
+  }
+
   async apiPatch(path: string, data: any): Promise<any> {
     const res = await this.apiContext.patch(path, { data });
     if (!res.ok()) {
@@ -419,6 +427,63 @@ export class DataFixture {
     return this.apiPost(`/v1/projects/${projectId}/automate/sessions/${sessionId}/approve`, payload);
   }
 
+  async setLearningEnabled(projectId: string, enabled: boolean): Promise<any> {
+    return this.apiPatch(`/v1/projects/${projectId}/memory/learning/settings`, {
+      memory_learning_enabled: enabled,
+      tool_execution_learning_enabled: enabled,
+    });
+  }
+
+  async triggerDueSchedules(): Promise<number> {
+    const cp = require("child_process");
+    const path = require("path");
+    const fs = require("fs");
+    const repoRoot = path.resolve(__dirname, "../../..");
+    const testDbPath = this.getTestDbPath();
+    const testDataDir = path.dirname(path.dirname(testDbPath));
+    const pythonBin = process.platform === "win32"
+      ? (fs.existsSync(path.join(repoRoot, "backend/.venv/Scripts/python.exe"))
+          ? path.join(repoRoot, "backend/.venv/Scripts/python.exe")
+          : "python")
+      : (fs.existsSync(path.join(repoRoot, "backend/.venv/bin/python"))
+          ? path.join(repoRoot, "backend/.venv/bin/python")
+          : "python3");
+
+    const scriptPath = path.join(testDataDir, "trigger_schedules_runner.py");
+    const pyCode = `
+import os
+import asyncio
+import json
+
+os.environ["ALBERTO_DATA_DIR"] = r"${testDataDir}"
+os.environ["ALBERTO_DATABASE_URL"] = "sqlite+aiosqlite:///" + r"${testDbPath}".replace("\\\\", "/")
+
+from alberto.services.runs import RunService
+from alberto.services.dispatch import run_due_schedules
+
+async def main():
+    rs = RunService()
+    fired = await run_due_schedules(rs)
+    print(json.dumps({"fired": fired}))
+
+asyncio.run(main())
+`;
+    fs.writeFileSync(scriptPath, pyCode, "utf-8");
+    try {
+      const out = cp.execSync(`"${pythonBin}" "${scriptPath}"`, {
+        encoding: "utf-8",
+        cwd: repoRoot,
+        timeout: 20000,
+      });
+      const parsed = JSON.parse(out.trim().split("\n").pop() || "{}");
+      return typeof parsed.fired === "number" ? parsed.fired : 0;
+    } finally {
+      if (fs.existsSync(scriptPath)) {
+        try { fs.unlinkSync(scriptPath); } catch {}
+      }
+    }
+  }
+
   // --- Read-Only SQLite Validation Helper with Deterministic Isolation ---
   getTestDbPath(): string {
     const path = require("path");
@@ -459,8 +524,8 @@ export class DataFixture {
           ? path.join(repoRoot, "backend/.venv/bin/python")
           : "python3");
 
-    const escapedSql = sql.replace(/"/g, '\\"');
-    const cmd = `"${pythonBin}" -c "import sqlite3, json; conn=sqlite3.connect(r'${testDb}'); conn.row_factory=sqlite3.Row; cur=conn.cursor(); cur.execute(\\"${escapedSql}\\"); print(json.dumps([dict(r) for r in cur.fetchall()]))"`;
+    const b64Sql = Buffer.from(sql, "utf-8").toString("base64");
+    const cmd = `"${pythonBin}" -c "import sqlite3, json, base64; conn=sqlite3.connect(r'${testDb}'); conn.row_factory=sqlite3.Row; cur=conn.cursor(); sql=base64.b64decode('${b64Sql}').decode('utf-8'); cur.execute(sql); conn.commit(); rows=[dict(r) for r in cur.fetchall()] if cur.description else []; print(json.dumps(rows))"`;
     try {
       const output = cp.execSync(cmd, { encoding: "utf-8", timeout: 10000 });
       return JSON.parse(output.trim());
