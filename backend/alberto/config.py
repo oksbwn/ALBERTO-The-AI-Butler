@@ -591,6 +591,8 @@ class Settings(BaseSettings):
             problems.append("FORGE_BOOTSTRAP_ADMIN_PASSWORD is the dev default - set a real one.")
         if not self.egress_block_private:
             problems.append("FORGE_EGRESS_BLOCK_PRIVATE must stay true outside dev (SSRF guard).")
+        if self.auth_rate_limit_per_minute <= 0:
+            problems.append("FORGE_AUTH_RATE_LIMIT_PER_MINUTE must be > 0 outside dev/test environments.")
 
         if self.enable_code_tools and not self.allow_unsandboxed_code_tools:
             problems.append(
