@@ -798,6 +798,11 @@ export const api = {
       `/v1/projects/${pid}/workflows/${wid}/runs/${rid}/resume`,
       { method: "POST", body: JSON.stringify({ value }) },
     ),
+  cancelRun: (pid: string, wid: string, rid: string) =>
+    json<{ ok: boolean; status?: string }>(
+      `/v1/projects/${pid}/workflows/${wid}/runs/${rid}/cancel`,
+      { method: "POST" },
+    ),
   createWorkflow: (pid: string, body: { name: string; description?: string; executable?: Record<string, unknown>; canvas?: Record<string, unknown> }) =>
     notifyCounts(json<Workflow>(`/v1/projects/${pid}/workflows`, { method: "POST", body: JSON.stringify(body) })),
   updateWorkflow: (pid: string, wid: string, body: { name?: string; description?: string }) =>

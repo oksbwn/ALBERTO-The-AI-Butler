@@ -727,7 +727,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
             {dirty && saveState === "idle" && <span title="Unsaved changes" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", marginLeft: 4 }} />}
           </button>
           <button className="btn btn-ghost btn-sm" onClick={async () => { await save(); onRun(); }}><Icon name="playground" size={14} />Playground</button>
-          <button className="btn btn-primary btn-sm" onClick={() => setTestOpen(true)}><Icon name="play" size={14} />{running ? "Testing…" : "Test"}</button>
+          <button className="btn btn-primary btn-sm" onClick={() => setTestOpen(true)} title="Run Workflow"><Icon name="play" size={14} />{running ? "Running…" : "Run"}</button>
         </div>
       </div>
 

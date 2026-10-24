@@ -188,7 +188,7 @@ export function Topbar({ crumbs, right, left, onCommand, project }: { crumbs: Cr
   const [theme, setTheme] = useTheme();
 
   return (
-    <div style={{ height: 52, flex: "none", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", padding: "0 16px", gap: 12, background: "var(--bg-1)" }}>
+    <div className="topbar" data-testid="topbar" style={{ height: 52, flex: "none", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", padding: "0 16px", gap: 12, background: "var(--bg-1)" }}>
       {left}
       <div className="row gap2" style={{ minWidth: 0 }}>
         {crumbs.map((c, i) => (
