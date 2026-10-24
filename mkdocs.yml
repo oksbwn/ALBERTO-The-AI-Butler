@@ -1,0 +1,165 @@
+site_name: Alberto Documentation
+site_description: Technical Documentation for Alberto — Local-first AI Butler and Multi-Agent Automation Platform
+site_author: Alberto Engineering Team
+site_url: https://alberto.readthedocs.io/
+repo_url: https://github.com/oksbwn/ALBERTO---The-AI-Butler
+repo_name: ALBERTO---The-AI-Butler
+copyright: Copyright &copy; 2026 Alberto Contributors. MIT Licensed.
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  logo: assets/alberto_icon.png
+  favicon: assets/alberto_icon.png
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.tracking
+    - navigation.expand
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets
+  - pymdownx.keys
+  - tables
+  - attr_list
+  - def_list
+  - toc:
+      permalink: true
+
+extra_css:
+  - assets/stylesheets/extra.css
+
+not_in_nav: |
+  cleanup/*
+  plans/*
+  reviews/*
+  architecture/decisions/*
+  architecture/ALBERTO_*.md
+  architecture/BUTLER_*.md
+  architecture/MODEL_*.md
+  operations/RELEASE_PROCESS.md
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Overview: getting-started/index.md
+      - Development Installation: getting-started/installation.md
+      - Docker Deployment: getting-started/docker.md
+      - First Admin & Login: getting-started/first-admin-and-login.md
+      - Configuring First LLM: getting-started/first-llm.md
+      - Creating an Agent: getting-started/first-agent.md
+      - First Conversation: getting-started/first-conversation.md
+      - Connecting Integrations: getting-started/first-integration.md
+      - Building First Workflow: getting-started/first-workflow.md
+      - Troubleshooting Setup: getting-started/troubleshooting.md
+  - System Architecture:
+      - Overview: architecture/index.md
+      - Request Lifecycle: architecture/request-lifecycle.md
+      - LangGraph Orchestration: architecture/orchestration.md
+      - Event Flow & Streaming: architecture/event-flow.md
+      - Persistence Architecture: architecture/persistence.md
+      - Trust Boundaries: architecture/trust-boundaries.md
+  - Agents & Specialists:
+      - Overview: agents/index.md
+      - Master Coordinator: agents/master-coordinator.md
+      - Specialist Agents: agents/specialist-agents.md
+      - Intent Router: agents/intent-router.md
+      - ReAct Execution Loop: agents/react-loop.md
+  - LLM Providers:
+      - Architecture: providers/index.md
+      - Local Models (Ollama & vLLM): providers/local-models.md
+      - Cloud Models (OpenAI, Anthropic, Gemini): providers/cloud-models.md
+      - Catalog & Token Metrics: providers/catalog-and-metrics.md
+  - Tools & Integrations:
+      - Gateway Overview: tools-and-integrations/index.md
+      - Tool Manager & Policy Gates: tools-and-integrations/tool-manager.md
+      - Model Context Protocol (MCP): tools-and-integrations/mcp.md
+      - REST Connectors: tools-and-integrations/rest-integrations.md
+      - Channels (Telegram & Webhooks): tools-and-integrations/channels.md
+  - Memory & Knowledge:
+      - Overview: memory/index.md
+      - Unified Memory Manager: memory/unified-memory.md
+      - Vector Store & RAG: memory/vector-store.md
+      - Knowledge Graph & Dynamic Ontology: memory/knowledge-graph.md
+      - Markdown Memory: memory/markdown-memory.md
+  - Automate (Workflows):
+      - Overview: automate/index.md
+      - Visual Canvas: automate/canvas.md
+      - Node Types & Flow Control: automate/node-types.md
+      - Execution & Dry Runs: automate/execution.md
+      - Real-World Examples: automate/examples.md
+  - REST API Reference:
+      - Overview: api/index.md
+      - Authentication & Access: api/auth.md
+      - Agents: api/agents.md
+      - Assistant & Chat: api/chat.md
+      - Models & Providers: api/models.md
+      - Tools & Integrations: api/tools-and-integrations.md
+      - Memory & Knowledge: api/memory-and-knowledge.md
+      - Workflows & Runs: api/workflows.md
+      - System & Diagnostics: api/system.md
+  - Data Architecture:
+      - Overview: data/index.md
+      - Database Schemas & ER: data/schema.md
+      - Schema Migrations: data/migrations.md
+      - Backup & Recovery: data/backup-recovery.md
+  - Security Architecture:
+      - Overview: security/index.md
+      - Authentication & Tokens: security/auth-and-jwt.md
+      - Tool Authorization & Sandbox: security/tool-authorization.md
+      - Prompt Injection Defenses: security/prompt-injection.md
+  - Deployment & Operations:
+      - Overview: deployment/index.md
+      - Docker Production Build: deployment/docker.md
+      - Environment Variables: deployment/environment-variables.md
+      - Health & Monitoring: deployment/operations.md
+  - Developer Guide:
+      - Overview: development/index.md
+      - Contributing Standards: development/contributing.md
+      - Testing Infrastructure: development/testing.md
+      - Extending Alberto: development/extending-alberto.md
+  - Troubleshooting & Reference:
+      - Diagnostic Procedures: troubleshooting/index.md
+      - Glossary: troubleshooting/glossary.md
+  - Reports & Audits:
+      - Repository Technical Audit: reports/repository-audit.md
+      - Screenshot Manifest: reports/screenshot-coverage-manifest.md
+      - Implementation Report: reports/documentation-implementation-report.md
