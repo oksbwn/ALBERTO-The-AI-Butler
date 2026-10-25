@@ -15,8 +15,8 @@ import json
 import logging
 import time
 from typing import Any
-import jmespath
 
+import jmespath
 from langgraph.graph import END
 
 from alberto.engine.context import CompileContext
@@ -73,6 +73,16 @@ def make_router_path(config: dict):
                 actual = jmespath.search(prop, state["msg"])
             except Exception:
                 actual = None
+        if actual is None and "payload" in state and isinstance(state["payload"], dict) and prop:
+            try:
+                actual = jmespath.search(prop, state["payload"])
+            except Exception:
+                actual = None
+        if actual is None and "output" in state and isinstance(state["output"], dict) and prop:
+            try:
+                actual = jmespath.search(prop, state["output"])
+            except Exception:
+                actual = None
 
         if op in ("eq", "equals", "=="):
             if isinstance(expected, bool):
@@ -82,6 +92,20 @@ def make_router_path(config: dict):
             return actual != expected and str(actual) != str(expected)
         if op in ("contains",):
             return str(expected).lower() in str(actual).lower() if actual is not None else False
+        if op in ("gte", "greater_than_or_equal", ">="):
+            if actual is None or expected is None:
+                return False
+            try:
+                return float(actual) >= float(expected)
+            except Exception:
+                return False
+        if op in ("lte", "less_than_or_equal", "<="):
+            if actual is None or expected is None:
+                return False
+            try:
+                return float(actual) <= float(expected)
+            except Exception:
+                return False
         if op in ("gt", "greater_than", ">"):
             if actual is None or expected is None:
                 return False
@@ -551,7 +575,7 @@ def inject_factory(config: dict, ctx: CompileContext):
         if payload_raw is None and state.get(output_key) is not None:
             payload = state.get(output_key)
         elif payload_type in ("timestamp", "date"):
-            payload = datetime.datetime.fromtimestamp(now, tz=datetime.timezone.utc).isoformat()
+            payload = datetime.datetime.fromtimestamp(now, tz=datetime.UTC).isoformat()
         elif payload_type == "number":
             try:
                 payload = float(payload_raw) if "." in str(payload_raw) else int(payload_raw)
@@ -593,6 +617,7 @@ def debug_factory(config: dict, ctx: CompileContext):
             return {}
         try:
             from langgraph.config import get_stream_writer
+
             from alberto.services.tool_policy import ToolPolicyService
 
             state_dict = dict(state or {})
@@ -634,7 +659,7 @@ def delay_factory(config: dict, ctx: CompileContext):
     async def _node(state: dict) -> dict:
         if mode == "durable":
             from langgraph.types import interrupt
-            now = datetime.datetime.now(datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.UTC)
             deadline = now + datetime.timedelta(seconds=duration)
             interrupt({
                 "type": "delay",

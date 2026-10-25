@@ -40,7 +40,9 @@ def eval_expression(expr: str, state: dict | None = None, context: dict | None =
     except SyntaxError as e:
         raise ExpressionError(f"Invalid expression {expr!r}: {e}") from e
 
+    payload_keys = state.get("payload") if isinstance(state.get("payload"), dict) else {}
     env: dict[str, Any] = {
+        **payload_keys,
         **state,  # state keys as bare names - spread FIRST so a state key can't shadow a guard
         # Reserved/guard keys are set AFTER **state so the sandbox guards and safe builtins
         # always win (a state key named e.g. "__builtins__" or "_getitem_" can't override them).

@@ -45,6 +45,8 @@ class CompileContext:
     # runtime assembler. Lets an agent be granted a whole set via config.toolsets and have it
     # resolve to the set's member tools at compile time (see resolve_tool_ids).
     toolset_members: dict[str, list[str]] = field(default_factory=dict)
+    # Formatted live integration & MCP registry summary available to specialist agents
+    integration_context: str = ""
 
     # Cross-cutting services.
     auth_resolver: Any = None

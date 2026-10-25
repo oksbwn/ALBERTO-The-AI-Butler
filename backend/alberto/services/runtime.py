@@ -214,13 +214,29 @@ async def build_compile_context(
                     McpClient.enabled.is_(True),
                 )
             )
-        ).scalars()
+        ).scalars().all()
         for m in mcp_rows:
             try:
                 mcp_by_client[m.id] = await server_tools(m, tenant_id, project_id, mcp_auth_context)
             except Exception as e:  # noqa: BLE001 - an unreachable server must not break the run
                 log.warning("MCP server %s unavailable, skipping its tools: %s", m.name, e)
         ctx.mcp_tools_by_client = mcp_by_client
+
+        mcp_lines = []
+        for m in mcp_rows:
+            is_ha = "8123" in (m.url or "") or m.name.upper() == "HA" or "homeassistant" in (m.url or "").lower()
+            label = f"{m.name} (Home Assistant)" if is_ha else m.name
+            status = "enabled" if m.enabled else "disabled"
+            mcp_lines.append(f"- MCP Client: {label} [{status}] | Transport: {m.transport} | URL: {m.url or '(none)'}")
+        from alberto.models import ConnectorInstall
+        conn_rows = (await session.execute(select(ConnectorInstall).where(ConnectorInstall.tenant_id == tenant_id, ConnectorInstall.project_id == project_id))).scalars().all()
+        conn_lines = [f"- Connector: {c.name or c.slug} [{c.status}] (version {c.version})" for c in conn_rows]
+        ctx.integration_context = (
+            "\n[PROJECT REGISTERED INTEGRATIONS & MCP REGISTRY]\n"
+            f"Active MCP Servers ({len(mcp_rows)}):\n" + ("\n".join(mcp_lines) if mcp_lines else "None\n") +
+            f"\nInstalled Connectors ({len(conn_rows)}):\n" + ("\n".join(conn_lines) if conn_lines else "None\n") +
+            f"\nTotal Registered Tools in Registry: {len(registry)}"
+        )
 
     # Saved agent presets, so an agent node with `agent_ref` mirrors the live preset.
     agent_rows = (

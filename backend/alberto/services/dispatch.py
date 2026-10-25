@@ -5,11 +5,10 @@ Shared by the webhook route, the scheduler, the email poller, and chat channels.
 
 from __future__ import annotations
 
-from typing import Any
-
 import inspect
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 
@@ -318,7 +317,7 @@ async def run_due_delays(run_service: RunService, lease_seconds: int = 30) -> in
     - Purged permanently only upon terminal run completion in RunService._finalize.
     """
     from alberto.models import Run, Thread
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     resumed_count = 0
     async with SessionLocal() as session:
         runs = list((await session.execute(
@@ -344,7 +343,7 @@ async def run_due_delays(run_service: RunService, lease_seconds: int = 30) -> in
                     now_tz = datetime.now(deadline.tzinfo)
                     is_due = deadline <= now_tz
                 else:
-                    is_due = deadline <= datetime.now(timezone.utc).replace(tzinfo=None)
+                    is_due = deadline <= datetime.now(UTC).replace(tzinfo=None)
             except Exception:
                 continue
 
@@ -361,7 +360,7 @@ async def run_due_delays(run_service: RunService, lease_seconds: int = 30) -> in
                         now_tz = datetime.now(claimed_at.tzinfo)
                         lease_active = (now_tz - claimed_at).total_seconds() < lease_seconds
                     else:
-                        lease_active = (datetime.now(timezone.utc).replace(tzinfo=None) - claimed_at).total_seconds() < lease_seconds
+                        lease_active = (datetime.now(UTC).replace(tzinfo=None) - claimed_at).total_seconds() < lease_seconds
                     if lease_active:
                         continue
                 except Exception:

@@ -88,11 +88,20 @@ COMPONENT_STYLE = (
 
 
 def _build_prompt(config: dict) -> str | None:
+    import json
+
     # Static system prompt + Forge's default Markdown output style (+ component guidance when
     # components are attached). Dynamic prompts compile to a middleware (added later).
     base = (config.get("system_prompt") or "").strip()
-    structured = (config.get("response_format") or {}).get("mode") == "structured"
+    rf = config.get("response_format") or {}
+    schema = rf.get("schema") if rf.get("mode") == "structured" else (config.get("output_schema") or config.get("structured_output"))
+    if isinstance(schema, dict) and "schema" in schema and isinstance(schema["schema"], dict):
+        schema = schema["schema"]
+    structured = bool(schema)
     if structured or config.get("output_style") == "plain":
+        if schema and isinstance(schema, dict):
+            schema_inst = f"You must output valid JSON conforming strictly to this JSON Schema:\n{json.dumps(schema, ensure_ascii=False, indent=2)}"
+            return f"{base}\n\n{schema_inst}".strip() if base else schema_inst
         return base or None
     has_components = bool(config.get("components"))
     style = OUTPUT_STYLE_WITH_COMPONENTS if has_components else OUTPUT_STYLE
@@ -103,11 +112,15 @@ def _build_prompt(config: dict) -> str | None:
 
 
 def _build_response_format(config: dict) -> Any:
-    rf = config.get("response_format")
-    if not rf or rf.get("mode") != "structured":
-        return None
-    # create_agent accepts a raw JSON-schema dict (auto provider/tool strategy).
-    return rf.get("schema")
+    rf = config.get("response_format") or {}
+    if rf.get("mode") == "structured" and rf.get("schema"):
+        return rf.get("schema")
+    if config.get("output_schema"):
+        return config.get("output_schema")
+    if config.get("structured_output"):
+        so = config["structured_output"]
+        return so.get("schema") if isinstance(so, dict) else so
+    return None
 
 
 # deepagents' built-in `task`-tool guidance is a ~536-token essay injected into EVERY supervisor
@@ -642,6 +655,11 @@ def _common_kwargs(config: dict, ctx: CompileContext) -> dict:
         eu_block = _end_user_block(end_user)
         if eu_block:
             prompt = f"{prompt}\n\n{eu_block}" if prompt else eu_block
+    # Specialist agent awareness: if the agent is an Integration Manager, inject the live integration context
+    full_prompt_text = (config.get("name", "") + " " + (config.get("system_prompt") or "")).lower()
+    if getattr(ctx, "integration_context", None) and any(kw in full_prompt_text for kw in ("integration manager", "installed integrations", "mcp servers")):
+        prompt = f"{prompt}\n\n{ctx.integration_context}" if prompt else ctx.integration_context
+
     if prompt:
         common["system_prompt"] = prompt
     # Wire the dynamic_model / dynamic_prompt config blocks (append after the static stack so
@@ -730,15 +748,27 @@ def agent_factory(config: dict, ctx: CompileContext):
 
     task_prompt = config.get("task_prompt") or config.get("prompt")
     rf = config.get("response_format") or {}
+    output_schema = None
+    if rf.get("mode") == "structured" and rf.get("schema"):
+        output_schema = rf["schema"]
+    elif config.get("output_schema"):
+        output_schema = config["output_schema"]
+    elif config.get("structured_output"):
+        so = config["structured_output"]
+        output_schema = so.get("schema") if isinstance(so, dict) else so
+    if isinstance(output_schema, dict) and "schema" in output_schema and isinstance(output_schema["schema"], dict):
+        output_schema = output_schema["schema"]
+
     output_key = config.get("output_key") or (rf.get("output_key") if rf.get("mode") == "structured" else None)
+    max_retries = int(config.get("max_retries", 2))
 
-    if not task_prompt and not output_key:
-        return raw_agent
+    async def _pipeline_node(state: dict, *args, **kwargs) -> dict:
+        import json
 
-    async def _pipeline_node(state: dict) -> dict:
         from langchain_core.messages import HumanMessage
 
         from alberto.auth_providers.templates import render_template
+        from alberto.util.serialize import content_to_text
 
         agent_state = dict(state or {})
         if task_prompt:
@@ -748,16 +778,112 @@ def agent_factory(config: dict, ctx: CompileContext):
             if rendered:
                 existing_msgs = list(agent_state.get("messages") or [])
                 agent_state["messages"] = [*existing_msgs, HumanMessage(content=rendered)]
+        elif not agent_state.get("messages") and agent_state.get("payload") is not None:
+            p = agent_state["payload"]
+            p_text = p if isinstance(p, str) else json.dumps(p, ensure_ascii=False)
+            agent_state["messages"] = [HumanMessage(content=p_text)]
 
-        result = await raw_agent.ainvoke(agent_state)
-        out: dict[str, Any] = dict(result or {})
-        if output_key:
-            parsed = _extract_structured_data(result)
+        result = await raw_agent.ainvoke(agent_state, *args, **kwargs)
+        parsed = _extract_structured_data(result)
+
+        if output_schema:
+            is_valid, val_err = _validate_schema(parsed, output_schema)
+            attempts = 0
+            current_result = result
+            current_msgs = list(agent_state.get("messages") or []) + list(result.get("messages") or [])
+
+            while not is_valid and attempts < max_retries:
+                attempts += 1
+                log.warning(
+                    "Agent node output failed schema validation (attempt %d/%d): %s",
+                    attempts,
+                    max_retries,
+                    val_err,
+                )
+                correction_msg = (
+                    f"Your previous response failed JSON schema validation: {val_err}. "
+                    f"Please output a valid JSON object strictly conforming to this schema:\n"
+                    f"{json.dumps(output_schema, ensure_ascii=False, indent=2)}"
+                )
+                retry_state = dict(agent_state)
+                retry_state["messages"] = [*current_msgs, HumanMessage(content=correction_msg)]
+                current_result = await raw_agent.ainvoke(retry_state, *args, **kwargs)
+                current_msgs = list(retry_state["messages"]) + list(current_result.get("messages") or [])
+                parsed = _extract_structured_data(current_result)
+                is_valid, val_err = _validate_schema(parsed, output_schema)
+
+            if not is_valid:
+                raise ValueError(
+                    f"Agent node output failed schema validation after {attempts} retries: {val_err}"
+                )
+
+            final_data = parsed
+            result = current_result
+        else:
             if parsed is not None:
-                out[output_key] = parsed
+                final_data = _normalize_json_object(parsed)
+            else:
+                msgs = result.get("messages") or []
+                last_text = ""
+                if msgs:
+                    last_content = getattr(msgs[-1], "content", "")
+                    last_text = content_to_text(last_content) if last_content else ""
+                final_data = _normalize_json_object(last_text)
+
+        out: dict[str, Any] = dict(result or {})
+        out["payload"] = final_data
+        out["msg"] = {"payload": final_data, "topic": state.get("topic", "")}
+        out["output"] = final_data
+        if output_key:
+            out[output_key] = final_data
         return out
 
     return _pipeline_node
+
+
+def _validate_schema(data: Any, schema: dict) -> tuple[bool, str | None]:
+    import jsonschema
+
+    if data is None or not isinstance(data, (dict, list)):
+        return False, "Expected a JSON object or array"
+    try:
+        jsonschema.validate(instance=data, schema=schema)
+        return True, None
+    except jsonschema.ValidationError as e:
+        return False, e.message
+    except Exception as e:
+        return False, str(e)
+
+
+def _normalize_json_object(val: Any) -> dict:
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, list):
+        return {"items": val}
+    if isinstance(val, str):
+        text = val.strip()
+        if (text.startswith("{") and text.endswith("}")) or (text.startswith("[") and text.endswith("]")) or "```" in text:
+            import json
+            import re
+
+            m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+            if m:
+                text = m.group(1).strip()
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, str):
+                    try:
+                        parsed = json.loads(parsed)
+                    except Exception:
+                        pass
+                if isinstance(parsed, dict):
+                    return parsed
+                if isinstance(parsed, list):
+                    return {"items": parsed}
+            except Exception:
+                pass
+        return {"response": val, "content": val}
+    return {"response": str(val), "content": str(val)}
 
 
 def _extract_structured_data(res: dict) -> Any:
@@ -769,9 +895,24 @@ def _extract_structured_data(res: dict) -> Any:
     sr = getattr(last, "structured_response", None)
     if sr is not None:
         return sr
+    for tc in getattr(last, "tool_calls", []) or []:
+        args = tc.get("args")
+        if isinstance(args, dict):
+            return args
     content = getattr(last, "content", None)
     if isinstance(content, dict):
         return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                if b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                elif "text" in b:
+                    parts.append(b["text"])
+            elif isinstance(b, str):
+                parts.append(b)
+        content = "".join(parts)
     if isinstance(content, str):
         text = content.strip()
         import json
@@ -781,13 +922,17 @@ def _extract_structured_data(res: dict) -> Any:
         if m:
             text = m.group(1).strip()
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
+            if isinstance(parsed, str):
+                try:
+                    inner = json.loads(parsed)
+                    if isinstance(inner, (dict, list)):
+                        parsed = inner
+                except Exception:
+                    pass
+            return parsed
         except Exception:
             pass
-    for tc in getattr(last, "tool_calls", []) or []:
-        args = tc.get("args")
-        if isinstance(args, dict):
-            return args
     return None
 
 
@@ -817,8 +962,8 @@ def _summary(config: dict) -> list[str]:
 
 
 _ports = (
-    [Port(id="in", io_type="messages", direction="in")],
-    [Port(id="out", io_type="messages", direction="out")],
+    [Port(id="in", io_type="any", direction="in")],
+    [Port(id="out", io_type="json", direction="out")],
 )
 
 register(

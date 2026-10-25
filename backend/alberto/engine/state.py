@@ -91,6 +91,7 @@ def build_state_typeddict(state_cfg: dict[str, dict], name: str = "WorkflowState
     cfg.setdefault("messages", _DEFAULT_MESSAGES)
     cfg.setdefault("msg", {"type": "json", "reducer": "merge_msg"})
     cfg.setdefault("payload", {"type": "json", "reducer": "merge_payload"})
+    cfg.setdefault("output", {"type": "json", "reducer": "last_value"})
     cfg.setdefault("topic", {"type": "str", "reducer": "last_value"})
     cfg.setdefault("_branches", {"type": "json", "reducer": "merge"})
 
