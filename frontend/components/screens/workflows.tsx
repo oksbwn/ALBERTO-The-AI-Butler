@@ -28,6 +28,30 @@ function stripRunData(nds: FlowNode[]): FlowNode[] {
   });
 }
 
+function extractSchemaKeys(schema: any, prefix = ""): string[] {
+  if (!schema) return [];
+  let obj = schema;
+  if (typeof obj === "string") {
+    try {
+      obj = JSON.parse(obj);
+    } catch {
+      return [];
+    }
+  }
+  if (!obj || typeof obj !== "object") return [];
+  const props = obj.properties;
+  if (!props || typeof props !== "object") return [];
+  const keys: string[] = [];
+  for (const [key, val] of Object.entries(props)) {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+    keys.push(fullKey);
+    if (val && typeof val === "object" && (val as any).type === "object" && (val as any).properties) {
+      keys.push(...extractSchemaKeys(val, fullKey));
+    }
+  }
+  return keys;
+}
+
 function getUpstreamOutputs(selectedId: string | null, nodes: FlowNode[], edges: FlowEdge[]): UpstreamSource[] {
   if (!selectedId) return [];
   const inMap: Record<string, string[]> = {};
@@ -72,7 +96,22 @@ function getUpstreamOutputs(selectedId: string | null, nodes: FlowNode[], edges:
     } else if (t === "llm") {
       keys.push(cfg.output_key || "result", "messages");
     } else if (t === "agent" || t === "deep_agent") {
-      keys.push("messages", "tool_calls");
+      keys.push("payload", "output", "msg", "response", "content", "messages", "tool_calls");
+      if (cfg.output_key) {
+        keys.push(cfg.output_key);
+      }
+      const schema =
+        cfg.response_format?.schema ||
+        cfg.response_format?.json_schema?.schema ||
+        cfg.output_schema ||
+        cfg.structured_output;
+      if (schema) {
+        const schemaKeys = extractSchemaKeys(schema);
+        for (const sk of schemaKeys) {
+          keys.push(sk);
+          keys.push(`payload.${sk}`);
+        }
+      }
     } else if (t === "human_input") {
       keys.push(cfg.output_key || "decision");
     } else if (t === "webhook_in") {
@@ -314,7 +353,10 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
   const [problems, setProblems] = useState<{ pointer: string; message: string }[]>([]);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "invalid">("idle");
   const [running, setRunning] = useState(false);
-  const [testOpen, setTestOpen] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<"info" | "debug">("info");
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(340);
+  const [trayWidth, setTrayWidth] = useState(480);
   const [showProblems, setShowProblems] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   // Unsaved-changes tracking (drives the beforeunload guard + auto-save on navigate-away).
@@ -361,6 +403,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
 
   const nodeTypes = useMemo(() => ({ alberto: ForgeNode, forge: ForgeNode }), []);
   const selected = nodes.find((n) => n.id === selId) || null;
+  const editingNode = useMemo(() => nodes.find((n) => n.id === editingNodeId) || null, [nodes, editingNodeId]);
 
   // ---- Canvas UX: dirty tracking, undo/redo, copy/paste/duplicate ----
   // Refs mirror the latest graph so the history/clipboard callbacks stay stable (no dep churn)
@@ -674,11 +717,80 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
     }
   }, [wf, project?.id]);
 
+  const [deployMode, setDeployMode] = useState<"publish" | "save">("publish");
+  const [deployMenuOpen, setDeployMenuOpen] = useState(false);
+  const [publishState, setPublishState] = useState<"idle" | "publishing" | "published" | "error">("idle");
+  const deployMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!deployMenuOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (deployMenuRef.current && !deployMenuRef.current.contains(e.target as Node)) {
+        setDeployMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [deployMenuOpen]);
+
+  useEffect(() => {
+    const onInjectTrigger = () => {
+      setSidebarTab("debug");
+      setEditingNodeId(null);
+    };
+    window.addEventListener("alberto-inject-trigger", onInjectTrigger);
+    return () => window.removeEventListener("alberto-inject-trigger", onInjectTrigger);
+  }, []);
+
   const save = useCallback(async () => {
     await saveCanvasState(nodes, edges);
   }, [saveCanvasState, nodes, edges]);
 
-  // Register the canvas flush with the parent so the top-bar Publish saves first.
+  const deployOrSave = useCallback(async (forcedMode?: "publish" | "save") => {
+    const mode = forcedMode || deployMode;
+    if (!wf || !project?.id) return;
+    setSaveState("saving");
+    if (mode === "publish") setPublishState("publishing");
+    const persistNodes = stripRunData(nodes);
+    const executable = canvasToExecutable(persistNodes, edges, { id: wf.id, version: wf.active_version });
+    const canvas = { nodes: persistNodes, edges, viewport: { x: 0, y: 0, zoom: 1 } };
+    try {
+      const res = await api.saveCanvas(project.id, wf.id, canvas, executable);
+      const warns = ((res as any).warnings || []).map((w: any) => ({ ...w, level: "warning" }));
+      setProblems([...res.errors, ...warns]);
+      setDirty(false);
+      if (!res.valid) {
+        setSaveState("invalid");
+        if (mode === "publish") {
+          setPublishState("error");
+          setTimeout(() => setPublishState("idle"), 2400);
+        }
+        setShowProblems(true);
+        return;
+      }
+      setSaveState("saved");
+      setTimeout(() => setSaveState((s) => (s === "saved" ? "idle" : s)), 1500);
+
+      if (mode === "publish") {
+        try {
+          await api.publishWorkflow(project.id, wf.id);
+          setPublishState("published");
+          setTimeout(() => setPublishState("idle"), 1600);
+        } catch {
+          setPublishState("error");
+          setTimeout(() => setPublishState("idle"), 2400);
+        }
+      }
+    } catch {
+      setSaveState("invalid");
+      if (mode === "publish") {
+        setPublishState("error");
+        setTimeout(() => setPublishState("idle"), 2400);
+      }
+    }
+  }, [wf, project?.id, nodes, edges, deployMode]);
+
+  // Register the canvas flush with the parent so external calls save first.
   useEffect(() => {
     onRegisterFlush?.(save);
     return () => onRegisterFlush?.(null);
@@ -758,9 +870,51 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
   }, [setNodes]);
 
   const closeTestPanel = useCallback(() => {
-    setTestOpen(false);
+    setSidebarTab("info");
     clearRunDebug();
   }, [clearRunDebug]);
+
+  const startSidebarResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = startX - ev.clientX;
+      const next = Math.max(260, Math.min(window.innerWidth * 0.65, startW + delta));
+      setSidebarWidth(Math.round(next));
+    };
+    const onMouseUp = () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      document.body.style.removeProperty("cursor");
+      document.body.style.removeProperty("user-select");
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  }, [sidebarWidth]);
+
+  const startTrayResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = trayWidth;
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = startX - ev.clientX;
+      const next = Math.max(340, Math.min(window.innerWidth * 0.85, startW + delta));
+      setTrayWidth(Math.round(next));
+    };
+    const onMouseUp = () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      document.body.style.removeProperty("cursor");
+      document.body.style.removeProperty("user-select");
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  }, [trayWidth]);
 
   const palette = useMemo(() => {
     const groups: Record<string, NodeType[]> = {};
@@ -791,19 +945,143 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
           {problems.length > 0 && (
             <button className="btn btn-danger btn-sm" onClick={() => setShowProblems((s) => !s)}><Icon name="validate" size={14} />{problems.length} problem{problems.length === 1 ? "" : "s"}</button>
           )}
-          <button className="btn btn-secondary btn-sm" onClick={() => fitView({ padding: 0.2, duration: 300 })}><Icon name="fit" size={14} />Fit</button>
           <VersionHistory entityType="workflow" entityId={wf?.id} entityLabel={wf?.name} onRestored={() => setReloadKey((k) => k + 1)} />
-          <button className="btn btn-secondary btn-sm" onClick={save} disabled={saveState === "saving"}>
-            <Icon name={saveState === "saved" ? "check" : "save"} size={14} />
-            {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : saveState === "invalid" ? "Saved (invalid)" : "Save"}
-            {dirty && saveState === "idle" && <span title="Unsaved changes" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", marginLeft: 4 }} />}
-          </button>
-          <button className="btn btn-ghost btn-sm" onClick={async () => { await save(); onRun(); }}><Icon name="playground" size={14} />Playground</button>
-          <button className="btn btn-primary btn-sm" onClick={() => setTestOpen(true)} title="Run Workflow"><Icon name="play" size={14} />{running ? "Running…" : "Run"}</button>
+
+          {/* Node-RED style Deploy / Save split button */}
+          <div ref={deployMenuRef} className="row" style={{ position: "relative", gap: 0 }}>
+            <button
+              className="btn btn-primary btn-sm"
+              style={{
+                borderTopRightRadius: 0,
+                borderBottomRightRadius: 0,
+                borderRight: "1px solid rgba(255,255,255,0.25)",
+              }}
+              onClick={() => void deployOrSave()}
+              disabled={saveState === "saving" || publishState === "publishing"}
+            >
+              <Icon
+                name={
+                  publishState === "published" || saveState === "saved"
+                    ? "check"
+                    : deployMode === "publish"
+                    ? "bolt"
+                    : "save"
+                }
+                size={14}
+              />
+              {publishState === "publishing"
+                ? "Deploying…"
+                : publishState === "published"
+                ? "Deployed"
+                : publishState === "error"
+                ? "Fix errors"
+                : saveState === "saving"
+                ? "Saving…"
+                : saveState === "saved"
+                ? "Saved"
+                : saveState === "invalid"
+                ? "Invalid"
+                : deployMode === "publish"
+                ? "Deploy"
+                : "Save"}
+              {dirty && saveState === "idle" && publishState === "idle" && (
+                <span
+                  title="Unsaved changes"
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background: "rgba(255,255,255,0.9)",
+                    marginLeft: 4,
+                  }}
+                />
+              )}
+            </button>
+            <button
+              className="btn btn-primary btn-sm"
+              style={{
+                borderTopLeftRadius: 0,
+                borderBottomLeftRadius: 0,
+                padding: "0 6px",
+              }}
+              onClick={() => setDeployMenuOpen((o) => !o)}
+              title="Deploy options"
+            >
+              <Icon name="chevdown" size={12} />
+            </button>
+            {deployMenuOpen && (
+              <div
+                className="card col gap1"
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  right: 0,
+                  marginTop: 4,
+                  minWidth: 175,
+                  padding: 4,
+                  zIndex: 100,
+                  boxShadow: "var(--sh-pop)",
+                  background: "var(--bg-2)",
+                  border: "1px solid var(--line)",
+                }}
+              >
+                <button
+                  type="button"
+                  className="row gap2"
+                  style={{
+                    padding: "6px 8px",
+                    borderRadius: 4,
+                    background: deployMode === "publish" ? "var(--bg-3)" : "transparent",
+                    border: "none",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    width: "100%",
+                    color: "var(--fg-1)",
+                  }}
+                  onClick={() => {
+                    setDeployMode("publish");
+                    setDeployMenuOpen(false);
+                    void deployOrSave("publish");
+                  }}
+                >
+                  <Icon name="bolt" size={14} style={{ color: "var(--accent)" }} />
+                  <div>
+                    <div className="t-body-sm" style={{ fontWeight: 600 }}>Deploy (Full)</div>
+                    <div className="t-caption fg-2">Save &amp; publish live triggers</div>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="row gap2"
+                  style={{
+                    padding: "6px 8px",
+                    borderRadius: 4,
+                    background: deployMode === "save" ? "var(--bg-3)" : "transparent",
+                    border: "none",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    width: "100%",
+                    color: "var(--fg-1)",
+                  }}
+                  onClick={() => {
+                    setDeployMode("save");
+                    setDeployMenuOpen(false);
+                    void deployOrSave("save");
+                  }}
+                >
+                  <Icon name="save" size={14} style={{ color: "var(--fg-2)" }} />
+                  <div>
+                    <div className="t-body-sm" style={{ fontWeight: 600 }}>Save Draft</div>
+                    <div className="t-caption fg-2">Save without publishing</div>
+                  </div>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      <div style={{ display: "flex", alignItems: "stretch", flex: 1, minHeight: 0 }}>
+      <div style={{ display: "flex", alignItems: "stretch", flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
         {/* palette */}
         <div className="scroll-y" style={{ width: 200, flex: "none", borderRight: "1px solid var(--line)", background: "var(--bg-1)", padding: 10 }}>
           <input className="input" placeholder="Search nodes…" value={paletteQuery} onChange={(e) => setPaletteQuery(e.target.value)} style={{ marginBottom: 10 }} />
@@ -882,7 +1160,18 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
                 onNodesChange={onNodesChangeSynced} onEdgesChange={onEdgesChangeSynced} onConnect={onConnect}
                 onNodeDragStart={() => snapshot()}
                 isValidConnection={isValidConnection as any}
-                onNodeClick={(_, n) => setSelId(n.id)} onPaneClick={() => setSelId(null)}
+                onNodeClick={(_, n) => {
+                  setSelId(n.id);
+                  setEditingNodeId(n.id);
+                }}
+                onNodeDoubleClick={(_, n) => {
+                  setSelId(n.id);
+                  setEditingNodeId(n.id);
+                }}
+                onPaneClick={() => {
+                  setSelId(null);
+                  setEditingNodeId(null);
+                }}
                 deleteKeyCode={["Backspace", "Delete"]}
                 fitView proOptions={{ hideAttribution: true }} defaultEdgeOptions={{ style: { strokeWidth: 2 } }}
               >
@@ -926,50 +1215,337 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
           )}
         </div>
 
-        {/* inspector */}
-        <div className={testOpen ? "col" : "scroll-y"} style={{ width: testOpen ? 380 : 340, flex: "none", borderLeft: "1px solid var(--line)", background: "var(--bg-1)", padding: testOpen ? 0 : 16, minHeight: 0, overflow: testOpen ? "hidden" : undefined }}>
-          {testOpen && wf ? (
-            <WorkflowTestPanel
-              project={project}
-              workflow={wf}
-              running={running}
-              onRunningChange={setRunning}
-              onBeforeRun={save}
-              onClose={closeTestPanel}
-              onResetRun={clearRunDebug}
-              onNodeStep={markRunNode}
-              onFinalDebug={applyFinalDebug}
-            />
-          ) : selected ? (
-            <NodeInspector
-              node={selected}
-              nodes={nodes}
-              edges={edges}
-              tools={tools}
-              toolSets={toolSets}
-              agents={agents}
-              mcpServers={mcpServers}
-              components={components}
-              dynamic={{ kb_folders: kbFolders, qa_kinds: qaKinds }}
-              onChange={updateConfig}
-              onRename={renameNodeId}
-              onDelete={deleteNode}
-              onRouterCaseTarget={syncRouterCaseEdge}
-              onRouterCaseRename={renameRouterCaseEdges}
-              onRouterCaseRemove={removeRouterCaseEdges}
-            />
-          ) : (
-            <div className="col gap3">
-              <div className="t-micro">Workflow</div>
-              <div className="fg-1 t-body-sm">Select a node to configure it, or add nodes from the palette.</div>
-              <div className="card" style={{ padding: 12 }}>
-                <div className="t-caption fg-2">State schema</div>
-                <div className="mono-sm" style={{ marginTop: 4 }}>messages · intent</div>
-              </div>
-              <div className="field-help">Routing: a Router node routes by its <b>cases</b> (set in its inspector); other edges define flow.</div>
+        {/* Permanent Right Sidebar (Info / Debug) */}
+        <div
+          className="col"
+          style={{
+            width: sidebarWidth,
+            flex: "none",
+            borderLeft: "1px solid var(--line)",
+            background: "var(--bg-1)",
+            minHeight: 0,
+            overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
+            position: "relative",
+          }}
+        >
+          {/* Draggable resize handle */}
+          <div
+            onMouseDown={startSidebarResize}
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: 5,
+              cursor: "col-resize",
+              zIndex: 25,
+            }}
+            title="Drag to resize sidebar"
+          />
+          {/* Permanent Sidebar Tabs Header */}
+          <div
+            className="row spread"
+            style={{
+              padding: "6px 10px",
+              borderBottom: "1px solid var(--line)",
+              background: "var(--bg-2)",
+              flex: "none",
+              alignItems: "center",
+            }}
+          >
+            <div className="row gap1" style={{ alignItems: "center" }}>
+              <button
+                type="button"
+                className={`btn btn-xs ${sidebarTab === "info" ? "btn-secondary" : "btn-ghost"}`}
+                onClick={() => setSidebarTab("info")}
+                style={{ height: 26, fontSize: 11.5, gap: 5 }}
+              >
+                <Icon name="info" size={13} style={{ color: sidebarTab === "info" ? "var(--accent)" : "var(--fg-2)" }} />
+                Info
+              </button>
+              <button
+                type="button"
+                className={`btn btn-xs ${sidebarTab === "debug" ? "btn-secondary" : "btn-ghost"}`}
+                onClick={() => setSidebarTab("debug")}
+                style={{ height: 26, fontSize: 11.5, gap: 5 }}
+                title="Run Workflow"
+                aria-label="Debug Panel"
+              >
+                <Icon name="bug" size={13} style={{ color: sidebarTab === "debug" ? "var(--accent)" : "var(--fg-2)" }} />
+                Debug
+                {running && (
+                  <span
+                    className="pill"
+                    style={{
+                      fontSize: 8.5,
+                      background: "var(--accent)",
+                      color: "var(--fg-on-accent)",
+                      padding: "0 4px",
+                      marginLeft: 2,
+                    }}
+                  >
+                    ●
+                  </span>
+                )}
+              </button>
             </div>
-          )}
+          </div>
+
+          {/* Sidebar Tab Content */}
+          {/* Sidebar Tab Content */}
+          <div className="col" style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
+            {/* Debug panel kept permanently mounted so event listeners and execution logs stay alive */}
+            <div
+              style={{
+                display: sidebarTab === "debug" ? "flex" : "none",
+                flex: 1,
+                minHeight: 0,
+                height: "100%",
+                flexDirection: "column",
+              }}
+            >
+              {wf && (
+                <WorkflowTestPanel
+                  project={project}
+                  workflow={wf}
+                  hideControls={true}
+                  running={running}
+                  onRunningChange={setRunning}
+                  onBeforeRun={save}
+                  onClose={() => setSidebarTab("info")}
+                  onResetRun={clearRunDebug}
+                  onNodeStep={markRunNode}
+                  onFinalDebug={applyFinalDebug}
+                />
+              )}
+            </div>
+
+            {/* Info panel */}
+            <div
+              className="scroll-y"
+              style={{
+                display: sidebarTab === "info" ? "flex" : "none",
+                flex: 1,
+                minHeight: 0,
+                height: "100%",
+                flexDirection: "column",
+              }}
+            >
+              {selected ? (
+                <div className="col gap3" style={{ padding: 14 }}>
+                  <div className="row spread" style={{ alignItems: "center" }}>
+                    <div className="row gap2" style={{ alignItems: "center", minWidth: 0 }}>
+                      <Tile
+                        icon={NODE_META[selected.data.nodeType]?.icon || "n_agent"}
+                        color={NODE_META[selected.data.nodeType]?.color || "var(--accent)"}
+                        size={26}
+                      />
+                      <div style={{ minWidth: 0 }}>
+                        <div className="t-h3 truncate">{selected.data.config?.name || NODE_META[selected.data.nodeType]?.label || selected.id}</div>
+                        <div className="mono-sm fg-2 truncate">{selected.id}</div>
+                      </div>
+                    </div>
+                    <span className="typechip">{selected.data.nodeType}</span>
+                  </div>
+
+                  {NODE_HELP[selected.data.nodeType]?.what && (
+                    <div className="t-caption fg-1" style={{ lineHeight: "18px" }}>
+                      {NODE_HELP[selected.data.nodeType].what}
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setEditingNodeId(selected.id)}
+                    style={{ width: "100%", justifyContent: "center", gap: 6, marginTop: 4 }}
+                  >
+                    <Icon name="edit" size={13} /> Edit Node Configuration
+                  </button>
+
+                  <div className="card col gap2" style={{ padding: 10 }}>
+                    <div className="t-micro">Node Information</div>
+                    <div className="row spread mono-sm">
+                      <span className="fg-2">Type</span>
+                      <span>{selected.data.nodeType}</span>
+                    </div>
+                    <div className="row spread mono-sm">
+                      <span className="fg-2">ID</span>
+                      <span className="truncate" style={{ maxWidth: 160 }}>{selected.id}</span>
+                    </div>
+                    {selected.data.config?.topic && (
+                      <div className="row spread mono-sm">
+                        <span className="fg-2">Topic</span>
+                        <span className="truncate" style={{ maxWidth: 160 }}>{selected.data.config.topic}</span>
+                      </div>
+                    )}
+                    {selected.data.config?.model && (
+                      <div className="row spread mono-sm">
+                        <span className="fg-2">Model</span>
+                        <span className="truncate" style={{ maxWidth: 160 }}>{selected.data.config.model}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Connections info */}
+                  <div className="card col gap2" style={{ padding: 10 }}>
+                    <div className="t-micro">Connections</div>
+                    <div className="mono-sm">
+                      <span className="fg-2">Upstream: </span>
+                      <span>
+                        {edges.filter((e) => e.target === selected.id).length
+                          ? edges
+                              .filter((e) => e.target === selected.id)
+                              .map((e) => e.source)
+                              .join(", ")
+                          : "None (entry point)"}
+                      </span>
+                    </div>
+                    <div className="mono-sm" style={{ marginTop: 4 }}>
+                      <span className="fg-2">Downstream: </span>
+                      <span>
+                        {edges.filter((e) => e.source === selected.id).length
+                          ? edges
+                              .filter((e) => e.source === selected.id)
+                              .map((e) => e.target)
+                              .join(", ")
+                          : "None (terminal node)"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="col gap3" style={{ padding: 14 }}>
+                  <div className="t-micro">Workflow Info</div>
+                  <div className="t-h2 truncate">{wf?.name || "Workflow"}</div>
+                  <div className="fg-2 t-caption mono">
+                    {nodes.length} nodes · {edges.length} edges
+                  </div>
+                  <div className="card" style={{ padding: 12 }}>
+                    <div className="t-caption fg-2">Shared State Schema</div>
+                    <div className="mono-sm" style={{ marginTop: 4 }}>
+                      payload · messages · intent
+                    </div>
+                  </div>
+                  <div className="field-help" style={{ marginTop: 8 }}>
+                    Click or double-click any node to open its configuration tray. Click <b>Inject</b> on an Inject node to run the workflow.
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
+
+        {/* Node-RED style slide-in Editor Tray (opens on top of permanent sidebar) */}
+        {editingNode && (
+          <div
+            className="col"
+            style={{
+              position: "absolute",
+              top: 0,
+              right: 0,
+              bottom: 0,
+              width: trayWidth,
+              maxWidth: "100%",
+              background: "var(--bg-1)",
+              borderLeft: "1px solid var(--line)",
+              boxShadow: "var(--sh-pop)",
+              zIndex: 70,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            {/* Draggable resize handle for Editor Tray */}
+            <div
+              onMouseDown={startTrayResize}
+              style={{
+                position: "absolute",
+                left: 0,
+                top: 0,
+                bottom: 0,
+                width: 6,
+                cursor: "col-resize",
+                zIndex: 80,
+              }}
+              title="Drag to resize editor tray"
+            />
+            {/* Tray Header */}
+            <div
+              className="row spread"
+              style={{
+                padding: "10px 14px",
+                borderBottom: "1px solid var(--line)",
+                background: "var(--bg-2)",
+                flex: "none",
+                alignItems: "center",
+              }}
+            >
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setEditingNodeId(null)}
+              >
+                Cancel
+              </button>
+              <div className="row gap2" style={{ alignItems: "center", minWidth: 0 }}>
+                <Icon
+                  name={NODE_META[editingNode.data.nodeType]?.icon || "n_agent"}
+                  size={16}
+                  style={{ color: NODE_META[editingNode.data.nodeType]?.color || "var(--accent)" }}
+                />
+                <span className="t-h3 truncate" style={{ maxWidth: 200 }}>
+                  {editingNode.data.config?.name || NODE_META[editingNode.data.nodeType]?.label || editingNode.id}
+                </span>
+              </div>
+              <div className="row gap1" style={{ alignItems: "center" }}>
+                <button
+                  type="button"
+                  className="iconbtn"
+                  onClick={() => {
+                    deleteNode(editingNode.id);
+                    setEditingNodeId(null);
+                  }}
+                  title="Delete node"
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => setEditingNodeId(null)}
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+
+            {/* Tray Body */}
+            <div className="scroll-y" style={{ flex: 1, padding: 16 }}>
+              <NodeInspector
+                node={editingNode}
+                nodes={nodes}
+                edges={edges}
+                tools={tools}
+                toolSets={toolSets}
+                agents={agents}
+                mcpServers={mcpServers}
+                components={components}
+                dynamic={{ kb_folders: kbFolders, qa_kinds: qaKinds }}
+                onChange={updateConfig}
+                onRename={renameNodeId}
+                onDelete={(id) => {
+                  deleteNode(id);
+                  setEditingNodeId(null);
+                }}
+                onRouterCaseTarget={syncRouterCaseEdge}
+                onRouterCaseRename={renameRouterCaseEdges}
+                onRouterCaseRemove={removeRouterCaseEdges}
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1178,7 +1754,7 @@ function NodeInspector({
         <button className="btn btn-danger btn-sm" onClick={() => onDelete(node.id)}><Icon name="trash" size={14} />Delete</button>
       </div>
 
-      {(type === "agent" || type === "deep_agent") && <AgentConfig config={c} onChange={onChange} tools={tools} toolSets={toolSets} agents={agents} mcpServers={mcpServers} components={components} folders={dynamic?.kb_folders || []} kinds={dynamic?.qa_kinds || []} />}
+      {(type === "agent" || type === "deep_agent") && <AgentConfig config={c} onChange={onChange} tools={tools} toolSets={toolSets} agents={agents} mcpServers={mcpServers} components={components} folders={dynamic?.kb_folders || []} kinds={dynamic?.qa_kinds || []} upstreamSources={upstreamSources} />}
 
       {type === "retrieval" && <RetrievalForm c={c} set={set} folders={dynamic?.kb_folders || []} kinds={dynamic?.qa_kinds || []} />}
 
@@ -1189,6 +1765,7 @@ function NodeInspector({
           set={set}
           nodeIds={nodeIds}
           nodes={nodes}
+          upstreamSources={upstreamSources}
           onCaseTarget={onRouterCaseTarget}
           onCaseRename={onRouterCaseRename}
           onCaseRemove={onRouterCaseRemove}
@@ -1553,6 +2130,7 @@ function RouterForm({
   set,
   nodeIds,
   nodes,
+  upstreamSources = [],
   onCaseTarget,
   onCaseRename,
   onCaseRemove,
@@ -1562,6 +2140,7 @@ function RouterForm({
   set: (p: Record<string, any>) => void;
   nodeIds: string[];
   nodes: FlowNode[];
+  upstreamSources?: UpstreamSource[];
   onCaseTarget: (nodeId: string, key: string, target: string) => void;
   onCaseRename: (nodeId: string, oldKey: string, newKey: string) => void;
   onCaseRemove: (nodeId: string, key: string) => void;
@@ -1673,13 +2252,19 @@ function RouterForm({
                       <Icon name="trash" size={12} />
                     </button>
                   </div>
-                  <input
-                    className="input mono"
-                    style={{ height: 26, fontSize: 11 }}
-                    placeholder="property (e.g. payload.status)"
-                    value={r.property || ""}
-                    onChange={(e) => updateRule(i, { property: e.target.value })}
-                  />
+                  <div className="row gap1" style={{ alignItems: "center" }}>
+                    <input
+                      className="input mono"
+                      style={{ height: 26, fontSize: 11, flex: 1 }}
+                      placeholder="property (e.g. payload.status)"
+                      value={r.property || ""}
+                      onChange={(e) => updateRule(i, { property: e.target.value })}
+                    />
+                    <VariablePicker
+                      sources={upstreamSources}
+                      onSelect={(path) => updateRule(i, { property: path })}
+                    />
+                  </div>
                   <div className="row gap1">
                     <select
                       className="select"
@@ -1691,7 +2276,9 @@ function RouterForm({
                       <option value="neq">!= (not equals)</option>
                       <option value="contains">contains</option>
                       <option value="gt">&gt; (greater than)</option>
+                      <option value="gte">&gt;= (greater than or equal)</option>
                       <option value="lt">&lt; (less than)</option>
+                      <option value="lte">&lt;= (less than or equal)</option>
                       <option value="exists">exists</option>
                       <option value="empty">is empty</option>
                       <option value="true">is true</option>

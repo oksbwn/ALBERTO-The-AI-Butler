@@ -141,7 +141,7 @@ export function ForgeNode({ id, data, selected }: NodeProps) {
             style={{ width: 20, height: 20, color: "var(--accent)", border: "1px solid var(--accent)", borderRadius: 4, background: "var(--bg-1)", padding: 0 }}
             onClick={(ev) => {
               ev.stopPropagation();
-              const event = new CustomEvent("alberto-inject-trigger", { detail: { nodeId: id, config } });
+              const event = new CustomEvent("alberto-inject-trigger", { detail: { nodeId: id, config, autoExecute: true } });
               window.dispatchEvent(event);
             }}
           >

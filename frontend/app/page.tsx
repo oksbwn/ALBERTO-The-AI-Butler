@@ -120,31 +120,7 @@ function App() {
   }
 
   const canvasFlushRef = useRef<(() => Promise<void>) | null>(null);
-  const [publishState, setPublishState] = useState<"idle" | "publishing" | "published" | "error">("idle");
-  async function publishWorkflow() {
-    if (!project || !selWorkflow) return;
-    setPublishState("publishing");
-    try {
-      if (canvasFlushRef.current) await canvasFlushRef.current();
-      await api.publishWorkflow((project as any).id, selWorkflow.id);
-      setPublishState("published");
-      setRefreshNonce((n) => n + 1);
-      setTimeout(() => setPublishState("idle"), 1600);
-    } catch {
-      setPublishState("error");
-      setTimeout(() => setPublishState("idle"), 2400);
-    }
-  }
-
-  const topRight: ReactNode =
-    view.screen === "workflow-canvas" ? (
-      <div className="row gap2">
-        <button className="btn btn-primary btn-sm" onClick={publishWorkflow} disabled={!selWorkflow || publishState === "publishing"}>
-          <Icon name={publishState === "published" ? "check" : "bolt"} size={14} />
-          {publishState === "publishing" ? "Publishing…" : publishState === "published" ? "Published" : publishState === "error" ? "Invalid - fix problems" : "Publish"}
-        </button>
-      </div>
-    ) : null;
+  const topRight: ReactNode = null;
 
   const body = (() => {
     if (!loaded || !project) {

@@ -6,13 +6,14 @@
    which lives in flow coordinate space, so it pans/zooms with the canvas. Native edges
    are hidden via CSS to avoid double-draw. New connections (onConnect) land in the same
    `edges` array, so hand-drawn wires show here too. */
-import { ViewportPortal } from "@xyflow/react";
+import { ViewportPortal, useReactFlow } from "@xyflow/react";
 import { useMemo } from "react";
 import { Icon } from "../icons";
 import { type FlowEdge, type FlowNode } from "@/lib/graph";
 
 const NODE_HEIGHT: Record<string, number> = {
   start: 36, end: 36,
+  inject: 72, debug: 72, delay: 72,
   agent: 90, deep_agent: 90, llm: 80, human_input: 80, classifier: 80,
   transform: 64, tool_call: 64, webhook_out: 64, emit_event: 64, retrieval: 64,
 };
@@ -26,13 +27,18 @@ function routerHeight(cfg: any): number {
 }
 
 /** Y offset (within the router node) of the case row an edge leaves from. */
-function routerCaseY(cfg: any, edge: FlowEdge): number {
+function routerCaseY(cfg: any, edgeOrHandleId?: FlowEdge | string | null): number {
   const keys = [...Object.keys(cfg?.cases || {}), "__default__"];
-  let key: string | undefined = edge.sourceHandle?.startsWith("case:") ? edge.sourceHandle.slice(5) : undefined;
-  if (!key || !keys.includes(key)) {
-    // Infer from routing config: which case (or default) points at this edge's target?
-    key = Object.entries(cfg?.cases || {}).find(([, tgt]) => tgt === edge.target)?.[0]
-      ?? (cfg?.default === edge.target ? "__default__" : undefined);
+  let key: string | undefined;
+  if (typeof edgeOrHandleId === "string") {
+    key = edgeOrHandleId.startsWith("case:") ? edgeOrHandleId.slice(5) : edgeOrHandleId;
+  } else if (edgeOrHandleId && typeof edgeOrHandleId === "object") {
+    const edge = edgeOrHandleId as FlowEdge;
+    key = edge.sourceHandle?.startsWith("case:") ? edge.sourceHandle.slice(5) : undefined;
+    if (!key || !keys.includes(key)) {
+      key = Object.entries(cfg?.cases || {}).find(([, tgt]) => tgt === edge.target)?.[0]
+        ?? (cfg?.default === edge.target ? "__default__" : undefined);
+    }
   }
   const idx = key ? keys.indexOf(key) : 0;
   return ROUTER_GEOM.header + ROUTER_GEOM.exprLine + (idx < 0 ? 0 : idx) * ROUTER_GEOM.rowH + ROUTER_GEOM.rowH / 2;
@@ -49,26 +55,91 @@ export function EdgeOverlay({
   selectedNodeId?: string | null;
   onRemove: (edge: FlowEdge) => void;
 }) {
+  const rf = useReactFlow();
   const byId = useMemo(() => Object.fromEntries(nodes.map((n) => [n.id, n])), [nodes]);
-  const h = (n: any) => (n?.data?.nodeType === "router" ? routerHeight(n?.data?.config) : NODE_HEIGHT[n?.data?.nodeType] ?? 36);
-  const edgeGeometry = (e: FlowEdge) => {
-    const s = byId[e.source]; const t = byId[e.target];
-    if (!s || !t) return null;
-    const tx = t.position.x, ty = t.position.y + h(t) / 2;
-    // Sub-agent edge: an org-chart branch from the deep_agent's BOTTOM handle down into the
-    // specialist's TOP-center (agent-as-tool), drawn dashed/accent and distinct from flow edges.
-    if (e.sourceHandle === "subagents") {
-      const sx = s.position.x + NODE_WIDTH / 2;
-      const sy = s.position.y + h(s);
-      const ttx = t.position.x + NODE_WIDTH / 2;
-      const tty = t.position.y;
-      const dy = Math.max(28, Math.abs(tty - sy) / 2);
-      const d = `M ${sx},${sy} C ${sx},${sy + dy} ${ttx},${tty - dy} ${ttx},${tty}`;
-      return { d, mx: (sx + ttx) / 2, my: (sy + tty) / 2, sub: true };
+  const h = (n: any) => {
+    if (n?.measured?.height) return n.measured.height;
+    if (n?.height) return n.height;
+    if (n?.data?.nodeType === "router") return routerHeight(n?.data?.config);
+    return NODE_HEIGHT[n?.data?.nodeType] ?? 68;
+  };
+
+  const getHandlePosition = (
+    nodeId: string,
+    handleType: "source" | "target",
+    handleId?: string | null,
+    isSubagent?: boolean,
+    edge?: FlowEdge
+  ): { x: number; y: number } | null => {
+    const node = byId[nodeId];
+    if (!node) return null;
+
+    const intNode = rf.getInternalNode?.(nodeId);
+    const pos = intNode?.internals?.positionAbsolute || node.position;
+    const width = intNode?.measured?.width || (node as any).measured?.width || (node as any).width || NODE_WIDTH;
+    const height = intNode?.measured?.height || (node as any).measured?.height || (node as any).height || h(node);
+
+    // 1. Precise dot position from React Flow's live measured handleBounds
+    const bounds = intNode?.internals?.handleBounds?.[handleType];
+    if (bounds && bounds.length > 0) {
+      let handle = handleId ? bounds.find((hb) => hb.id === handleId) : bounds[0];
+      if (!handle && bounds.length > 0) handle = bounds[0];
+      if (handle) {
+        return {
+          x: pos.x + handle.x + handle.width / 2,
+          y: pos.y + handle.y + handle.height / 2,
+        };
+      }
     }
-    const fromRouter = s.data?.nodeType === "router";
-    const sx = s.position.x + NODE_WIDTH;
-    const sy = s.position.y + (fromRouter ? routerCaseY(s.data?.config, e) : h(s) / 2);
+
+    // 2. Accurate fallback geometry (mirrors HandleStack and router geometry)
+    if (isSubagent && handleType === "source") {
+      return { x: pos.x + width / 2, y: pos.y + height };
+    }
+    if (isSubagent && handleType === "target") {
+      return { x: pos.x + width / 2, y: pos.y };
+    }
+
+    if (handleType === "source") {
+      if (node.data?.nodeType === "router") {
+        return {
+          x: pos.x + width,
+          y: pos.y + routerCaseY(node.data?.config, edge || handleId),
+        };
+      }
+      return {
+        x: pos.x + width,
+        y: pos.y + height / 2,
+      };
+    } else {
+      return {
+        x: pos.x,
+        y: pos.y + height / 2,
+      };
+    }
+  };
+
+  const edgeGeometry = (e: FlowEdge) => {
+    const s = byId[e.source];
+    const t = byId[e.target];
+    if (!s || !t) return null;
+
+    const isSub = e.sourceHandle === "subagents";
+    const srcPt = getHandlePosition(e.source, "source", e.sourceHandle, isSub, e);
+    const tgtPt = getHandlePosition(e.target, "target", e.targetHandle, isSub, e);
+    if (!srcPt || !tgtPt) return null;
+
+    const sx = srcPt.x;
+    const sy = srcPt.y;
+    const tx = tgtPt.x;
+    const ty = tgtPt.y;
+
+    if (isSub) {
+      const dy = Math.max(28, Math.abs(ty - sy) / 2);
+      const d = `M ${sx},${sy} C ${sx},${sy + dy} ${tx},${ty - dy} ${tx},${ty}`;
+      return { d, mx: (sx + tx) / 2, my: (sy + ty) / 2, sub: true };
+    }
+
     const dx = Math.max(40, Math.abs(tx - sx) / 2);
     const d = `M ${sx},${sy} C ${sx + dx},${sy} ${tx - dx},${ty} ${tx},${ty}`;
     return { d, mx: (sx + tx) / 2, my: (sy + ty) / 2, sub: false };

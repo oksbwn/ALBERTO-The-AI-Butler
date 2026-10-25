@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Icon } from "../icons";
 import { Field, Modal, Segmented, Tile, Toggle } from "../primitives";
-import { FieldsForm, MW_FIELDS, MultiSelectChips } from "./ConfigForm";
+import { FieldsForm, MW_FIELDS, MultiSelectChips, VariablePicker, type UpstreamSource } from "./ConfigForm";
 import { MIDDLEWARE_CATALOG, MW_META } from "@/lib/data";
 import { useModels } from "@/lib/models";
 import type { Agent, ComponentT, McpClientT, Tool, ToolSet } from "@/lib/api";
@@ -11,7 +11,7 @@ import type { Agent, ComponentT, McpClientT, Tool, ToolSet } from "@/lib/api";
 type Cfg = Record<string, any>;
 type MW = { type: string; enabled?: boolean; config?: Record<string, any> };
 
-export function AgentConfig({ config, onChange, tools = [], toolSets = [], agents = [], folders = [], kinds = [], mcpServers = [], components = [] }: { config: Cfg; onChange: (c: Cfg) => void; tools?: Tool[]; toolSets?: ToolSet[]; agents?: Agent[]; folders?: string[]; kinds?: string[]; mcpServers?: McpClientT[]; components?: ComponentT[] }) {
+export function AgentConfig({ config, onChange, tools = [], toolSets = [], agents = [], folders = [], kinds = [], mcpServers = [], components = [], upstreamSources = [] }: { config: Cfg; onChange: (c: Cfg) => void; tools?: Tool[]; toolSets?: ToolSet[]; agents?: Agent[]; folders?: string[]; kinds?: string[]; mcpServers?: McpClientT[]; components?: ComponentT[]; upstreamSources?: UpstreamSource[] }) {
   const set = (patch: Cfg) => onChange({ ...config, ...patch });
   const MODELS = useModels();
   const flavor = config.flavor || "agent";
@@ -111,13 +111,27 @@ export function AgentConfig({ config, onChange, tools = [], toolSets = [], agent
             : "When used as a node in a workflow pipeline, render this prompt dynamically. Supports {{state.<var>}} syntax."
         }
       >
-        <textarea
-          className="textarea"
-          rows={3}
-          value={config.task_prompt || ""}
-          placeholder="Analyze ticket {{state.ticket}} and extract category and urgency…"
-          onChange={(e) => set({ task_prompt: e.target.value })}
-        />
+        <div className="col gap1">
+          {upstreamSources && upstreamSources.length > 0 && (
+            <div className="row spread" style={{ alignItems: "center", marginBottom: 2 }}>
+              <span className="mono-sm fg-2" style={{ fontSize: 11 }}>Insert variable</span>
+              <VariablePicker
+                sources={upstreamSources}
+                onSelect={(path) => {
+                  const cur = config.task_prompt || "";
+                  set({ task_prompt: cur ? `${cur} {{${path}}}` : `{{${path}}}` });
+                }}
+              />
+            </div>
+          )}
+          <textarea
+            className="textarea"
+            rows={3}
+            value={config.task_prompt || ""}
+            placeholder="Analyze ticket {{state.ticket}} and extract category and urgency…"
+            onChange={(e) => set({ task_prompt: e.target.value })}
+          />
+        </div>
       </Section>
 
       <CollapsibleSection

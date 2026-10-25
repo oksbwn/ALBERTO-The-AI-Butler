@@ -174,6 +174,7 @@ export function WorkflowExecutionPanel({
   onFinalDebug,
   wfs,
   onSelectWorkflow,
+  hideControls = false,
 }: {
   project: any;
   workflow: Workflow | null;
@@ -186,6 +187,7 @@ export function WorkflowExecutionPanel({
   onFinalDebug?: (debugNodes: Record<string, any>) => void;
   wfs?: Workflow[];
   onSelectWorkflow?: (w: Workflow) => void;
+  hideControls?: boolean;
 }) {
   const [internalRunning, setInternalRunning] = useState(false);
   const isRunning = controlledRunning !== undefined ? controlledRunning : internalRunning;
@@ -239,6 +241,8 @@ export function WorkflowExecutionPanel({
     }
   }, [project?.id]);
 
+  const runTriggerRef = useRef<((customPayload?: any) => Promise<void>) | null>(null);
+
   useEffect(() => {
     const handleInject = (e: any) => {
       const detail = e.detail || {};
@@ -252,6 +256,17 @@ export function WorkflowExecutionPanel({
       setInputMode("json");
       setInputVal(String(val));
       setViewerTab("debug");
+      if (detail.autoExecute) {
+        if (runTriggerRef.current) {
+          void runTriggerRef.current(val);
+        } else {
+          setTimeout(() => {
+            if (runTriggerRef.current) {
+              void runTriggerRef.current(val);
+            }
+          }, 50);
+        }
+      }
     };
     window.addEventListener("alberto-inject-trigger", handleInject);
     return () => window.removeEventListener("alberto-inject-trigger", handleInject);
@@ -311,25 +326,41 @@ export function WorkflowExecutionPanel({
     onResetRun?.();
   };
 
-  async function handleRun() {
+  async function handleRun(customPayload?: any) {
     if (isRunning || !project?.id || !workflow?.id) return;
 
     let payload: Record<string, any> = {};
-    const trimmed = inputVal.trim();
-    if (inputMode === "json") {
-      if (trimmed) {
+    if (customPayload !== undefined) {
+      if (typeof customPayload === "string") {
         try {
-          payload = JSON.parse(trimmed);
-        } catch (e: any) {
-          setJsonError(`JSON Syntax Error: ${e.message}`);
-          return;
+          payload = JSON.parse(customPayload);
+        } catch {
+          payload = { payload: customPayload };
         }
+      } else if (typeof customPayload === "object" && customPayload !== null) {
+        payload = customPayload;
+      } else {
+        payload = { payload: customPayload };
       }
     } else {
-      if (trimmed) {
-        payload = { messages: [{ role: "user", content: trimmed }] };
+      const trimmed = inputVal.trim();
+      if (inputMode === "json") {
+        if (trimmed) {
+          try {
+            payload = JSON.parse(trimmed);
+          } catch (e: any) {
+            setJsonError(`JSON Syntax Error: ${e.message}`);
+            return;
+          }
+        }
+      } else {
+        if (trimmed) {
+          payload = { messages: [{ role: "user", content: trimmed }] };
+        }
       }
     }
+
+    runTriggerRef.current = handleRun;
 
     setRunning(true);
     setRunStatus("queued");
@@ -482,6 +513,8 @@ export function WorkflowExecutionPanel({
     }
   }
 
+  runTriggerRef.current = handleRun;
+
   async function handleCancel() {
     abortCtrlRef.current?.abort();
     if (runId && project?.id && workflow?.id) {
@@ -525,10 +558,10 @@ export function WorkflowExecutionPanel({
       {/* Top Header */}
       <div className="row spread" style={{ padding: "10px 14px", borderBottom: "1px solid var(--line)", background: "var(--bg-2)", flex: "none", alignItems: "center" }}>
         <div className="row gap2" style={{ alignItems: "center", minWidth: 0 }}>
-          <Tile icon="workflows" color="var(--accent)" size={24} />
+          <Tile icon={hideControls ? "bug" : "play"} color="var(--accent)" size={24} />
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
-              <span>Orchestrator Execution</span>
+              <span>{hideControls ? "Debug Messages" : "Orchestrator Execution"}</span>
               {runStatus !== "idle" && <StatusPill status={runStatus} />}
             </div>
             {workflow && <div className="fg-2 t-caption mono truncate">{workflow.name}</div>}
@@ -550,6 +583,42 @@ export function WorkflowExecutionPanel({
               ))}
             </select>
           )}
+          {!hideControls && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-xs"
+              onClick={() => {
+                resetExecution();
+                onResetRun?.();
+              }}
+              disabled={isRunning}
+              title="Reset execution state"
+            >
+              <Icon name="rotate-ccw" size={12} /> Reset
+            </button>
+          )}
+          {isRunning && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-xs"
+              onClick={handleCancel}
+              style={{ height: 22, fontSize: 10.5 }}
+              title="Stop running execution"
+            >
+              <Icon name="x" size={11} /> Stop
+            </button>
+          )}
+          {hideControls && (
+            <button
+              type="button"
+              className="iconbtn"
+              style={{ width: 24, height: 24 }}
+              onClick={resetExecution}
+              title="Clear debug messages"
+            >
+              <Icon name="trash" size={13} />
+            </button>
+          )}
           {onClose && (
             <button type="button" className="iconbtn" onClick={onClose} title="Close Execution Viewer">
               <Icon name="x" size={14} />
@@ -558,102 +627,82 @@ export function WorkflowExecutionPanel({
         </div>
       </div>
 
-      {/* Manual Trigger & Config Controls */}
-      <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)", background: "var(--bg-surface)", flex: "none" }}>
-        <div className="col gap2">
-          <div className="row spread" style={{ alignItems: "center" }}>
-            <div className="row gap1" style={{ alignItems: "center" }}>
-              <span className="t-micro" style={{ color: "var(--fg-1)" }}>Input Parameters</span>
-              <span className="mono-sm fg-2" style={{ fontSize: 10 }}>({inputMode === "message" ? "Message" : "JSON Payload"})</span>
-            </div>
-            <div className="row gap1" style={{ alignItems: "center" }}>
+      {/* Manual Input Bar (when not hideControls) */}
+      {!hideControls && (
+        <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--line)", background: "var(--bg-surface)", flex: "none" }}>
+          <div className="row spread" style={{ marginBottom: 8, alignItems: "center" }}>
+            <div className="row gap1">
               <button
                 type="button"
-                className={`btn btn-xs ${inputMode === "message" ? "btn-secondary" : "btn-ghost"}`}
+                className={`btn btn-xs ${inputMode === "message" ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => setInputMode("message")}
-                style={{ height: 22, fontSize: 10.5 }}
+                style={{ height: 24, fontSize: 11 }}
               >
                 Message
               </button>
               <button
                 type="button"
-                className={`btn btn-xs ${inputMode === "json" ? "btn-secondary" : "btn-ghost"}`}
+                className={`btn btn-xs ${inputMode === "json" ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => setInputMode("json")}
-                style={{ height: 22, fontSize: 10.5 }}
+                style={{ height: 24, fontSize: 11 }}
               >
                 JSON Payload
               </button>
             </div>
+            {durationStr && <span className="fg-2 t-caption mono">⏱ {durationStr}</span>}
           </div>
-
           {inputMode === "message" ? (
-            <input
-              className="input"
-              placeholder="Message the workflow…"
-              value={inputVal}
-              onChange={(e) => handleInputChange(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleRun();
-                }
-              }}
-              disabled={isRunning}
-              style={{ fontSize: 12.5, height: 32 }}
-            />
-          ) : (
-            <textarea
-              className="input mono-sm"
-              placeholder='{\n  "input": "data",\n  "param": 123\n}'
-              value={inputVal}
-              onChange={(e) => handleInputChange(e.target.value)}
-              disabled={isRunning}
-              rows={3}
-              style={{ fontSize: 11.5, resize: "vertical", fontFamily: "var(--font-mono)" }}
-            />
-          )}
-
-          {jsonError && (
-            <div style={{ color: "var(--err)", fontSize: 11 }} className="row gap1">
-              <Icon name="alert-triangle" size={12} /> {jsonError}
+            <div className="row gap2">
+              <input
+                className="input"
+                style={{ flex: 1, height: 32, fontSize: 12.5 }}
+                placeholder="Message the workflow…"
+                value={inputVal}
+                onChange={(e) => handleInputChange(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleRun();
+                  }
+                }}
+                disabled={isRunning}
+              />
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={() => handleRun()}
+                disabled={isRunning || !workflow}
+                style={{ height: 32, padding: "0 14px", fontSize: 12 }}
+              >
+                <Icon name="play" size={13} /> Run
+              </button>
             </div>
-          )}
-
-          <div className="row spread" style={{ alignItems: "center", marginTop: 2 }}>
-            <button
-              type="button"
-              className="btn btn-ghost btn-xs"
-              onClick={resetExecution}
-              disabled={isRunning}
-              style={{ height: 26, fontSize: 11 }}
-            >
-              Reset
-            </button>
-            <div className="row gap2" style={{ alignItems: "center" }}>
-              {isRunning ? (
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  onClick={handleCancel}
-                  style={{ height: 28, fontSize: 11.5 }}
-                >
-                  <Icon name="x" size={12} /> Stop
-                </button>
-              ) : (
+          ) : (
+            <div className="col gap2">
+              <textarea
+                className="input mono-sm"
+                style={{ width: "100%", height: 70, resize: "vertical", fontSize: 11.5 }}
+                placeholder='{"param": "value"}'
+                value={inputVal}
+                onChange={(e) => handleInputChange(e.target.value)}
+                disabled={isRunning}
+              />
+              {jsonError && <div className="t-caption fg-error" style={{ fontSize: 11 }}>{jsonError}</div>}
+              <div className="row end">
                 <button
                   type="button"
                   className="btn btn-primary btn-sm"
-                  onClick={handleRun}
-                  disabled={!workflow || !!jsonError}
-                  style={{ height: 28, fontSize: 11.5, minWidth: 80 }}
+                  onClick={() => handleRun()}
+                  disabled={isRunning || !workflow || !!jsonError}
+                  style={{ height: 28, padding: "0 12px", fontSize: 11.5 }}
                 >
                   <Icon name="play" size={12} /> Run
                 </button>
-              )}
+              </div>
             </div>
-          </div>
+          )}
         </div>
-      </div>
+      )}
 
       {/* Execution Diagnostics Bar */}
       {(runId || durationStr || meter) && (
@@ -905,7 +954,11 @@ export function WorkflowExecutionPanel({
                   )}
                   {s.output && (
                     <div style={{ marginTop: 4 }}>
-                      <JsonViewer data={s.output} rootLabel={`Output: ${s.name}`} maxDepth={2} />
+                      <JsonViewer
+                        data={s.output?.payload !== undefined ? s.output.payload : s.output}
+                        rootLabel={`Output: ${s.name}`}
+                        maxDepth={2}
+                      />
                     </div>
                   )}
                 </div>
