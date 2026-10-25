@@ -86,8 +86,14 @@ function nodeWrittenKeys(nodeType: string, c: Record<string, any>): [string, str
     case "retrieval": return c.route_key ? [[c.route_key, "str"]] : [];
     case "human_input": return c.output_key ? [[c.output_key, "str"]] : [];
     case "transform": return [[c.output_key || "data", "json"]];
-    case "tool_call": return c.output_key ? [[c.output_key, "json"]] : [];
+    case "tool_call": return [[c.output_key || "tool_result", "json"]];
     case "webhook_out": return [[c.output_key || "webhook_result", "json"]];
+    case "agent":
+    case "deep_agent": {
+      const rf = c.response_format || {};
+      const outK = c.output_key || (rf.mode === "structured" ? rf.output_key : null);
+      return outK ? [[outK, "json"]] : [];
+    }
     default: return [];
   }
 }

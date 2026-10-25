@@ -80,3 +80,23 @@ def test_no_path_to_end_flagged():
     res = validate_workflow(wf)
     assert not res.valid
     assert any("END" in e["message"] for e in res.errors)
+
+
+def test_tool_call_default_tool_result_valid():
+    wf = {
+        "id": "wf_tool",
+        "version": 1,
+        "state": {"messages": {"type": "list[message]", "reducer": "add_messages"}},
+        "entry_node": "inject_1",
+        "nodes": [
+            {"id": "inject_1", "type": "inject", "config": {}},
+            {"id": "tool_1", "type": "tool_call", "config": {"tool_id": "lookup"}},
+            {"id": "end", "type": "end", "config": {}},
+        ],
+        "edges": [
+            {"source": "inject_1", "target": "tool_1"},
+            {"source": "tool_1", "target": "end"},
+        ],
+    }
+    res = validate_workflow(wf)
+    assert res.valid, res.errors

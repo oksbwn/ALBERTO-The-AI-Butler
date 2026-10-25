@@ -337,7 +337,7 @@ def _warn_webhook_signing(res: ValidationResult, nodes: list) -> None:
 # state.py always provides `messages`; `structured_response` is the conventional channel for
 # structured llm/agent output; loop nodes manage their own private `_loop`/`_loop_count`. All
 # are treated as implicitly declared so the declared-state check doesn't false-flag them.
-_IMPLICIT_STATE_KEYS = frozenset({"messages", "structured_response", "_loop", "_loop_count", "msg", "payload", "topic", "metadata"})
+_IMPLICIT_STATE_KEYS = frozenset({"messages", "structured_response", "_loop", "_loop_count", "msg", "payload", "topic", "metadata", "output", "tool_result"})
 
 
 def _node_output_keys(node: dict) -> list[tuple[str, str]]:
@@ -360,6 +360,11 @@ def _node_output_keys(node: dict) -> list[tuple[str, str]]:
         return [("route_key", cfg["route_key"])]
     if t == "human_input" and cfg.get("output_key"):
         return [("output_key", cfg["output_key"])]
+    if t in ("agent", "deep_agent"):
+        rf = cfg.get("response_format", {}) or {}
+        out_k = cfg.get("output_key") or (rf.get("output_key") if rf.get("mode") == "structured" else None)
+        if out_k:
+            return [("output_key", out_k)]
     return []
 
 
@@ -451,7 +456,7 @@ def _validate_mw(res: ValidationResult, stack: list, base_pointer: str) -> None:
     for k, entry in enumerate(stack or []):
         if not isinstance(entry, dict):
             continue
-        mtype = entry.get("type")
+        mtype = entry.get("type") or ""
         schema = contracts.middleware_config_schema(mtype)
         if schema is None:
             res.add(f"{base_pointer}/{k}/type", f"Unknown middleware type {mtype!r}")
