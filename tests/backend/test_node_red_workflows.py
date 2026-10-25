@@ -1266,7 +1266,7 @@ async def test_consecutive_delay_nodes_lifecycle():
         "nodes": [
             {"id": "inject_node", "type": "inject", "config": {"payload": {"step": 0}}},
             {"id": "delay_a", "type": "delay", "config": {"seconds": 0.05, "unit": "seconds", "mode": "durable"}},
-            {"id": "delay_b", "type": "delay", "config": {"seconds": 0.05, "unit": "seconds", "mode": "durable"}},
+            {"id": "delay_b", "type": "delay", "config": {"seconds": 0.15, "unit": "seconds", "mode": "durable"}},
             {"id": "debug_node", "type": "debug", "config": {"target": "payload"}},
         ],
         "edges": [
@@ -1318,7 +1318,7 @@ async def test_consecutive_delay_nodes_lifecycle():
     assert swept_early == 0
 
     # Wait for Delay B to become due
-    await asyncio.sleep(0.08)
+    await asyncio.sleep(0.18)
 
     # 3. Scheduler sweep resumes Delay B; workflow executes to completion
     resumed_b = await dispatch_mod.run_due_delays(rs, lease_seconds=10)
@@ -1649,6 +1649,8 @@ def test_durable_delay_real_subprocess_crash_and_recovery(tmp_path):
     env["DATABASE_URL"] = db_url
     env["PYTHONPATH"] = os.path.abspath("backend")
     env["CHECKPOINT_PATH"] = cp_file.as_posix()
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["OMP_NUM_THREADS"] = "1"
 
     # Script for Process 1: init db, create run, interrupt at delay, claim, then SIGKILL/exit(42)
     proc1_code = textwrap.dedent("""

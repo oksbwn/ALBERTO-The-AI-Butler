@@ -112,4 +112,33 @@ test.describe("Alberto Workflow Execution & SSE Streaming E2E", () => {
     await expect(page.locator('.react-flow__node:has-text("echo_agent"), .react-flow__node:has-text("Echo Agent")').first()).toBeVisible();
     await expect(page.locator('.react-flow__node:has-text("End")')).toBeVisible();
   });
+
+  test("verifies agent node standardized JSON output in execution panel and upstream variable picker", async ({ page }: { page: Page }) => {
+    // 1. Open Agent node in inspector and verify Task Prompt variable picker & Structured Output section
+    const agentNode = page.locator('.react-flow__node:has-text("echo_agent"), .react-flow__node:has-text("Echo Agent")').first();
+    await agentNode.click();
+    await expect(page.getByText("Task Prompt (Pipeline Mode)")).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("Structured Output (Pipeline)")).toBeVisible();
+
+    // 2. Open Run panel and execute workflow
+    const runBtn = page.locator('button[title="Run Workflow"]');
+    await runBtn.click();
+    await page.waitForSelector('text="Orchestrator Execution"', { timeout: 10000 });
+
+    const execBtn = page.locator('button[type="button"].btn-primary:has-text("Run")');
+    await execBtn.click();
+
+    const donePill = page.getByText(/done/i).first();
+    await expect(donePill).toBeVisible({ timeout: 30000 });
+
+    // 3. Switch to Node Steps tab and verify echo_agent outputs standardized JSON object
+    const nodeStepsTab = page.locator('button:has-text("Node Steps")');
+    await expect(nodeStepsTab).toBeVisible();
+    await nodeStepsTab.click();
+
+    // Verify step record exists for echo_agent
+    await expect(page.locator('text="echo_agent"').first()).toBeVisible();
+    // Verify JSON response property is rendered
+    await expect(page.locator('text="response"').first()).toBeVisible();
+  });
 });

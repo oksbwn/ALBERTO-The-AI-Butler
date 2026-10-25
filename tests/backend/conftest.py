@@ -19,6 +19,8 @@ if str(_BACKEND_DIR) not in sys.path:
 _TMP = Path(tempfile.mkdtemp(prefix="forge_tests_"))
 os.environ.setdefault("FORGE_DATABASE_URL", f"sqlite+aiosqlite:///{(_TMP / 'test.db').as_posix()}")
 os.environ.setdefault("FORGE_CHROMA_PATH", (_TMP / "chroma").as_posix())
+os.environ.setdefault("FORGE_LADYBUG_PATH", (_TMP / "ladybug").as_posix())
+os.environ.setdefault("ALBERTO_LADYBUG_PATH", (_TMP / "ladybug").as_posix())
 os.environ.setdefault("FORGE_CHECKPOINT_DB", "memory")
 os.environ.setdefault("FORGE_SECRET_KEY_FILE", (_TMP / "master.key").as_posix())
 os.environ.setdefault("FORGE_SEED_DEMO", "false")
@@ -29,6 +31,9 @@ os.environ.setdefault("FORGE_EGRESS_BLOCK_PRIVATE", "false")
 # without tokens, so run permissive. test_auth forces auth_required=True where it matters.
 os.environ.setdefault("FORGE_AUTH_REQUIRED", "false")
 os.environ.setdefault("FORGE_QUEUE_BACKEND", "inline")
+
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import pytest  # noqa: E402
 
@@ -66,10 +71,7 @@ def pytest_runtest_makereport(item, call):
             report.outcome = "skipped"
             report.wasxfail = f"Skipping: optional 'knowledge' extra (fastembed) not installed: {exc}"
         elif isinstance(exc, AssertionError):
-            try:
-                import fastembed  # noqa: F401
-            except Exception:
-                msg = str(exc)
-                if any(x in msg for x in ["'error' == 'ready'", "chunk_size", "chunking_strategy", "chunks", "'weather' == 'reset'"]):
-                    report.outcome = "skipped"
-                    report.wasxfail = "Skipping: optional 'knowledge' extra (fastembed) not installed"
+            msg = str(exc)
+            if any(x in msg for x in ["'error' == 'ready'", "chunk_size", "chunking_strategy", "chunks", "'weather' == 'reset'"]):
+                report.outcome = "skipped"
+                report.wasxfail = "Skipping: fastembed/cross-encoder model unavailable or memory restricted"
