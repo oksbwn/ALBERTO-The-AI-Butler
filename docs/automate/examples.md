@@ -57,3 +57,45 @@ graph LR
     ApprovalGate -->|Approved| SwitchOff[Tool: HA Turn Off Switch]
     ApprovalGate -->|Denied| LogEvent[Tool: Record Log]
 ```
+
+---
+
+## Example 4: Automated Incident Triage with Structured Agent Output
+
+Demonstrates an Agent node taking an incoming alert, evaluating incident telemetry into a strict JSON Schema, and routing downstream based on structured fields.
+
+```mermaid
+graph LR
+    AlertIn[Webhook: PagerDuty / Sentry Alert] --> TriageAgent[Agent: Incident Triage]
+    TriageAgent --> Router{Router: details.priority >= 4}
+    Router -->|P0 / Urgent| PageOncall[Action: Page Incident Commander]
+    Router -->|Standard| NormalQueue[Action: Create Jira Ticket]
+```
+
+### Node Configuration & Variable Flow:
+1. **Webhook In:** Receives incident payload with `{{state.ticket_id}}` and `{{state.description}}`.
+2. **Agent Node (`triage_agent`):**
+   - **Task Prompt:** `"Analyze incident {{state.ticket_id}}: {{state.description}}"`
+   - **Structured Output Schema:**
+     ```json
+     {
+       "type": "object",
+       "properties": {
+         "category": { "type": "string" },
+         "details": {
+           "type": "object",
+           "properties": { "priority": { "type": "integer" } },
+           "required": ["priority"]
+         },
+         "action": { "type": "string" }
+       },
+       "required": ["category", "details", "action"]
+     }
+     ```
+   - **State Output Key:** `triage`
+3. **Router Node (`priority_router`):**
+   - Uses simple rules mode or expression:
+     - `details.priority >= 4` &rarr; routes to `Page Incident Commander`
+     - Default &rarr; routes to `Create Jira Ticket`
+   - Notice that nested properties (`details.priority`) and top-level fields are directly accessible from the standardized payload envelope without custom parsing or double decoding.
+
