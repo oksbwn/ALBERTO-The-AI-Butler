@@ -1760,7 +1760,456 @@ def test_durable_delay_real_subprocess_crash_and_recovery(tmp_path):
     assert "SUBPROCESS_RECOVERY_SUCCESS" in res2.stdout
 
 
+def test_canonical_msg_envelope_structure():
+    """Verify that inject nodes produce canonical _msgid, payload, topic, and _alberto metadata."""
+    from alberto.nodes.flow import inject_factory
+    from alberto.engine.context import CompileContext
+
+    ctx = CompileContext(tenant_id="t1", project_id="p1")
+    inject_fn = inject_factory({"id": "inject_test", "payload": {"user": "alice", "action": "login"}, "topic": "auth.events"}, ctx)
+    out = inject_fn({})
+
+    assert "msg" in out
+    msg = out["msg"]
+    assert msg["_msgid"].startswith("msg-")
+    assert msg["topic"] == "auth.events"
+    assert msg["payload"] == {"user": "alice", "action": "login"}
+    assert "_alberto" in msg
+    assert msg["_alberto"]["source_node"] == "inject_test"
+    assert out["payload"] == msg["payload"]
+
+
+def test_flow_context_expressions():
+    """Verify safe expression evaluation over msg, flow context, and state."""
+    from alberto.engine.expressions import eval_expression
+
+    state = {
+        "msg": {"_msgid": "msg-1", "payload": {"count": 42, "status": "active"}, "topic": "test"},
+        "payload": {"count": 42, "status": "active"},
+        "context": {"threshold": 10, "env": "prod"},
+    }
+
+    # 1. Bare payload access
+    assert eval_expression("count > 10", state) is True
+    # 2. msg.payload access
+    assert eval_expression("msg['payload']['status'] == 'active'", state) is True
+    # 3. flow context access
+    assert eval_expression("flow['threshold'] == 10", state) is True
+    assert eval_expression("count > flow['threshold']", state) is True
+
+
+@pytest.mark.asyncio
+async def test_step_execution_handler():
+    """Verify single-node step execution with mock input state."""
+    from alberto.engine.registry import get_spec
+    from alberto.engine.context import CompileContext
+
+    ctx = CompileContext(tenant_id="t1", project_id="p1")
+    spec = get_spec("transform")
+    from typing import Any
+    node_fn: Any = spec.factory({"operations": [{"type": "set", "target": "payload.result", "value": "transformed"}]}, ctx)
+
+    mock_input = {
+        "msg": {"_msgid": "msg-test", "payload": {"initial": True}, "topic": "step.test"},
+        "payload": {"initial": True},
+    }
+
+    import inspect
+    if inspect.iscoroutinefunction(node_fn):
+        out = await node_fn(mock_input)
+    else:
+        out = node_fn(mock_input)
+
+    assert out["payload"]["result"] == "transformed"
+    assert out["msg"]["payload"]["result"] == "transformed"
 
 
 
 
+
+
+
+
+
+def test_payload_deletion_and_replacement_semantics():
+    """Verify that deleting or replacing payload properties is respected by LangGraph channel reducers."""
+    from alberto.engine.compiler import compile_workflow
+    from alberto.engine.context import CompileContext
+
+    ctx = CompileContext(tenant_id="t1", project_id="p1")
+    wf_def = {
+        "entry_node": "inject_1",
+        "nodes": [
+            {"id": "inject_1", "type": "inject", "config": {"payload": {"a": 1, "b": 2, "c": 3}}},
+            {"id": "change_del", "type": "change", "config": {"operations": [{"type": "delete", "target": "payload.b"}]}},
+            {"id": "change_repl", "type": "change", "config": {"operations": [{"type": "set", "target": "payload.a", "value": 99}]}},
+        ],
+        "edges": [
+            {"from": "inject_1", "to": "change_del"},
+            {"from": "change_del", "to": "change_repl"},
+        ],
+    }
+    graph = compile_workflow(wf_def, ctx)
+    res = graph.invoke({})
+
+    # 1. Deleted key 'b' must NOT be resurrected by reducers
+    assert "b" not in res["payload"]
+    assert "b" not in res["msg"]["payload"]
+    # 2. Remaining keys must be preserved and updated
+    assert res["payload"]["a"] == 99
+    assert res["payload"]["c"] == 3
+    assert res["msg"]["payload"]["a"] == 99
+    assert res["msg"]["payload"]["c"] == 3
+
+
+def test_collision_resistant_uuid_message_ids():
+    """Verify that message IDs are collision-resistant and unique even across tight iterations."""
+    from alberto.nodes.flow import inject_factory
+    from alberto.engine.context import CompileContext
+
+    ctx = CompileContext(tenant_id="t1", project_id="p1")
+    inject_fn = inject_factory({"id": "inject_uuid", "payload": {"val": 1}}, ctx)
+
+    msg_ids = set()
+    for _ in range(50):
+        out = inject_fn({})
+        msg_id = out["msg"]["_msgid"]
+        assert msg_id.startswith("msg-")
+        assert len(msg_id) >= 16
+        msg_ids.add(msg_id)
+
+    # All 50 message IDs must be strictly unique
+    assert len(msg_ids) == 50
+
+
+def test_agent_plain_text_normalization():
+    """Verify that Agent node plain text outputs normalize consistently to include 'text' property."""
+    from alberto.nodes.agent_node import _normalize_json_object
+
+    res_str = _normalize_json_object("Customer requests a replacement order.")
+    assert res_str["text"] == "Customer requests a replacement order."
+    assert res_str["response"] == "Customer requests a replacement order."
+
+    res_json = _normalize_json_object('{"category": "refund", "amount": 50}')
+    assert res_json["category"] == "refund"
+    assert res_json["amount"] == 50
+
+
+def test_restricted_python_safer_getattr_blocking():
+    """Verify that RestrictedPython expressions block unsafe attribute introspections."""
+    from alberto.engine.expressions import eval_expression, ExpressionError
+    import pytest
+
+    # Safe attributes work
+    assert eval_expression("payload.get('status')", {"payload": {"status": "ok"}}) == "ok"
+
+    # Private/dunder attributes are rejected
+    with pytest.raises(ExpressionError):
+        eval_expression("().__class__.__bases__", {})
+
+
+@pytest.mark.asyncio
+async def test_step_execution_dry_run_and_security_controls():
+    """Verify step execution dry-run mode and security rejection of spoofed approvals."""
+    from alberto.nodes.data import tool_call_factory
+    from alberto.engine.context import CompileContext
+
+    # Mock tool
+    class MockTool:
+        async def ainvoke(self, args, config=None):
+            return {"result": "real_execution_side_effect"}
+
+    # CompileContext with dry_run=True (Safe test)
+    ctx = CompileContext(
+        tenant_id="t1",
+        project_id="p1",
+        workflow_id="wf_1",
+        workflow_def={"nodes": [{"type": "tool_call", "config": {"tool_id": "mock_tool"}}]},
+        tool_registry={"mock_tool": MockTool()},
+    )
+    ctx.dry_run = True
+
+    # Factory in dry_run mode
+    node_fn = tool_call_factory({"tool_id": "mock_tool"}, ctx)
+
+    # In dry-run mode, side-effecting invocation is simulated
+    mock_input = {"state": {}, "msg": {"payload": {}}}
+    out = await node_fn(mock_input)
+    assert "tool_result" in out
+    # If policy allows or dry-run intercepts:
+    tr = out["tool_result"]
+    assert tr.get("mocked") is True or "policy violation" in tr.get("error", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_approval_preservation_and_replay_protection():
+    """Verify approval token is preserved across dry-run steps, atomically consumed on live run, and replay is blocked."""
+    import uuid
+    from alberto.db import SessionLocal
+    from alberto.models import Tenant, Project
+    from alberto.services.tool_policy import ToolPolicyService
+    from alberto.services.tools import ToolService
+
+    suffix = uuid.uuid4().hex[:8]
+    async with SessionLocal() as s:
+        tenant = Tenant(name=f"AuditTenant_{suffix}")
+        s.add(tenant)
+        await s.commit()
+        await s.refresh(tenant)
+
+        proj = Project(tenant_id=tenant.id, name=f"AuditProj_{suffix}", slug=f"audit-proj-{suffix}")
+        s.add(proj)
+        await s.commit()
+        await s.refresh(proj)
+
+        tool = await ToolService.create(
+            s,
+            tenant.id,
+            proj.id,
+            name="test_critical_tool",
+            kind="builtin",
+            config={"effect": "delete", "risk": "critical", "requires_approval": True},
+        )
+        tenant_id = tenant.id
+        project_id = proj.id
+        tool_id = tool.id
+
+    args = {"action": "delete_all", "target": "cluster_1"}
+    appr_req = ToolPolicyService.create_approval_request(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        tool_id=tool_id,
+        tool_name="test_critical_tool",
+        arguments=args,
+        user_context={"email": "operator@alberto.local"},
+        caller_type="workflow",
+        caller_id="wf_audit",
+    )
+    assert appr_req.status == "pending"
+
+    # Decide approval
+    ok, msg = ToolPolicyService.decide_approval_request(
+        approval_id=appr_req.id,
+        decision="approve",
+        deciding_user={"email": "secops@alberto.local", "role": "admin"},
+    )
+    assert ok is True
+
+    # 1. Evaluate with dry_run = True -> MUST ALLOW without consuming
+    dec_dry = await ToolPolicyService.evaluate_execution(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        tool_id=tool_id,
+        caller_type="workflow",
+        caller_id="wf_audit",
+        workflow_def={"nodes": [{"type": "tool_call", "config": {"tool_id": tool_id}}]},
+        execution_context={"approval_id": appr_req.id, "arguments": args, "dry_run": True},
+    )
+    assert dec_dry.allowed is True
+    # Verify approval status is STILL approved, NOT consumed
+    fresh_appr = ToolPolicyService.get_approval(appr_req.id)
+    assert fresh_appr.status == "approved"
+
+    # 2. Tampered arguments check -> MUST REJECT
+    tampered_args = {"action": "delete_all", "target": "cluster_2"}
+    dec_tampered = await ToolPolicyService.evaluate_execution(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        tool_id=tool_id,
+        caller_type="workflow",
+        caller_id="wf_audit",
+        workflow_def={"nodes": [{"type": "tool_call", "config": {"tool_id": tool_id}}]},
+        execution_context={"approval_id": appr_req.id, "arguments": tampered_args, "dry_run": False},
+    )
+    assert dec_tampered.allowed is False
+    assert "arguments hash mismatch" in dec_tampered.reason.lower()
+
+    # 3. Live run with genuine arguments -> MUST ALLOW and atomically consume
+    dec_live = await ToolPolicyService.evaluate_execution(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        tool_id=tool_id,
+        caller_type="workflow",
+        caller_id="wf_audit",
+        workflow_def={"nodes": [{"type": "tool_call", "config": {"tool_id": tool_id}}]},
+        execution_context={"approval_id": appr_req.id, "arguments": args, "dry_run": False},
+    )
+    assert dec_live.allowed is True
+    consumed_appr = ToolPolicyService.get_approval(appr_req.id)
+    assert consumed_appr.status == "consumed"
+
+    # 4. Replay of consumed approval -> MUST REJECT
+    dec_replay = await ToolPolicyService.evaluate_execution(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        tool_id=tool_id,
+        caller_type="workflow",
+        caller_id="wf_audit",
+        workflow_def={"nodes": [{"type": "tool_call", "config": {"tool_id": tool_id}}]},
+        execution_context={"approval_id": appr_req.id, "arguments": args, "dry_run": False},
+    )
+    assert dec_replay.allowed is False
+    assert "already been consumed" in dec_replay.reason.lower() or "cannot be consumed" in dec_replay.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_agent_node_dry_run_simulation_and_subagent_protection():
+    """Verify agent node and subagent tool wrapper enforce dry-run simulation without side effects."""
+    from alberto.nodes.agent_node import _wrap_tool_for_agent
+    from alberto.engine.context import CompileContext
+
+    executed = []
+    class DangerousTool:
+        name = "danger_tool"
+        description = "Mutates external infrastructure"
+        async def ainvoke(self, kwargs):
+            executed.append(kwargs)
+            return {"deleted": True}
+
+    # Safe test with dry_run = True in unit-test context (empty tenant fast-pass)
+    ctx = CompileContext(tenant_id="", project_id="")
+    ctx.dry_run = True
+
+    wrapped = _wrap_tool_for_agent(DangerousTool(), "danger_tool", "test_agent", {}, ctx)
+    res = await wrapped.ainvoke({"target": "db_prod"})
+    assert isinstance(res, dict)
+    assert res.get("simulated") is True
+    assert res.get("mocked") is True
+    assert res.get("mode") == "dry_run"
+    assert len(executed) == 0  # Real tool was NEVER called
+
+
+def test_full_payload_replacement_discards_obsolete_keys():
+    """Verify that full payload replacement purges old keys without needing explicit delete markers."""
+    from alberto.engine.compiler import compile_workflow
+    from alberto.engine.context import CompileContext
+
+    ctx = CompileContext(tenant_id="t1", project_id="p1")
+    wf_def = {
+        "entry_node": "inject_1",
+        "nodes": [
+            {"id": "inject_1", "type": "inject", "config": {"payload": {"obsolete_a": 1, "obsolete_b": 2}}},
+            {
+                "id": "transform_replace",
+                "type": "transform",
+                "config": {
+                    "output_key": "payload",
+                    "expression": "msg.payload.obsolete_a",
+                },
+            },
+        ],
+        "edges": [
+            {"from": "inject_1", "to": "transform_replace"},
+        ],
+    }
+    graph = compile_workflow(wf_def, ctx)
+    res = graph.invoke({})
+
+    assert res["payload"] == 1
+    assert res["msg"]["payload"] == 1
+
+
+def test_multi_turn_branch_history_aggregation():
+    """Verify that multi-turn branch executions are recorded and aggregated deterministically in Join node."""
+    from alberto.nodes.flow import join_factory
+    from alberto.engine.context import CompileContext
+
+    ctx = CompileContext(tenant_id="t1", project_id="p1")
+    # Join configured with all_turns
+    join_fn = join_factory({"reducer": "all_turns", "output_key": "history"}, ctx)
+
+    state = {
+        "_branch_turns": {
+            "node_worker": [
+                {"step": 1, "payload": {"count": 1}},
+                {"step": 2, "payload": {"count": 2}},
+                {"step": 3, "payload": {"count": 3}},
+            ]
+        }
+    }
+    out = join_fn(state)
+    assert "history" in out
+    assert out["history"] == [{"count": 1}, {"count": 2}, {"count": 3}]
+
+
+@pytest.mark.asyncio
+async def test_step_endpoint_tampering_and_spoofing_prevented():
+    """Verify execute_step blocks node type spoofing and tool tampering."""
+    import uuid
+    from fastapi import HTTPException
+    from alberto.db import SessionLocal
+    from alberto.models import Tenant, Project, Workflow, User
+    from alberto.routers.workflows import execute_step
+    from alberto.schemas.dto import StepExecutionIn
+
+    suffix = uuid.uuid4().hex[:8]
+    async with SessionLocal() as s:
+        tenant = Tenant(name=f"TamperTenant_{suffix}")
+        s.add(tenant)
+        await s.commit()
+        await s.refresh(tenant)
+
+        proj = Project(tenant_id=tenant.id, name=f"TamperProj_{suffix}", slug=f"tamper-proj-{suffix}")
+        s.add(proj)
+        await s.commit()
+        await s.refresh(proj)
+
+        wf = Workflow(
+            tenant_id=tenant.id,
+            project_id=proj.id,
+            name="Workflow Guard Test",
+            executable={
+                "nodes": [
+                    {"id": "inject_1", "type": "inject", "config": {"payload": {"a": 1}}},
+                    {"id": "tool_1", "type": "tool_call", "config": {"tool_id": "legit_tool"}},
+                ]
+            },
+        )
+        s.add(wf)
+        await s.commit()
+        await s.refresh(wf)
+        tenant_id = tenant.id
+        project_id = proj.id
+        workflow_id = wf.id
+
+    mock_user = User(id="user_1", email="editor@alberto.local", role="editor")
+
+    # 1. Attempt node type spoofing: node inject_1 sent as tool_call
+    spoof_body = StepExecutionIn(
+        node_id="inject_1",
+        node_type="tool_call",
+        config={"tool_id": "malicious_tool"},
+        mode="dry_run",
+    )
+    async with SessionLocal() as s:
+        with pytest.raises(HTTPException) as exc_info:
+            await execute_step(
+                project_id=project_id,
+                workflow_id=workflow_id,
+                body=spoof_body,
+                session=s,
+                tenant_id=tenant_id,
+                user=mock_user,
+            )
+        assert exc_info.value.status_code == 422
+        assert "Node type spoofing detected" in str(exc_info.value.detail)
+
+    # 2. Attempt tool tampering: node tool_1 configured with legit_tool sent with forged_tool
+    tamper_body = StepExecutionIn(
+        node_id="tool_1",
+        node_type="tool_call",
+        config={"tool_id": "forged_tool"},
+        mode="dry_run",
+    )
+    async with SessionLocal() as s:
+        with pytest.raises(HTTPException) as exc_info:
+            await execute_step(
+                project_id=project_id,
+                workflow_id=workflow_id,
+                body=tamper_body,
+                session=s,
+                tenant_id=tenant_id,
+                user=mock_user,
+            )
+        assert exc_info.value.status_code == 422
+        assert "Tool tampering detected" in str(exc_info.value.detail)

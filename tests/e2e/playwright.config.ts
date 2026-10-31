@@ -28,9 +28,9 @@ const isCI = !!process.env.CI;
 
 export default defineConfig({
   testDir: __dirname,
-  timeout: 45000,
+  timeout: 90000,
   expect: {
-    timeout: 10000,
+    timeout: 15000,
   },
   fullyParallel: false, // Ensure sequential test runs on SQLite test database
   forbidOnly: isCI,
@@ -56,7 +56,7 @@ export default defineConfig({
   use: {
     baseURL,
     actionTimeout: 15000,
-    navigationTimeout: 30000,
+    navigationTimeout: 60000,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",

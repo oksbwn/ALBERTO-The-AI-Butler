@@ -129,6 +129,15 @@ test.describe("Node-RED-Inspired Low-Code Workflow Evolution E2E", () => {
     // Verify Topic field
     await expect(page.locator('label:has-text("Topic")').first()).toBeVisible();
 
+    // Close Inject modal via Done button
+    const doneBtn = page.locator('button:has-text("Done")').first();
+    if (await doneBtn.isVisible().catch(() => false)) {
+      await doneBtn.click();
+    } else {
+      await page.keyboard.press("Escape");
+    }
+    await page.waitForTimeout(400);
+
     // 2. Click Debug node
     const debugNode = page.locator('.react-flow__node:has-text("Debug")').first();
     await debugNode.click();
@@ -208,20 +217,38 @@ test.describe("Node-RED-Inspired Low-Code Workflow Evolution E2E", () => {
     await page.waitForSelector(".react-flow", { timeout: 20000 });
 
     // 1. Capture workflow canvas screenshot
-    const brainDir = "C:/Users/oksbw/.gemini/antigravity-ide/brain/02fc7382-d55d-4880-95ea-4a79d9352281";
+    const brainDir = "C:/Users/oksbw/.gemini/antigravity/brain/909e2feb-28a3-4e36-b172-e410519ae32a";
     await page.screenshot({ path: `${brainDir}/canvas_nodered_workflow.png` });
+    await page.screenshot({ path: "docs/assets/screenshots/automate/canvas_nodered_workflow.png" });
 
     // 2. Click Inject node, capture inspector screenshot
     const injectNode = page.locator('.react-flow__node:has-text("Inject")').first();
     await injectNode.click();
     await expect(page.locator('label:has-text("Payload Type")').first()).toBeVisible({ timeout: 10000 });
     await page.screenshot({ path: `${brainDir}/canvas_inspector.png` });
+    await page.screenshot({ path: "docs/assets/screenshots/automate/canvas_inspector.png" });
+
+    // Close modal via Done button
+    const doneBtn1 = page.locator('button:has-text("Done")').first();
+    if (await doneBtn1.isVisible().catch(() => false)) {
+      await doneBtn1.click();
+    } else {
+      await page.keyboard.press("Escape");
+    }
+    await page.waitForTimeout(400);
 
     // 3. Click Switch node to verify Simple Mode rule
     const switchNode = page.locator('.react-flow__node:has-text("Switch")').first();
     if (await switchNode.isVisible().catch(() => false)) {
       await switchNode.click();
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(400);
+      const doneBtn2 = page.locator('button:has-text("Done")').first();
+      if (await doneBtn2.isVisible().catch(() => false)) {
+        await doneBtn2.click();
+      } else {
+        await page.keyboard.press("Escape");
+      }
+      await page.waitForTimeout(400);
     }
 
     // 4. Execute workflow via Run button
@@ -241,6 +268,7 @@ test.describe("Node-RED-Inspired Low-Code Workflow Evolution E2E", () => {
     await debugTab.click();
     await expect(page.locator("span.chip:has-text('debug_alert')").first()).toBeVisible();
     await page.screenshot({ path: `${brainDir}/debug_sidebar.png` });
+    await page.screenshot({ path: "docs/assets/screenshots/automate/debug_sidebar.png" });
   });
 
   test("verifies practical AI Butler meeting assistant workflow through canvas with Switch routing and Debug verification", async ({
@@ -274,6 +302,13 @@ test.describe("Node-RED-Inspired Low-Code Workflow Evolution E2E", () => {
     const changeNode = page.locator('.react-flow__node:has-text("Change")').first();
     await changeNode.click();
     await expect(page.locator('text="Transform Mode"')).toBeVisible({ timeout: 10000 });
+    const doneBtn = page.locator('button:has-text("Done")').first();
+    if (await doneBtn.isVisible().catch(() => false)) {
+      await doneBtn.click();
+    } else {
+      await page.keyboard.press("Escape");
+    }
+    await page.waitForTimeout(400);
 
     // 3. Execute workflow
     const runBtn = page.locator('button[title="Run Workflow"]');

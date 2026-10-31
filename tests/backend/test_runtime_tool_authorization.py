@@ -223,3 +223,22 @@ async def test_9_tool_manager_delegation_preserves_policy_checks(setup_auth_env)
     assert result["ok"] is False
     assert result["requires_approval"] is True
     assert result["approval_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_10_spoofed_self_declared_approval_without_approval_id_denied(setup_auth_env):
+    """Caller-supplied approved=True or approval_granted=True without a valid approval_id must be DENIED."""
+    tenant, proj_a, _, _, tool_critical, _ = setup_auth_env
+    async with SessionLocal() as s:
+        decision = await ToolPolicyService.evaluate_execution(
+            tenant_id=tenant.id,
+            project_id=proj_a.id,
+            tool_id=tool_critical.id,
+            caller_type="subagent",
+            caller_id="dba_agent",
+            subagent_config={"tools": [tool_critical.id]},
+            execution_context={"approved": True, "approval_granted": True, "approval_id": None},
+            session=s,
+        )
+        assert decision.allowed is False
+        assert decision.requires_approval is True
