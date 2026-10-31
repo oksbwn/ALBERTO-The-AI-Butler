@@ -684,7 +684,41 @@ class ToolManagerService:
                     "risk": decision.risk,
                 }
 
-            # 4. Secured Execution Runtime
+            # 4. Secured Execution Runtime (Dry-run isolation and unknown safety enforcement)
+            if exec_ctx.get("dry_run"):
+                if decision.effect == "unknown" or decision.risk == "unknown":
+                    return {
+                        "ok": False,
+                        "simulated": False,
+                        "mocked": False,
+                        "mode": "dry_run",
+                        "unsupported_dry_run": True,
+                        "status": "unsupported_dry_run",
+                        "error": f"Tool '{tool_row.name}' has unknown side-effect classification and cannot be executed or safely simulated in dry-run mode.",
+                        "tool_id": tool_row.id,
+                        "tool_name": tool_row.name,
+                        "effect": decision.effect,
+                        "risk": decision.risk,
+                    }
+                return {
+                    "ok": True,
+                    "simulated": True,
+                    "mocked": True,
+                    "mode": "dry_run",
+                    "status": "dry_run_success",
+                    "tool_id": tool_row.id,
+                    "tool_name": tool_row.name,
+                    "result": {
+                        "simulated": True,
+                        "mocked": True,
+                        "tool": tool_row.name,
+                        "parameters": parameters,
+                        "status": "dry_run_success",
+                    },
+                    "effect": decision.effect,
+                    "risk": decision.risk,
+                }
+
             cfg = {
                 **(tool_row.config or {}),
                 "name": tool_row.name,

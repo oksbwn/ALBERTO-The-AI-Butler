@@ -17,6 +17,8 @@ from typing import Any
 class CompileContext:
     tenant_id: str
     project_id: str
+    workflow_id: str | None = None
+    workflow_def: dict | None = None
 
     # LangGraph durability + long-term memory.
     checkpointer: Any = None

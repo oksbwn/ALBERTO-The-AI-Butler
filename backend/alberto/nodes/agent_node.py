@@ -9,6 +9,7 @@ at runtime (avoids nested-checkpointer conflicts and makes HITL interrupts bubbl
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
@@ -396,6 +397,15 @@ def _wrap_tool_for_agent(
     async def _policy_wrapped(runtime: ToolRuntime | None = None, **kwargs):
         # Fast-pass for offline/unit tests where tenant_id and project_id are omitted
         if not getattr(ctx, "tenant_id", None) or not getattr(ctx, "project_id", None):
+            if getattr(ctx, "dry_run", False):
+                return {
+                    "tool": getattr(inner_tool, "name", tool_id),
+                    "simulated": True,
+                    "mocked": True,
+                    "mode": "dry_run",
+                    "arguments": kwargs,
+                    "status": "dry_run_success",
+                }
             if inner_coro is not None:
                 return await (inner_coro(runtime=runtime, **kwargs) if pass_runtime else inner_coro(**kwargs))
             if inner_func is not None:
@@ -409,6 +419,7 @@ def _wrap_tool_for_agent(
             "arguments": kwargs,
             "approval_id": state.get("approval_id") or run_ctx.get("approval_id"),
             "approved": state.get("approved") or state.get("human_approved") or run_ctx.get("approved"),
+            "dry_run": getattr(ctx, "dry_run", False),
         }
 
         from alberto.services.tool_policy import ToolPolicyService
@@ -430,6 +441,31 @@ def _wrap_tool_for_agent(
                     f"Approval request created: {decision.approval_request_id}. Execution paused."
                 )
             return f"Tool execution policy violation: {decision.reason}"
+
+        if getattr(ctx, "dry_run", False):
+            if decision.effect == "unknown" or decision.risk == "unknown":
+                return {
+                    "tool": getattr(inner_tool, "name", tool_id),
+                    "ok": False,
+                    "simulated": False,
+                    "mocked": False,
+                    "mode": "dry_run",
+                    "unsupported_dry_run": True,
+                    "status": "unsupported_dry_run",
+                    "error": f"Tool '{decision.tool_name or getattr(inner_tool, 'name', tool_id)}' has unknown side-effect classification and cannot be executed or safely simulated in dry-run mode.",
+                    "effect": decision.effect,
+                    "risk": decision.risk,
+                }
+            return {
+                "tool": getattr(inner_tool, "name", tool_id),
+                "simulated": True,
+                "mocked": True,
+                "mode": "dry_run",
+                "arguments": kwargs,
+                "status": "dry_run_success",
+                "effect": decision.effect,
+                "risk": decision.risk,
+            }
 
         if inner_coro is not None:
             return await (inner_coro(runtime=runtime, **kwargs) if pass_runtime else inner_coro(**kwargs))
@@ -453,6 +489,15 @@ def _wrap_tool_for_agent(
         )
         if not allowed:
             return f"Tool execution policy violation: tool '{getattr(inner_tool, 'name', tool_id)}' not allowed for agent '{agent_name}'."
+        if getattr(ctx, "dry_run", False):
+            return {
+                "tool": getattr(inner_tool, "name", tool_id),
+                "simulated": True,
+                "mocked": True,
+                "mode": "dry_run",
+                "arguments": kwargs,
+                "status": "dry_run_success",
+            }
         if inner_func is not None:
             return inner_func(runtime=runtime, **kwargs) if pass_runtime else inner_func(**kwargs)
         raise RuntimeError(f"Tool {getattr(inner_tool, 'name', tool_id)!r} does not support synchronous execution.")
@@ -830,9 +875,21 @@ def agent_factory(config: dict, ctx: CompileContext):
                     last_text = content_to_text(last_content) if last_content else ""
                 final_data = _normalize_json_object(last_text)
 
+        cur_msg = dict(state.get("msg") or {})
+        cur_msg["payload"] = final_data
+        if "topic" not in cur_msg:
+            cur_msg["topic"] = state.get("topic", "")
+        if "_msgid" not in cur_msg:
+            import uuid
+        if "_msgid" not in cur_msg or not cur_msg["_msgid"]:
+            cur_msg["_msgid"] = f"msg-{uuid.uuid4().hex[:16]}"
+        cur_alberto = dict(cur_msg.get("_alberto") or {})
+        cur_alberto["source_node"] = config.get("name") or config.get("id") or "agent"
+        cur_msg["_alberto"] = cur_alberto
+
         out: dict[str, Any] = dict(result or {})
         out["payload"] = final_data
-        out["msg"] = {"payload": final_data, "topic": state.get("topic", "")}
+        out["msg"] = cur_msg
         out["output"] = final_data
         if output_key:
             out[output_key] = final_data
@@ -882,8 +939,8 @@ def _normalize_json_object(val: Any) -> dict:
                     return {"items": parsed}
             except Exception:
                 pass
-        return {"response": val, "content": val}
-    return {"response": str(val), "content": str(val)}
+        return {"text": val, "response": val, "content": val}
+    return {"text": str(val), "response": str(val), "content": str(val)}
 
 
 def _extract_structured_data(res: dict) -> Any:

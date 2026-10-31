@@ -19,6 +19,7 @@ from typing import Any
 
 from RestrictedPython import compile_restricted, safe_builtins
 from RestrictedPython.Eval import default_guarded_getitem, default_guarded_getiter
+from RestrictedPython.Guards import safer_getattr
 
 _SAFE_NAMES: dict[str, Any] = {
     "len": len, "min": min, "max": max, "sum": sum, "abs": abs, "round": round,
@@ -41,18 +42,24 @@ def eval_expression(expr: str, state: dict | None = None, context: dict | None =
         raise ExpressionError(f"Invalid expression {expr!r}: {e}") from e
 
     payload_keys = state.get("payload") if isinstance(state.get("payload"), dict) else {}
+    msg_dict = state.get("msg") if isinstance(state.get("msg"), dict) else {}
+    flow_ctx = dict(context or state.get("context") or {})
     env: dict[str, Any] = {
         **payload_keys,
         **state,  # state keys as bare names - spread FIRST so a state key can't shadow a guard
+        "msg": msg_dict or {"payload": state.get("payload"), "topic": state.get("topic")},
+        "payload": state.get("payload"),
+        "flow": flow_ctx,
         # Reserved/guard keys are set AFTER **state so the sandbox guards and safe builtins
         # always win (a state key named e.g. "__builtins__" or "_getitem_" can't override them).
         "__builtins__": safe_builtins,
         "_getitem_": default_guarded_getitem,
         "_getiter_": default_guarded_getiter,
+        "_getattr_": safer_getattr,
         **_SAFE_NAMES,
         "state": state,
-        "context": context,
-        "ctx": context,
+        "context": flow_ctx,
+        "ctx": flow_ctx,
     }
     try:
         return eval(code, env, {})  # noqa: S307 - sandboxed by RestrictedPython

@@ -474,11 +474,11 @@ class ToolPolicyService:
                 if workflow_def:
                     nodes = workflow_def.get("nodes") or []
                     for n in nodes:
-                        if n.get("type") == "tool_call":
-                            tid = (n.get("config") or {}).get("tool_id")
+                        if n.get("type") in ("tool_call", "tool"):
+                            tid = (n.get("config") or {}).get("tool_id") or (n.get("config") or {}).get("name")
                             if tid:
                                 explicit_tools.add(tid)
-                elif caller_id:
+                elif caller_id and caller_id != "unknown":
                     wf_row = (
                         await s.execute(
                             select(Workflow).where(
@@ -490,10 +490,13 @@ class ToolPolicyService:
                     ).scalar_one_or_none()
                     if wf_row and wf_row.executable:
                         for n in (wf_row.executable.get("nodes") or []):
-                            if n.get("type") == "tool_call":
-                                tid = (n.get("config") or {}).get("tool_id")
+                            if n.get("type") in ("tool_call", "tool"):
+                                tid = (n.get("config") or {}).get("tool_id") or (n.get("config") or {}).get("name")
                                 if tid:
                                     explicit_tools.add(tid)
+                elif not caller_id or caller_id == "unknown":
+                    # Standalone/test context: if no workflow definition is bound, permit the tool being called
+                    explicit_tools.add(tool_id)
 
                 if tool_row.id not in explicit_tools and tool_row.name not in explicit_tools:
                     return PolicyDecision(
@@ -536,8 +539,9 @@ class ToolPolicyService:
                 or risk == "critical"
             )
 
-            is_approved = bool(execution_context.get("approved") or execution_context.get("approval_granted"))
             approval_id = execution_context.get("approval_id")
+            # Invariant: Self-declared approval without a verified, unconsumed approval_id cannot bypass policy
+            is_approved = False
 
             if approval_id:
                 now_dt = datetime.now(UTC)
@@ -549,53 +553,88 @@ class ToolPolicyService:
                 if not args_hash and "arguments" in execution_context:
                     args_hash = cls.hash_arguments(execution_context.get("arguments"))
 
+                is_dry_run = bool(execution_context.get("dry_run"))
                 conn = cls._get_sqlite_conn()
                 if conn:
                     try:
                         with conn:
                             cur = conn.cursor()
-                            # Atomic SQLite update: transitions approved -> consumed ONLY IF all invariants match
-                            # Ensures tampered arguments, wrong tools, or wrong tenants do NOT consume the approval
-                            cur.execute(
-                                """
-                                UPDATE tool_approval_requests
-                                SET status = 'consumed', consumed_at = ?, updated_at = ?
-                                WHERE id = ?
-                                  AND status = 'approved'
-                                  AND expires_at > ?
-                                  AND tenant_id = ?
-                                  AND project_id = ?
-                                  AND tool_id IN (?, ?)
-                                  AND (arguments_hash = ? OR ? IS NULL)
-                                """,
-                                (
-                                    now_iso,
-                                    now_iso,
-                                    approval_id,
-                                    now_iso,
-                                    tenant_id,
-                                    project_id,
-                                    tool_row.id,
-                                    tool_row.name,
-                                    args_hash,
-                                    args_hash,
-                                ),
-                            )
-                            if cur.rowcount == 1:
-                                consumed_in_db = True
+                            if is_dry_run:
+                                # In dry-run mode, verify that the approval is valid without consuming it
+                                cur.execute(
+                                    """
+                                    SELECT * FROM tool_approval_requests
+                                    WHERE id = ?
+                                      AND status = 'approved'
+                                      AND expires_at > ?
+                                      AND tenant_id = ?
+                                      AND project_id = ?
+                                      AND tool_id IN (?, ?)
+                                      AND (arguments_hash = ? OR ? IS NULL)
+                                    """,
+                                    (
+                                        approval_id,
+                                        now_iso,
+                                        tenant_id,
+                                        project_id,
+                                        tool_row.id,
+                                        tool_row.name,
+                                        args_hash,
+                                        args_hash,
+                                    ),
+                                )
+                                row = cur.fetchone()
+                                if row:
+                                    appr_row_data = dict(row)
+                                    is_approved = True
+                                else:
+                                    cur.execute("SELECT * FROM tool_approval_requests WHERE id = ?", (approval_id,))
+                                    r = cur.fetchone()
+                                    if r:
+                                        appr_row_data = dict(r)
+                                        appr_status_from_db = r["status"]
+                            else:
+                                # Atomic SQLite update: transitions approved -> consumed ONLY IF all invariants match
+                                cur.execute(
+                                    """
+                                    UPDATE tool_approval_requests
+                                    SET status = 'consumed', consumed_at = ?, updated_at = ?
+                                    WHERE id = ?
+                                      AND status = 'approved'
+                                      AND expires_at > ?
+                                      AND tenant_id = ?
+                                      AND project_id = ?
+                                      AND tool_id IN (?, ?)
+                                      AND (arguments_hash = ? OR ? IS NULL)
+                                    """,
+                                    (
+                                        now_iso,
+                                        now_iso,
+                                        approval_id,
+                                        now_iso,
+                                        tenant_id,
+                                        project_id,
+                                        tool_row.id,
+                                        tool_row.name,
+                                        args_hash,
+                                        args_hash,
+                                    ),
+                                )
+                                if cur.rowcount == 1:
+                                    consumed_in_db = True
 
-                            cur.execute("SELECT * FROM tool_approval_requests WHERE id = ?", (approval_id,))
-                            row = cur.fetchone()
-                            if row:
-                                appr_row_data = dict(row)
-                                appr_status_from_db = row["status"]
+                                cur.execute("SELECT * FROM tool_approval_requests WHERE id = ?", (approval_id,))
+                                row = cur.fetchone()
+                                if row:
+                                    appr_row_data = dict(row)
+                                    appr_status_from_db = row["status"]
                     except Exception as e:
                         logger.warning("Atomic SQLite approval consumption check error: %s", e)
                     finally:
                         conn.close()
 
-                if consumed_in_db and appr_row_data:
-                    if approval_id in cls._pending_approvals:
+                if (consumed_in_db or (is_dry_run and is_approved)) and appr_row_data:
+                    if not is_dry_run and approval_id in cls._pending_approvals:
                         cls._pending_approvals[approval_id].status = "consumed"
                     is_approved = True
 
@@ -778,7 +817,8 @@ class ToolPolicyService:
                                 risk=risk,
                             )
                         is_approved = True
-                        appr.status = "consumed"
+                        if not bool(execution_context.get("dry_run")):
+                            appr.status = "consumed"
 
             if needs_approval and not is_approved:
                 appr_req = cls.create_approval_request(

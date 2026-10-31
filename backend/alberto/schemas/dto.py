@@ -162,6 +162,25 @@ class ValidateOut(BaseModel):
     warnings: list[dict] = []
 
 
+class StepExecutionIn(BaseModel):
+    node_id: str
+    node_type: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    input_state: dict[str, Any] = Field(default_factory=dict)
+    mode: str = "dry_run"  # "dry_run" | "live"
+    active_version: int | None = None
+
+
+class StepExecutionOut(BaseModel):
+    ok: bool
+    output: dict[str, Any] = Field(default_factory=dict)
+    duration_ms: float = 0.0
+    error: str | None = None
+    mocked: bool = False
+    requires_approval: bool = False
+    unsupported_dry_run: bool = False
+
+
 # --- agents (reusable presets) ---
 class AgentOut(ORMModel):
     id: str

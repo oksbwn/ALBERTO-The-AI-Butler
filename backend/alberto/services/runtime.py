@@ -43,7 +43,8 @@ def _tool_cfg(t: Tool) -> dict:
 async def build_compile_context(
     session, *, tenant_id: str, project_id: str, checkpointer=None, store=None,
     end_user: dict | None = None, run_context: dict | None = None,
-    load_tools: bool = True,
+    load_tools: bool = True, workflow_id: str | None = None,
+    workflow_def: dict | None = None,
 ) -> CompileContext:
     # Scope the project load by tenant too (audit H4): callers pass the CALLER's tenant_id, so a
     # cross-tenant project_id resolves to None here (empty config) instead of loading another
@@ -104,6 +105,8 @@ async def build_compile_context(
     ctx = CompileContext(
         tenant_id=tenant_id,
         project_id=project_id,
+        workflow_id=workflow_id,
+        workflow_def=workflow_def,
         checkpointer=checkpointer,
         store=store,
         auth_resolver=AuthResolver(secret_store),

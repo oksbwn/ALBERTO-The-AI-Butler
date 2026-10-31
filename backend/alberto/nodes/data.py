@@ -104,6 +104,7 @@ def transform_factory(cfg: dict, ctx: CompileContext):
             state_dict = dict(state or {})
             src = state_dict.get(input_key) if input_key else state_dict
             target = copy.deepcopy(src) if isinstance(src, dict) else ({"payload": src} if src is not None else {})
+            deleted_keys = []
             for op in operations:
                 act = op.get("type") or op.get("action", "set")
                 prop = (op.get("target") or op.get("property") or op.get("to") or "").replace("msg.", "")
@@ -119,15 +120,32 @@ def transform_factory(cfg: dict, ctx: CompileContext):
                     val = _get_nested(target, from_p)
                     _delete_nested(target, from_p)
                     _set_nested(target, to_p, val)
+                    deleted_keys.append(from_p)
                 elif act == "delete":
                     _delete_nested(target, prop)
+                    deleted_keys.append(prop)
 
             res = {output_key: target}
+            is_full_replace = any(
+                (op.get("type") or op.get("action", "set")) == "set"
+                and (op.get("target") or op.get("property") or op.get("to") or "").replace("msg.", "") in ("payload", "")
+                for op in operations
+            )
+            if is_full_replace:
+                res["_replace_payload"] = True
             for k, v in target.items():
                 res[k] = v
             if "payload" in target:
                 res["payload"] = target["payload"]
                 res["msg"] = {"payload": res["payload"], "topic": state_dict.get("topic", "")}
+            if deleted_keys:
+                res["_deleted_keys"] = deleted_keys
+                if isinstance(res.get("payload"), dict):
+                    res["payload"] = {**res["payload"], "_deleted_keys": deleted_keys}
+                if "msg" in res and isinstance(res["msg"], dict):
+                    res["msg"]["_deleted_keys"] = deleted_keys
+                    if isinstance(res["msg"].get("payload"), dict):
+                        res["msg"]["payload"] = {**res["msg"]["payload"], "_deleted_keys": deleted_keys}
             return res
         return _ops_node
 
@@ -150,6 +168,9 @@ def transform_factory(cfg: dict, ctx: CompileContext):
         res = {output_key: result}
         if output_key == "payload":
             res["payload"] = result
+            res["_replace_payload"] = True
+            if isinstance(result, dict):
+                result["_replace_payload"] = True
             res["msg"] = {"payload": result, "topic": state_dict.get("topic", "")}
         return res
 
@@ -253,6 +274,45 @@ def webhook_out_factory(cfg: dict, ctx: CompileContext):
             params.update(auth.params)
             cookies.update(auth.cookies)
         await validate_url(url, getattr(ctx, "egress_policy", None))
+
+        if getattr(ctx, "dry_run", False):
+            method_upper = (method or "POST").upper()
+            if method_upper not in ("GET", "HEAD", "OPTIONS", "POST", "PUT", "DELETE", "PATCH"):
+                return {
+                    output_key: {
+                        "url": url,
+                        "method": method_upper,
+                        "ok": False,
+                        "simulated": False,
+                        "mocked": False,
+                        "mode": "dry_run",
+                        "unsupported_dry_run": True,
+                        "status": "unsupported_dry_run",
+                        "error": f"HTTP method '{method_upper}' has unknown side-effect classification and cannot be safely simulated in dry-run mode.",
+                    }
+                }
+            return {
+                output_key: {
+                    "url": url,
+                    "method": method_upper,
+                    "simulated": True,
+                    "mocked": True,
+                    "mode": "dry_run",
+                    "status": "dry_run_success",
+                    "headers": {k: "***" if any(w in k.lower() for w in ("auth", "token", "key", "secret")) else v for k, v in headers.items()},
+                    "body": body,
+                },
+                "msg": {
+                    "payload": {
+                        "url": url,
+                        "method": method_upper,
+                        "simulated": True,
+                        "mocked": True,
+                        "mode": "dry_run",
+                        "status": "dry_run_success",
+                    }
+                }
+            }
         c = shared_async_client()
         try:
             r = await c.request(method, url, headers=headers, params=params or None, json=body, cookies=cookies or None, timeout=30)
@@ -313,17 +373,20 @@ def tool_call_factory(cfg: dict, ctx: CompileContext):
         # Enforce central execution policy (default-deny, activation, explicit association, and approval)
         from alberto.services.tool_policy import ToolPolicyService
 
+        wf_def = getattr(ctx, "workflow_def", None)
+        wf_id = getattr(ctx, "workflow_id", None)
         decision = await ToolPolicyService.evaluate_execution(
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
             tool_id=tool_id,
             caller_type="workflow",
+            caller_id=wf_id,
             user_context=ctx.end_user or {},
-            workflow_def={"nodes": [{"type": "tool_call", "config": {"tool_id": tool_id}}]},
+            workflow_def=wf_def,
             execution_context={
-                "approved": state.get("approved") or state.get("human_approved"),
                 "approval_id": state.get("approval_id"),
                 "arguments": args,
+                "dry_run": getattr(ctx, "dry_run", False),
             },
         )
         if not decision.allowed:
@@ -332,6 +395,38 @@ def tool_call_factory(cfg: dict, ctx: CompileContext):
                     "error": f"Tool execution policy violation: {decision.reason}",
                     "requires_approval": decision.requires_approval,
                     "tool_id": tool_id,
+                }
+            }
+
+        if getattr(ctx, "dry_run", False):
+            # Unknown side-effect classification must never be treated as safe by default
+            if decision.effect == "unknown" or decision.risk == "unknown":
+                return {
+                    output_key: {
+                        "tool": tool_id,
+                        "ok": False,
+                        "error": f"Tool '{decision.tool_name or tool_id}' has unknown side-effect classification and cannot be executed or safely simulated in dry-run mode.",
+                        "unsupported_dry_run": True,
+                        "status": "unsupported_dry_run",
+                        "simulated": False,
+                        "mocked": False,
+                        "mode": "dry_run",
+                        "tool_id": tool_id,
+                        "effect": decision.effect,
+                        "risk": decision.risk,
+                    }
+                }
+            return {
+                output_key: {
+                    "mocked": True,
+                    "simulated": True,
+                    "tool_id": tool_id,
+                    "mode": "dry_run",
+                    "status": "dry_run_success",
+                    "arguments": args,
+                    "message": f"Safe test dry-run: {tool_id} was simulated without external side effects.",
+                    "effect": decision.effect,
+                    "risk": decision.risk,
                 }
             }
 

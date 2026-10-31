@@ -473,6 +473,22 @@ def join_factory(config: dict, ctx: CompileContext):
         incoming = config.get("incoming_nodes") or []
         if incoming and isinstance(branches, dict):
             branches = {k: v for k, v in branches.items() if k in incoming}
+
+        branch_turns = state.get("_branch_turns") or (
+            state.get("msg", {}).get("_branch_turns") if isinstance(state.get("msg"), dict) else {}
+        )
+        if reducer in ("history", "all_turns") and branch_turns:
+            turns = []
+            for k in sorted(branch_turns.keys()):
+                if not incoming or k in incoming:
+                    for turn in branch_turns[k]:
+                        turns.append(turn.get("payload") if isinstance(turn, dict) else turn)
+            res = {output_key: turns}
+            if output_key == "payload":
+                cur_msg = dict(state.get("msg") or {})
+                cur_msg["payload"] = turns
+                res["msg"] = cur_msg
+            return res
         if reducer == "branch_map" and branches:
             res = {output_key: branches}
             if output_key == "payload":
@@ -591,9 +607,12 @@ def inject_factory(config: dict, ctx: CompileContext):
             except Exception:
                 payload = payload_raw
 
+        import uuid
         msg = {
-            "payload": payload,
+            "_msgid": f"msg-{uuid.uuid4().hex[:16]}",
             "topic": topic,
+            "payload": payload,
+            "_alberto": {"timestamp": now, "source_node": config.get("id") or "inject"},
             "metadata": {"timestamp": now, "source": "inject"},
         }
         return {

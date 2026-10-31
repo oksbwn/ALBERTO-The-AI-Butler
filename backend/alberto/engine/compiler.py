@@ -145,6 +145,40 @@ def wrap_canonical_node(fn, node_id: str | None = None):
 
     import copy
     import inspect
+    import time
+    import uuid
+
+    def _enrich_msg(synced: dict, norm_state: dict) -> dict:
+        in_msg = norm_state.get("msg") if isinstance(norm_state.get("msg"), dict) else {}
+        in_alberto = in_msg.get("_alberto") if isinstance(in_msg.get("_alberto"), dict) else {}
+        in_step = in_alberto.get("step", 0)
+
+        out_alberto = None
+        out_msg = synced.get("msg")
+        if isinstance(out_msg, dict):
+            out_alberto = dict(out_msg.get("_alberto") or {})
+            out_alberto["source_node"] = node_id or out_alberto.get("source_node") or "unknown"
+            out_alberto["step"] = in_step + 1
+            out_alberto["parent_node"] = in_alberto.get("source_node")
+            if "timestamp" not in out_alberto:
+                out_alberto["timestamp"] = int(time.time() * 1000)
+            out_msg["_alberto"] = out_alberto
+            if not out_msg.get("_msgid"):
+                out_msg["_msgid"] = f"msg-{uuid.uuid4().hex[:16]}"
+            synced["msg"] = out_msg
+            if "payload" in out_msg:
+                synced["payload"] = out_msg["payload"]
+        if node_id:
+            branch_val = copy.deepcopy(synced.get("payload"))
+            synced["_branches"] = {node_id: branch_val}
+            synced["_branch_turns"] = {
+                node_id: [{
+                    "step": out_alberto.get("step") if isinstance(out_alberto, dict) else (in_step + 1),
+                    "msgid": out_msg.get("_msgid") if isinstance(out_msg, dict) else None,
+                    "payload": branch_val,
+                }]
+            }
+        return synced
 
     if inspect.iscoroutinefunction(fn):
         async def _async_wrapped(state: dict, *args, **kwargs):
@@ -154,9 +188,7 @@ def wrap_canonical_node(fn, node_id: str | None = None):
             res = await fn(norm_state, *args, **kwargs)
             if isinstance(res, dict):
                 synced = _sync_output_aliases(res, norm_state)
-                if node_id:
-                    synced["_branches"] = {node_id: copy.deepcopy(synced.get("payload"))}
-                return synced
+                return _enrich_msg(synced, norm_state)
             return res
         return _async_wrapped
     else:
@@ -167,9 +199,7 @@ def wrap_canonical_node(fn, node_id: str | None = None):
             res = fn(norm_state, *args, **kwargs)
             if isinstance(res, dict):
                 synced = _sync_output_aliases(res, norm_state)
-                if node_id:
-                    synced["_branches"] = {node_id: copy.deepcopy(synced.get("payload"))}
-                return synced
+                return _enrich_msg(synced, norm_state)
             return res
         return _sync_wrapped
 
