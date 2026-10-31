@@ -43,13 +43,21 @@ def _jq_transform(expr: str, input_key: str | None, output_key: str):
         raise ValueError(f"Invalid jq expression {expr!r}: {e}") from e
 
     def _node(state: dict) -> dict:
-        src = state.get(input_key) if input_key else dict(state)
+        state_dict = dict(state or {})
+        src = state_dict.get(input_key) if input_key else state_dict
         try:
             result: Any = program.input(src).first()
         except Exception as e:  # noqa: BLE001 - a runtime jq failure -> None, but log it
             log.warning("transform jq %r failed: %s: %s", expr, type(e).__name__, e)
             result = None
-        return {output_key: result}
+        res = {output_key: result}
+        if output_key == "payload":
+            res["payload"] = result
+            res["_replace_payload"] = True
+            if isinstance(result, dict):
+                result["_replace_payload"] = True
+            res["msg"] = {"payload": result, "topic": state_dict.get("topic", "")}
+        return res
 
     return _node
 
@@ -204,17 +212,19 @@ def human_input_factory(cfg: dict, ctx: CompileContext):
             "prompt": prompt, "allowed_decisions": decisions, "schema": schema,
             "timeout_seconds": timeout_seconds, "timeout_default": timeout_default,
         })
-        out: dict[str, Any] = {"messages": [HumanMessage(content=f"[human decision] {decision}")]}
-        if output_key:
-            # Coerce a free-text resume value to one of allowed_decisions for the ROUTING key so a
-            # Router keyed on approve/reject matches even on a direct API resume (audit C). The
-            # transcript message above keeps the human's raw wording; only the routed value is
-            # normalized. Structured (dict) input is left as-is.
-            routed: Any = decision
-            if isinstance(decision, str) and decisions:
-                from alberto.services.handoff import coerce_to_allowed_decision
+        routed: Any = decision
+        if output_key and isinstance(decision, str) and decisions:
+            from alberto.services.handoff import coerce_to_allowed_decision
 
-                routed = coerce_to_allowed_decision(decision, list(decisions))
+            routed = coerce_to_allowed_decision(decision, list(decisions))
+
+        decision_val = str(routed) if output_key else str(decision)
+        out: dict[str, Any] = {
+            "messages": [HumanMessage(content=f"[human decision] {decision}")],
+            "payload": decision_val,
+            "msg": {"payload": decision_val},
+        }
+        if output_key:
             out[output_key] = str(routed)
         return out
 
@@ -258,12 +268,15 @@ def webhook_out_factory(cfg: dict, ctx: CompileContext):
         cookies: dict[str, str] = {}
 
         if cfg.get("requires_approval") and not (state.get("approved") or state.get("human_approved")):
+            err_obj = {
+                "error": "Execution policy violation: Outbound request requires human approval",
+                "requires_approval": True,
+                "url": url,
+            }
             return {
-                output_key: {
-                    "error": "Execution policy violation: Outbound request requires human approval",
-                    "requires_approval": True,
-                    "url": url,
-                }
+                output_key: err_obj,
+                "payload": err_obj,
+                "msg": {"payload": err_obj},
             }
 
         if provider_id and ctx.auth_resolver:
@@ -278,40 +291,38 @@ def webhook_out_factory(cfg: dict, ctx: CompileContext):
         if getattr(ctx, "dry_run", False):
             method_upper = (method or "POST").upper()
             if method_upper not in ("GET", "HEAD", "OPTIONS", "POST", "PUT", "DELETE", "PATCH"):
-                return {
-                    output_key: {
-                        "url": url,
-                        "method": method_upper,
-                        "ok": False,
-                        "simulated": False,
-                        "mocked": False,
-                        "mode": "dry_run",
-                        "unsupported_dry_run": True,
-                        "status": "unsupported_dry_run",
-                        "error": f"HTTP method '{method_upper}' has unknown side-effect classification and cannot be safely simulated in dry-run mode.",
-                    }
-                }
-            return {
-                output_key: {
+                err_obj = {
                     "url": url,
                     "method": method_upper,
-                    "simulated": True,
-                    "mocked": True,
+                    "ok": False,
+                    "simulated": False,
+                    "mocked": False,
                     "mode": "dry_run",
-                    "status": "dry_run_success",
-                    "headers": {k: "***" if any(w in k.lower() for w in ("auth", "token", "key", "secret")) else v for k, v in headers.items()},
-                    "body": body,
-                },
-                "msg": {
-                    "payload": {
-                        "url": url,
-                        "method": method_upper,
-                        "simulated": True,
-                        "mocked": True,
-                        "mode": "dry_run",
-                        "status": "dry_run_success",
-                    }
+                    "unsupported_dry_run": True,
+                    "status": "unsupported_dry_run",
+                    "error": f"HTTP method '{method_upper}' has unknown side-effect classification and cannot be safely simulated in dry-run mode.",
                 }
+                return {
+                    output_key: err_obj,
+                    "payload": err_obj,
+                    "msg": {"payload": err_obj},
+                }
+            dry_run_obj = {
+                "url": url,
+                "method": method_upper,
+                "simulated": True,
+                "mocked": True,
+                "mode": "dry_run",
+                "status": "dry_run_success",
+                "headers": {k: "***" if any(w in k.lower() for w in ("auth", "token", "key", "secret")) else v for k, v in headers.items()},
+                "body": body,
+            }
+            return {
+                output_key: dry_run_obj,
+                "payload": dry_run_obj,
+                "msg": {
+                    "payload": dry_run_obj,
+                },
             }
         c = shared_async_client()
         try:
@@ -332,7 +343,11 @@ def webhook_out_factory(cfg: dict, ctx: CompileContext):
                 status="ok" if status_code < 400 else "error",
                 meta={"method": method, "url": url, "status_code": status_code, "auth_provider_id": provider_id},
             )
-            return {output_key: out}
+            return {
+                output_key: out,
+                "payload": out,
+                "msg": {"payload": out},
+            }
         except Exception as e:
             await AuditService.log(
                 tenant_id=ctx.tenant_id,
@@ -361,7 +376,12 @@ def tool_call_factory(cfg: dict, ctx: CompileContext):
         # code/sql/mcp all go through one path with one error contract.
         tool = ctx.tool_registry.get(tool_id)
         if tool is None:
-            return {output_key: {"error": f"tool {tool_id} not available or inactive"}}
+            err_obj = {"error": f"tool {tool_id} not available or inactive"}
+            return {
+                output_key: err_obj,
+                "payload": err_obj,
+                "msg": {"payload": err_obj},
+            }
 
         args: dict[str, Any] = {}
         for k, expr in input_mapping.items():
@@ -390,44 +410,53 @@ def tool_call_factory(cfg: dict, ctx: CompileContext):
             },
         )
         if not decision.allowed:
+            err_obj = {
+                "error": f"Tool execution policy violation: {decision.reason}",
+                "requires_approval": decision.requires_approval,
+                "tool_id": tool_id,
+            }
             return {
-                output_key: {
-                    "error": f"Tool execution policy violation: {decision.reason}",
-                    "requires_approval": decision.requires_approval,
-                    "tool_id": tool_id,
-                }
+                output_key: err_obj,
+                "payload": err_obj,
+                "msg": {"payload": err_obj},
             }
 
         if getattr(ctx, "dry_run", False):
             # Unknown side-effect classification must never be treated as safe by default
             if decision.effect == "unknown" or decision.risk == "unknown":
-                return {
-                    output_key: {
-                        "tool": tool_id,
-                        "ok": False,
-                        "error": f"Tool '{decision.tool_name or tool_id}' has unknown side-effect classification and cannot be executed or safely simulated in dry-run mode.",
-                        "unsupported_dry_run": True,
-                        "status": "unsupported_dry_run",
-                        "simulated": False,
-                        "mocked": False,
-                        "mode": "dry_run",
-                        "tool_id": tool_id,
-                        "effect": decision.effect,
-                        "risk": decision.risk,
-                    }
-                }
-            return {
-                output_key: {
-                    "mocked": True,
-                    "simulated": True,
-                    "tool_id": tool_id,
+                err_obj = {
+                    "tool": tool_id,
+                    "ok": False,
+                    "error": f"Tool '{decision.tool_name or tool_id}' has unknown side-effect classification and cannot be executed or safely simulated in dry-run mode.",
+                    "unsupported_dry_run": True,
+                    "status": "unsupported_dry_run",
+                    "simulated": False,
+                    "mocked": False,
                     "mode": "dry_run",
-                    "status": "dry_run_success",
-                    "arguments": args,
-                    "message": f"Safe test dry-run: {tool_id} was simulated without external side effects.",
+                    "tool_id": tool_id,
                     "effect": decision.effect,
                     "risk": decision.risk,
                 }
+                return {
+                    output_key: err_obj,
+                    "payload": err_obj,
+                    "msg": {"payload": err_obj},
+                }
+            sim_obj = {
+                "mocked": True,
+                "simulated": True,
+                "tool_id": tool_id,
+                "mode": "dry_run",
+                "status": "dry_run_success",
+                "arguments": args,
+                "message": f"Safe test dry-run: {tool_id} was simulated without external side effects.",
+                "effect": decision.effect,
+                "risk": decision.risk,
+            }
+            return {
+                output_key: sim_obj,
+                "payload": sim_obj,
+                "msg": {"payload": sim_obj},
             }
 
         try:

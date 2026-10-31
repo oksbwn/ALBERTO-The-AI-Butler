@@ -536,7 +536,7 @@ export function NodeConfigModal({
               </div>
 
               {/* Input Data View */}
-              <div className="scroll-y" style={{ flex: 1, padding: "8px 10px" }}>
+              <div className="scroll-y" style={{ flex: 1, padding: "8px 10px", display: "flex", flexDirection: "column", justifyContent: "flex-start", alignItems: "stretch" }}>
                 {inputTab === "tree" && (
                   <MessageTreeViewer
                     data={inputMessage}
@@ -622,7 +622,7 @@ export function NodeConfigModal({
               </div>
             </div>
 
-            <div className="scroll-y" style={{ flex: 1, padding: 18 }}>
+            <div className="scroll-y" style={{ flex: 1, padding: 18, display: "flex", flexDirection: "column", justifyContent: "flex-start", alignItems: "stretch" }}>
               {renderParameters()}
             </div>
           </div>
@@ -835,7 +835,7 @@ export function NodeConfigModal({
               )}
 
               {/* Output Data Content */}
-              <div className="scroll-y" style={{ flex: 1, padding: "8px 10px" }}>
+              <div className="scroll-y" style={{ flex: 1, padding: "8px 10px", display: "flex", flexDirection: "column", justifyContent: "flex-start", alignItems: "stretch" }}>
                 {outputMessage ? (
                   <>
                     {outputTab === "tree" && (
@@ -869,7 +869,7 @@ export function NodeConfigModal({
                     )}
                   </>
                 ) : (
-                  <div className="col gap2 center" style={{ height: "100%", padding: 30, textAlign: "center", color: "var(--fg-2)" }}>
+                  <div className="col gap2" style={{ paddingTop: 36, paddingBottom: 24, paddingInline: 16, textAlign: "center", color: "var(--fg-2)", alignItems: "center", justifyContent: "flex-start" }}>
                     <Icon name="play" size={24} style={{ opacity: 0.5 }} />
                     <span className="t-body-sm" style={{ fontWeight: 600 }}>No execution data yet.</span>
                     <span className="t-caption">
@@ -904,22 +904,8 @@ function MessageTreeViewer({
   expandAllSignal?: number;
   collapseAllSignal?: number;
 }) {
-  // Global set of expanded path keys for this tree
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => {
-    const initial = new Set<string>();
-    // Pre-expand depth 0 and 1
-    if (data && typeof data === "object") {
-      Object.keys(data).forEach((k) => {
-        initial.add(`${prefix}.${k}`);
-        if (data[k] && typeof data[k] === "object") {
-          Object.keys(data[k]).forEach((subK) => {
-            initial.add(`${prefix}.${k}.${subK}`);
-          });
-        }
-      });
-    }
-    return initial;
-  });
+  // Global set of expanded path keys for this tree (default collapsed)
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set<string>());
 
   // Expand all signal
   useEffect(() => {

@@ -470,6 +470,22 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
     if (n) clipboardRef.current = { nodeType: n.data.nodeType, config: JSON.parse(JSON.stringify(n.data.config || {})) };
   }, [selId]);
 
+  const getCanvasCenterPosition = useCallback((offsetIndex: number = 0) => {
+    if (typeof window !== "undefined") {
+      const canvasEl = document.querySelector(".forge-canvas") || document.querySelector(".react-flow");
+      if (canvasEl) {
+        const rect = canvasEl.getBoundingClientRect();
+        const center = screenToFlowPosition({
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        });
+        const stagger = (offsetIndex % 5) * 28;
+        return { x: Math.round(center.x - 90 + stagger), y: Math.round(center.y - 35 + stagger) };
+      }
+    }
+    return { x: 360 + (offsetIndex % 4) * 36, y: 140 + (offsetIndex % 4) * 36 };
+  }, [screenToFlowPosition]);
+
   const pasteNode = useCallback(() => {
     const clip = clipboardRef.current;
     if (!clip) return;
@@ -477,11 +493,11 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
     const cur = nodesRef.current;
     const id = newNodeId(clip.nodeType, cur.map((n) => n.id));
     const base = cur.find((n) => n.id === selId);
-    const pos = base ? { x: base.position.x + 44, y: base.position.y + 44 } : { x: 360 + (cur.length % 4) * 36, y: 160 + (cur.length % 4) * 36 };
+    const pos = base ? { x: base.position.x + 44, y: base.position.y + 44 } : getCanvasCenterPosition(cur.length);
     setNodes((nds) => [...nds, { id, type: "forge", position: pos, data: { nodeType: clip.nodeType, config: JSON.parse(JSON.stringify(clip.config)) } }]);
     setSelId(id);
     setDirty(true);
-  }, [selId, setNodes, snapshot]);
+  }, [selId, setNodes, snapshot, getCanvasCenterPosition]);
 
   const duplicateNode = useCallback(() => {
     const n = nodesRef.current.find((x) => x.id === selId);
@@ -678,18 +694,23 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
       : type === "llm" ? { model: "openai:gpt-4o-mini", prompt: "" }
       : type === "retrieval" ? { top_k: 4, include_docs: true, hybrid: false, rerank: false, include_qa: true, qa_threshold: 0.3, qa_top_k: 3, min_score: 0.18, announce_empty: true }
       : type === "classifier" ? { labels: ["question", "request", "complaint"], output_key: "intent" }
+      : type === "inject" ? { payload: "timestamp", payload_type: "timestamp", topic: "", repeat: 0 }
+      : type === "debug" ? { target: "payload", active: true }
+      : type === "tool_call" ? { output_key: "payload" }
+      : type === "webhook_out" ? { method: "POST", url: "", output_key: "payload" }
+      : type === "transform" ? { output_key: "payload" }
       : {};
-    const pos = position || { x: 360 + (n % 4) * 36, y: 140 + (n % 4) * 36 };
+    const pos = position || getCanvasCenterPosition(n);
     setNodes((nds) => [...nds, { id, type: "forge", position: pos, data: { nodeType: type, config: defConfig } }]);
     setSelId(id);
-  }, [nodes, setNodes, snapshot]);
+  }, [nodes, setNodes, snapshot, getCanvasCenterPosition]);
 
   const addToolNode = useCallback((tool: Tool, toolSetLabel?: string, position?: { x: number; y: number }) => {
     snapshot();
     setDirty(true);
     const id = newNodeId("tool_call", nodes.map((n) => n.id));
     const n = nodes.length;
-    const pos = position || { x: 360 + (n % 4) * 36, y: 140 + (n % 4) * 36 };
+    const pos = position || getCanvasCenterPosition(n);
     setNodes((nds) => [
       ...nds,
       {
@@ -707,7 +728,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
       },
     ]);
     setSelId(id);
-  }, [nodes, setNodes, snapshot]);
+  }, [nodes, setNodes, snapshot, getCanvasCenterPosition]);
 
   const onPaletteDragStart = useCallback((event: React.DragEvent, nodeType: string, toolData?: { tool_id: string; name: string }) => {
     event.dataTransfer.setData("application/reactflow", nodeType);

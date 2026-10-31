@@ -39,8 +39,17 @@ def llm_factory(config: dict, ctx: CompileContext):
         result = await runnable.ainvoke(input_msgs)
         if structured_schema:
             # Structured result is not a message; surface it on a conventional channel.
-            return {"structured_response": result}
-        return {"messages": [result]}
+            return {
+                "structured_response": result,
+                "payload": result,
+                "msg": {"payload": result},
+            }
+        content = getattr(result, "content", result)
+        return {
+            "messages": [result],
+            "payload": content,
+            "msg": {"payload": content},
+        }
 
     return _node
 
@@ -182,7 +191,12 @@ def classifier_factory(config: dict, ctx: CompileContext):
             chosen = _keyword_fallback(query) or _keyword_fallback(_recent_context(list(msgs)))
         if not chosen:
             return {}
-        return {output_key: chosen if multi else chosen[0]}
+        val = chosen if multi else chosen[0]
+        return {
+            output_key: val,
+            "payload": val,
+            "msg": {"payload": val},
+        }
 
     return _node
 
