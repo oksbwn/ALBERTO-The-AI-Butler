@@ -806,6 +806,11 @@ export const api = {
     json<Workflow>(`/v1/projects/${pid}/workflows/${wid}`, { method: "PATCH", body: JSON.stringify(body) }),
   saveCanvas: (pid: string, wid: string, canvas: Record<string, unknown>, executable: Record<string, unknown>) =>
     json<ValidateResult>(`/v1/projects/${pid}/workflows/${wid}/canvas`, { method: "PUT", body: JSON.stringify({ canvas, executable }) }),
+  executeStep: (pid: string, wid: string, body: { node_id: string; node_type: string; config?: Record<string, any>; input_state?: Record<string, any>; mode?: "dry_run" | "live" }) =>
+    json<{ ok: boolean; output: Record<string, any>; duration_ms: number; error?: string; mocked?: boolean; requires_approval?: boolean; unsupported_dry_run?: boolean }>(
+      `/v1/projects/${pid}/workflows/${wid}/step`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   publishWorkflow: (pid: string, wid: string) =>
     json<Workflow>(`/v1/projects/${pid}/workflows/${wid}/publish`, { method: "POST" }),
   deleteWorkflow: (pid: string, wid: string) =>

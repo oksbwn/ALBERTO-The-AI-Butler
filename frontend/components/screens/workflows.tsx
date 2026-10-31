@@ -12,6 +12,7 @@ import { ForgeNode, NodeTypesContext } from "../canvas/ForgeNode";
 import { AgentConfig, CollapsibleSection } from "../canvas/AgentConfig";
 import { EdgeOverlay } from "../canvas/EdgeOverlay";
 import { WorkflowTestPanel } from "../canvas/WorkflowTestPanel";
+import { NodeConfigModal } from "../canvas/NodeConfigModal";
 import { FieldsForm, ModelSelect, MultiSelectChips, VariablePicker, type FieldSpec, type UpstreamSource } from "../canvas/ConfigForm";
 import { Field, Toggle } from "../primitives";
 import { VersionHistory } from "../version-history";
@@ -1310,7 +1311,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
                 <WorkflowTestPanel
                   project={project}
                   workflow={wf}
-                  hideControls={true}
+                  hideControls={false}
                   running={running}
                   onRunningChange={setRunning}
                   onBeforeRun={save}
@@ -1438,91 +1439,38 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
           </div>
         </div>
 
-        {/* Node-RED style slide-in Editor Tray (opens on top of permanent sidebar) */}
+        {/* n8n-style 3-Panel Node Configuration Modal (Input Data | Parameters | Output Data) */}
         {editingNode && (
-          <div
-            className="col"
-            style={{
-              position: "absolute",
-              top: 0,
-              right: 0,
-              bottom: 0,
-              width: trayWidth,
-              maxWidth: "100%",
-              background: "var(--bg-1)",
-              borderLeft: "1px solid var(--line)",
-              boxShadow: "var(--sh-pop)",
-              zIndex: 70,
-              display: "flex",
-              flexDirection: "column",
+          <NodeConfigModal
+            node={editingNode}
+            nodes={nodes}
+            edges={edges}
+            project={project}
+            workflowId={wf?.id || ""}
+            tools={tools}
+            toolSets={toolSets}
+            agents={agents}
+            mcpServers={mcpServers}
+            components={components}
+            dynamic={{ kb_folders: kbFolders, qa_kinds: qaKinds }}
+            pinnedData={wf?.canvas?.pinned_data || {}}
+            onPinData={(nodeId, data) => {
+              if (!wf) return;
+              const nextPinned = { ...(wf.canvas?.pinned_data || {}) };
+              if (data) nextPinned[nodeId] = data;
+              else delete nextPinned[nodeId];
+              const nextCanvas = { ...(wf.canvas || {}), pinned_data: nextPinned };
+              setWf({ ...wf, canvas: nextCanvas });
+              setDirty(true);
             }}
-          >
-            {/* Draggable resize handle for Editor Tray */}
-            <div
-              onMouseDown={startTrayResize}
-              style={{
-                position: "absolute",
-                left: 0,
-                top: 0,
-                bottom: 0,
-                width: 6,
-                cursor: "col-resize",
-                zIndex: 80,
-              }}
-              title="Drag to resize editor tray"
-            />
-            {/* Tray Header */}
-            <div
-              className="row spread"
-              style={{
-                padding: "10px 14px",
-                borderBottom: "1px solid var(--line)",
-                background: "var(--bg-2)",
-                flex: "none",
-                alignItems: "center",
-              }}
-            >
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => setEditingNodeId(null)}
-              >
-                Cancel
-              </button>
-              <div className="row gap2" style={{ alignItems: "center", minWidth: 0 }}>
-                <Icon
-                  name={NODE_META[editingNode.data.nodeType]?.icon || "n_agent"}
-                  size={16}
-                  style={{ color: NODE_META[editingNode.data.nodeType]?.color || "var(--accent)" }}
-                />
-                <span className="t-h3 truncate" style={{ maxWidth: 200 }}>
-                  {editingNode.data.config?.name || NODE_META[editingNode.data.nodeType]?.label || editingNode.id}
-                </span>
-              </div>
-              <div className="row gap1" style={{ alignItems: "center" }}>
-                <button
-                  type="button"
-                  className="iconbtn"
-                  onClick={() => {
-                    deleteNode(editingNode.id);
-                    setEditingNodeId(null);
-                  }}
-                  title="Delete node"
-                >
-                  <Icon name="trash" size={14} />
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  onClick={() => setEditingNodeId(null)}
-                >
-                  Done
-                </button>
-              </div>
-            </div>
-
-            {/* Tray Body */}
-            <div className="scroll-y" style={{ flex: 1, padding: 16 }}>
+            onUpdateConfig={updateConfig}
+            onRenameNode={renameNodeId}
+            onDeleteNode={(id) => {
+              deleteNode(id);
+              setEditingNodeId(null);
+            }}
+            onClose={() => setEditingNodeId(null)}
+            renderParameters={() => (
               <NodeInspector
                 node={editingNode}
                 nodes={nodes}
@@ -1543,8 +1491,8 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
                 onRouterCaseRename={renameRouterCaseEdges}
                 onRouterCaseRemove={removeRouterCaseEdges}
               />
-            </div>
-          </div>
+            )}
+          />
         )}
       </div>
     </div>
