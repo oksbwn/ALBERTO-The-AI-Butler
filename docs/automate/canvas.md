@@ -2,8 +2,8 @@
 
 Implemented in `frontend/components/screens/workflows.tsx` using `@xyflow/react` (React Flow 12.3), the **Automate Canvas** provides an interactive drag-and-drop workspace for building and editing workflows.
 
-![Workflow Canvas](../assets/screenshots/automate/workflow-canvas.png){: .doc-screenshot }
-<p class="doc-caption">Figure 8.2: Visual canvas editor showing node palette, canvas viewport, and property inspector.</p>
+![Workflow Canvas](../assets/screenshots/automate/canvas_nodered_workflow.png){: .doc-screenshot }
+<p class="doc-caption">Figure 8.2: Visual canvas editor showing compact Node-RED cards, explicit input/output ports, and real-time debug sidebar.</p>
 
 ---
 
@@ -18,54 +18,51 @@ The workspace adopts an enterprise Node-RED visual authoring layout:
     - *Logic & Routing:* Condition / Branch, Switch (`msg.payload` routing), Merge, Delay.
     - *Data & Transform:* Change (`msg.payload` rules), Template Render, JMESPath Transform, Code Snippet.
     - *Output & Diagnostics:* Debug Node (`msg.payload` inspector).
-2. **Central Viewport:** Infinite canvas with panning, zooming, minimap, background grid, multi-node selection, and live port-to-port wire rendering (`EdgeOverlay` connects exact source dot center to target dot center).
+2. **Central Viewport:** Infinite canvas with panning, zooming, minimap, background grid, multi-node selection, and live port-to-port wire rendering (`EdgeOverlay` connects exact source dot center to target dot center using custom SVG bezier paths inside React Flow's `ViewportPortal`).
 3. **Permanent Right Sidebar (`Info` & `Debug` Tabs):**
-    - **Info Tab:** Contextual node documentation, help notes, and workflow properties.
-    - **Debug Tab:** Real-time stream of debug messages, execution events, token meters, and node step outputs. Includes message clear button and active run stop controls.
-    - **Draggable Width Resizing:** Left border provides a draggable resize handle (`col-resize`) to adjust sidebar width smoothly.
-4. **Slide-in Editor Tray (`RED.tray`):**
-    - Double-clicking or selecting a node opens the configuration panel as an Editor Tray that slides in over the permanent sidebar.
-    - Includes `Cancel`, `Done`, and `Delete` action header controls.
-    - Independently resizable via draggable left border handle.
+    - **Info Tab:** Workflow metadata, active revision, description, and export/import options.
+    - **Debug Tab:** Real-time debug stream capturing all emitted `msg` frames with secret redaction and hierarchical JSON property trees.
+4. **Deploy & Save Controls:** Split deployment button supporting full activation or draft persistence with validation checks.
 
 ---
 
-## 2. Execution & Flow Triggering
+## 2. n8n-Inspired 3-Panel Node Configuration Modal
 
-- **Canvas Inject Trigger:** Flows are executed directly from the canvas via the button on `Inject` nodes with instant one-click execution.
-- **No Duplicate Run Buttons:** Eliminates redundant top-bar run/reset buttons, matching the streamlined Node-RED design.
-- **Unified Save & Deploy:** Top action bar features a consolidated Deploy / Save dropdown button.
+Clicking any canvas node opens the comprehensive 3-panel configuration dialog (`NodeConfigModal.tsx`):
 
----
+![3-Panel Inspector](../assets/screenshots/automate/canvas_inspector.png){: .doc-screenshot }
+<p class="doc-caption">Figure 8.3: 3-panel modal showing Input Data tree, Parameters form, and Output Data testing panel with Safe (Dry Run) controls.</p>
 
-## 3. Connections & Data Flow
-
-- **Handles & Wire Routing:** Nodes expose typed input ports (left) and output ports (right). Bézier connecting wires track live handle bounds for pixel-accurate dot-to-dot routing.
-- **Edge Data Propagation:** Data flows along wires as structured JSON envelopes:
-  ```json
-  {
-    "msg": "Incoming message",
-    "payload": { "device": "sensor_01", "reading": 23.5 },
-    "topic": "telemetry/temperature"
-  }
-  ```
-- **Type Compatibility Checks:** The canvas validates port connections and flags incompatible topologies.
-
----
-
-## 4. Graph Compilation to LangGraph
-
-When clicking **Deploy / Save**, `frontend/lib/graph.ts` compiles the visual layout into an executable LangGraph specification:
-
-```typescript
-export function canvasToExecutable(nodes: FlowNode[], edges: FlowEdge[], meta: any): ExecutableGraph {
-  return {
-    id: meta.id,
-    nodes: nodes.map(compileNode),
-    edges: edges.map(compileEdge),
-    entry_point: findTriggerNodeId(nodes),
-  };
-}
+```
++-------------------+--------------------------+---------------------+
+|    INPUT DATA     |        PARAMETERS        |     OUTPUT DATA     |
+|                   |                          |                     |
+| Upstream outputs  | Node-specific form       | Single-step test    |
+| JSON tree & drag  | Dynamic variable pickers | Safe (Dry-Run)/Live |
+| Pinned test data  | Expression editor        | Execution metrics   |
+| Combined branches | Save / Done controls     | Output verification |
++-------------------+--------------------------+---------------------+
 ```
 
-The resulting executable definition is validated by the backend (`backend/alberto/services/validation.py`) to verify that all upstream variables resolve and no illegal cycles exist.
+### Key Capabilities:
+- **Input Data Panel:** Inspects upstream incoming `msg` properties. Allows pinning test payloads across sessions.
+- **Combined Branches View:** When multiple incoming edges converge, displays an aggregated view across all upstream parent branches.
+- **Parameters Panel:** Parameter form with upstream variable drag-and-drop and syntax highlighting.
+- **Output Data & Step Testing:** Test individual nodes interactively via `POST /v1/projects/{pid}/workflows/{wid}/step`.
+- **Keyboard Dismissal & Accessibility:** Standard `Escape` key handler and `Done` confirmation button cleanly close dialogs without obscuring canvas interactions.
+
+---
+
+## 3. Step Execution Security & Anti-Tampering
+
+Interactive step testing is strictly mediated by the backend server (`backend/alberto/routers/workflows.py`):
+
+1. **Server-Authoritative Definition:** The server validates node identity against the saved workflow definition in `wf.executable` and `wf.canvas`.
+2. **Node Type Anti-Spoofing:** Attempts to test a node using a spoofed `node_type` (e.g. executing an `inject` node as `tool_call`) are rejected with `HTTP 422`.
+3. **Tool & Parameter Anti-Tampering:**
+    - For `tool_call` nodes, `tool_id` and `auth_provider_id` cannot be substituted or swapped.
+    - For `agent` nodes, `agent_id` cannot be replaced, and tools/toolsets/MCP servers cannot be injected beyond saved grants.
+    - For `subworkflow` nodes, `subworkflow_id` cannot be modified.
+    - For `webhook_out` nodes, destination URLs are pre-validated against Server-Side Request Forgery (SSRF) rules.
+4. **Permission Stripping:** Caller-supplied `approved`, `human_approved`, or `admin` flags are stripped from input payloads.
+5. **Stale Revision Conflict Detection:** Requests carrying an outdated `active_version` return `HTTP 409 Conflict`.
