@@ -434,7 +434,11 @@ def tool_call_factory(cfg: dict, ctx: CompileContext):
             out = await tool.ainvoke(args, config)
         except Exception as e:  # noqa: BLE001 - surface tool failure as a structured result
             out = {"error": str(e)}
-        return {output_key: out}
+        return {
+            output_key: out,
+            "payload": out,
+            "msg": {"payload": out},
+        }
 
     return _node
 

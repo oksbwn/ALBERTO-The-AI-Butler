@@ -2213,3 +2213,56 @@ async def test_step_endpoint_tampering_and_spoofing_prevented():
             )
         assert exc_info.value.status_code == 422
         assert "Tool tampering detected" in str(exc_info.value.detail)
+
+
+
+@pytest.mark.asyncio
+async def test_tool_call_output_synchronization_to_msg_payload():
+    """Verify tool_call node synchronizes output to msg.payload and payload for downstream flow nodes."""
+    import uuid
+    from alberto.db.base import SessionLocal
+    from alberto.models import Tenant, Project
+    from alberto.services.tools import ToolService
+    from alberto.nodes.data import tool_call_factory
+    from alberto.engine.context import CompileContext
+
+    suffix = uuid.uuid4().hex[:8]
+    async with SessionLocal() as s:
+        tenant = Tenant(name=f"SyncTenant_{suffix}")
+        s.add(tenant)
+        await s.commit()
+        await s.refresh(tenant)
+
+        proj = Project(tenant_id=tenant.id, name=f"SyncProj_{suffix}", slug=f"sync-proj-{suffix}")
+        s.add(proj)
+        await s.commit()
+        await s.refresh(proj)
+
+        tool = await ToolService.create(
+            s,
+            tenant.id,
+            proj.id,
+            name="timestamp_sync_tool",
+            kind="builtin",
+            config={"effect": "read", "risk": "low"},
+        )
+
+    class TimestampTool:
+        async def ainvoke(self, args, config=None):
+            return "2026-10-31T08:25:08.475200+00:00"
+
+    ctx = CompileContext(
+        tenant_id=tenant.id,
+        project_id=proj.id,
+        workflow_id="wf_1",
+        workflow_def={"nodes": [{"type": "tool_call", "config": {"tool_id": tool.id}}]},
+        tool_registry={tool.id: TimestampTool()},
+    )
+    ctx.dry_run = False
+
+    node_fn = tool_call_factory({"tool_id": tool.id}, ctx)
+    res = await node_fn({"msg": {"payload": "trigger"}})
+
+    assert res["tool_result"] == "2026-10-31T08:25:08.475200+00:00"
+    assert res["payload"] == "2026-10-31T08:25:08.475200+00:00"
+    assert res["msg"]["payload"] == "2026-10-31T08:25:08.475200+00:00"
