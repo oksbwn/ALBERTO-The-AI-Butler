@@ -46,3 +46,8 @@ Thumbs.db
 test-results/
 playwright-report/
 site/
+
+# --- Test & tool caches ---
+.vite/
+.github/context-mode/
+.context-mode/
