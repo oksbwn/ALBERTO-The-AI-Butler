@@ -382,5 +382,50 @@ test.describe("Node-RED-Inspired Low-Code Workflow Evolution E2E", () => {
       }
     }
   });
+
+  test("verifies 3-panel node modal with collapsible input/output panels and expandable message tree", async ({ page }: { page: Page }) => {
+    // 1. Double click inject node on canvas or use edit button to open modal
+    const injectNode = page.locator('.react-flow__node:has-text("Inject")').first();
+    await injectNode.dblclick();
+    await page.waitForTimeout(400);
+
+    const inputDataHeading = page.locator('text="INPUT DATA"').first();
+    if (!await inputDataHeading.isVisible().catch(() => false)) {
+      const editBtn = page.locator('button:has-text("Edit Node Configuration")').first();
+      await editBtn.click({ force: true });
+    }
+
+    // 2. Verify modal open with 3 panels: INPUT DATA, PARAMETERS, OUTPUT DATA
+    await expect(page.locator('text="INPUT DATA"').first()).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text="PARAMETERS"').first()).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text="OUTPUT DATA"').first()).toBeVisible({ timeout: 5000 });
+
+    // 3. Verify tree items have expand/collapse controls
+    const expandAllBtn = page.locator('button[title="Expand all tree nodes"]').first();
+    await expect(expandAllBtn).toBeVisible();
+    await expandAllBtn.click();
+    await page.waitForTimeout(200);
+
+    const collapseAllBtn = page.locator('button[title="Collapse all tree nodes"]').first();
+    await expect(collapseAllBtn).toBeVisible();
+    await collapseAllBtn.click();
+    await page.waitForTimeout(200);
+
+    // 4. Verify panel collapse
+    const collapseInputBtn = page.locator('button[title="Collapse Input Data panel"]').first();
+    await expect(collapseInputBtn).toBeVisible();
+    await collapseInputBtn.click();
+
+    // Verify collapsed input rail is visible and can be expanded back
+    const expandInputBtn = page.locator('button[title="Expand Input Data panel"]').first();
+    await expect(expandInputBtn).toBeVisible();
+    await expandInputBtn.click();
+    await expect(page.locator('text="INPUT DATA"').first()).toBeVisible();
+
+    // 5. Close modal via Done button
+    const doneBtn = page.locator('button:has-text("Done")').first();
+    await doneBtn.click();
+    await expect(page.locator('text="PARAMETERS"').first()).not.toBeVisible();
+  });
 });
 

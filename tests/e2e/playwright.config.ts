@@ -28,6 +28,8 @@ const isCI = !!process.env.CI;
 
 export default defineConfig({
   testDir: __dirname,
+  testMatch: '**/*.spec.ts',
+  testIgnore: ['**/frontend/**'],
   timeout: 90000,
   expect: {
     timeout: 15000,
