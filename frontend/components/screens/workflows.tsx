@@ -374,7 +374,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
   // Hover help for palette items - rendered as a fixed-position card so the palette's
   // own scroll container can't clip it. Positioned from the hovered item's rect (the
   // palette's viewport offset varies with the rail/sidebar, so no hardcoded left).
-  const [paletteTip, setPaletteTip] = useState<{ type: string; top: number; left: number } | null>(null);
+  const [paletteTip, setPaletteTip] = useState<{ type: string; title?: string; desc?: string; top: number; left: number } | null>(null);
   const { fitView, screenToFlowPosition } = useReactFlow();
   const registryReady = Object.keys(registry).length > 0;
 
@@ -684,8 +684,36 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
     setSelId(id);
   }, [nodes, setNodes, snapshot]);
 
-  const onPaletteDragStart = useCallback((event: React.DragEvent, nodeType: string) => {
+  const addToolNode = useCallback((tool: Tool, toolSetLabel?: string, position?: { x: number; y: number }) => {
+    snapshot();
+    setDirty(true);
+    const id = newNodeId("tool_call", nodes.map((n) => n.id));
+    const n = nodes.length;
+    const pos = position || { x: 360 + (n % 4) * 36, y: 140 + (n % 4) * 36 };
+    setNodes((nds) => [
+      ...nds,
+      {
+        id,
+        type: "forge",
+        position: pos,
+        data: {
+          nodeType: "tool_call",
+          config: {
+            name: tool.name,
+            tool_id: tool.id,
+            output_key: "payload",
+          },
+        },
+      },
+    ]);
+    setSelId(id);
+  }, [nodes, setNodes, snapshot]);
+
+  const onPaletteDragStart = useCallback((event: React.DragEvent, nodeType: string, toolData?: { tool_id: string; name: string }) => {
     event.dataTransfer.setData("application/reactflow", nodeType);
+    if (toolData) {
+      event.dataTransfer.setData("application/alberto-tool", JSON.stringify(toolData));
+    }
     event.dataTransfer.effectAllowed = "move";
     setPaletteTip(null);
   }, []);
@@ -706,9 +734,22 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
         y: event.clientY,
       });
 
+      const toolJson = event.dataTransfer.getData("application/alberto-tool");
+      if (type === "tool_call" && toolJson) {
+        try {
+          const toolData = JSON.parse(toolJson);
+          if (toolData?.tool_id) {
+            addToolNode({ id: toolData.tool_id, name: toolData.name } as any, undefined, position);
+            return;
+          }
+        } catch {
+          // fallback to generic addNode
+        }
+      }
+
       addNode(type, position);
     },
-    [screenToFlowPosition, addNode]
+    [screenToFlowPosition, addNode, addToolNode]
   );
 
   const updateConfig = useCallback((cfg: Record<string, any>) => {
@@ -954,6 +995,40 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
     return groups;
   }, [registry]);
 
+  const integrationTools = useMemo(() => {
+    const byId = new Map(tools.map((t) => [t.id, t]));
+    const groups: { group: string; icon?: string | null; tools: Tool[] }[] = [];
+    const grouped = new Set<string>();
+
+    for (const ts of toolSets) {
+      const members = (ts.tool_ids || []).map((id) => byId.get(id)).filter(Boolean) as Tool[];
+      if (!members.length) continue;
+      members.forEach((t) => grouped.add(t.id));
+      groups.push({ group: ts.name, icon: ts.icon, tools: members });
+    }
+    const loose = tools.filter((t) => !grouped.has(t.id));
+    if (loose.length) {
+      groups.push({ group: "Custom & Builtin Tools", tools: loose });
+    }
+    return groups;
+  }, [tools, toolSets]);
+
+  const filteredIntegrationGroups = useMemo(() => {
+    const q = paletteQuery.trim().toLowerCase();
+    if (!q) return integrationTools;
+    return integrationTools
+      .map((g) => ({
+        ...g,
+        tools: g.tools.filter(
+          (t) =>
+            t.name.toLowerCase().includes(q) ||
+            g.group.toLowerCase().includes(q) ||
+            (t.config?.description || "").toLowerCase().includes(q)
+        ),
+      }))
+      .filter((g) => g.tools.length > 0);
+  }, [integrationTools, paletteQuery]);
+
   return (
     <div className="col" style={{ flex: 1, minHeight: 0 }}>
       {/* toolbar */}
@@ -1147,14 +1222,85 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
             );
           })}
 
-          {/* Connector actions are deliberately NOT listed here. They are ordinary tools, and
-              the palette's job is NODE TYPES - one Tool Call node reaches any of them through
-              its picker. Enumerating every installed action turned a fixed list into one that
-              grew with each connector, pushing the actual node types off the screen. */}
+          {/* Installed Integrations & Tools */}
+          {filteredIntegrationGroups.length > 0 && (
+            <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--line)" }}>
+              <div className="row spread" style={{ marginBottom: 6 }}>
+                <span className="t-micro" style={{ letterSpacing: "0.5px" }}>INTEGRATIONS & TOOLS</span>
+                <span className="typechip" style={{ fontSize: 9 }}>
+                  {filteredIntegrationGroups.reduce((acc, g) => acc + g.tools.length, 0)}
+                </span>
+              </div>
+              {filteredIntegrationGroups.map((g) => (
+                <div key={g.group} style={{ marginBottom: 10 }}>
+                  <div className="t-caption fg-2" style={{ fontWeight: 600, fontSize: 10.5, marginBottom: 4 }}>
+                    {g.group}
+                  </div>
+                  <div className="col gap1">
+                    {g.tools.map((t) => (
+                      <button
+                        key={t.id}
+                        className="row gap2"
+                        draggable
+                        onDragStart={(e) => onPaletteDragStart(e, "tool_call", { tool_id: t.id, name: t.name })}
+                        onClick={() => addToolNode(t, g.group)}
+                        style={{
+                          padding: "6px 8px",
+                          borderRadius: 6,
+                          border: "1px solid var(--line)",
+                          background: "var(--bg-2)",
+                          cursor: "grab",
+                          textAlign: "left",
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.borderColor = "var(--signal)";
+                          const r = e.currentTarget.getBoundingClientRect();
+                          setPaletteTip({
+                            type: "tool_call",
+                            title: `${g.group}: ${t.name}`,
+                            desc: t.config?.description || `Invoke ${t.name} from ${g.group}`,
+                            top: r.top,
+                            left: r.right + 10,
+                          });
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.borderColor = "var(--line)";
+                          setPaletteTip(null);
+                        }}
+                      >
+                        <Icon name="n_tool" size={13} style={{ color: "var(--signal)", flexShrink: 0 }} />
+                        <span className="t-body-sm truncate" style={{ fontSize: 11.5 }} title={t.name}>
+                          {t.name}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* palette hover help card */}
-        {paletteTip && NODE_HELP[paletteTip.type] && (() => {
+        {paletteTip && (() => {
+          if (paletteTip.title) {
+            return (
+              <div className="card" style={{
+                position: "fixed", left: paletteTip.left, top: Math.max(60, Math.min(paletteTip.top, (typeof window !== "undefined" ? window.innerHeight : 800) - 210)),
+                width: 290, zIndex: 90, pointerEvents: "none", padding: 12, boxShadow: "var(--sh-pop)",
+              }}>
+                <div className="row gap2" style={{ marginBottom: 6 }}>
+                  <Icon name="n_tool" size={15} style={{ color: "var(--signal)" }} />
+                  <span className="t-h3">{paletteTip.title}</span>
+                  <span className="typechip">tool</span>
+                </div>
+                {paletteTip.desc && (
+                  <div className="t-body-sm fg-1" style={{ lineHeight: "19px" }}>{paletteTip.desc}</div>
+                )}
+              </div>
+            );
+          }
+          if (!NODE_HELP[paletteTip.type]) return null;
           const help = NODE_HELP[paletteTip.type];
           const meta = NODE_META[paletteTip.type] || { icon: "n_agent", color: "var(--fg-2)", label: paletteTip.type };
           return (

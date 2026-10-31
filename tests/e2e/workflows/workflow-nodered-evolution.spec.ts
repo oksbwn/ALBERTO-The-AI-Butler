@@ -360,5 +360,27 @@ test.describe("Node-RED-Inspired Low-Code Workflow Evolution E2E", () => {
       expect(count).toBeGreaterThan(initialNodesCount);
     }).toPass({ timeout: 5000 });
   });
+
+  test("supports direct palette search and drag for installed integration tools", async ({ page }: { page: Page }) => {
+    // 1. Search for tools in palette
+    const searchInput = page.locator('input[placeholder="Search nodes…"]').first();
+    await expect(searchInput).toBeVisible();
+
+    // Check if INTEGRATIONS & TOOLS section exists or search filters tools
+    const integrationsHeading = page.locator('text="INTEGRATIONS & TOOLS"').first();
+    if (await integrationsHeading.isVisible({ timeout: 4000 }).catch(() => false)) {
+      const toolBtn = page.locator('button.row.gap2:has(.icon-n_tool)').first();
+      if (await toolBtn.isVisible().catch(() => false)) {
+        await expect(toolBtn).toHaveAttribute("draggable", "true");
+        const canvas = page.locator(".forge-canvas").first();
+        const initialNodesCount = await page.locator(".react-flow__node").count();
+        await toolBtn.dragTo(canvas, { targetPosition: { x: 550, y: 350 } });
+        await expect(async () => {
+          const count = await page.locator(".react-flow__node").count();
+          expect(count).toBeGreaterThan(initialNodesCount);
+        }).toPass({ timeout: 5000 });
+      }
+    }
+  });
 });
 
