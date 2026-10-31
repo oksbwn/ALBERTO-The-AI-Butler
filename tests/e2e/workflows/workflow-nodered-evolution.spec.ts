@@ -337,5 +337,28 @@ test.describe("Node-RED-Inspired Low-Code Workflow Evolution E2E", () => {
     const brainDir = "C:/Users/oksbw/.gemini/antigravity-ide/brain/02fc7382-d55d-4880-95ea-4a79d9352281";
     await page.screenshot({ path: `${brainDir}/canvas_butler_meeting_workflow.png` });
   });
+
+  test("supports drag and drop of node from palette onto canvas", async ({ page }: { page: Page }) => {
+    // 1. Locate palette item for 'Delay'
+    const paletteItem = page.locator('button.row.gap2:has-text("Delay")').first();
+    await expect(paletteItem).toBeVisible();
+    await expect(paletteItem).toHaveAttribute("draggable", "true");
+
+    const canvas = page.locator(".forge-canvas").first();
+    await expect(canvas).toBeVisible();
+
+    const initialNodesCount = await page.locator(".react-flow__node").count();
+
+    // 2. Drag palette item and drop onto canvas
+    await paletteItem.dragTo(canvas, {
+      targetPosition: { x: 500, y: 300 },
+    });
+
+    // 3. Verify a new node is created on canvas
+    await expect(async () => {
+      const count = await page.locator(".react-flow__node").count();
+      expect(count).toBeGreaterThan(initialNodesCount);
+    }).toPass({ timeout: 5000 });
+  });
 });
 

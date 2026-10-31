@@ -375,7 +375,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
   // own scroll container can't clip it. Positioned from the hovered item's rect (the
   // palette's viewport offset varies with the rail/sidebar, so no hardcoded left).
   const [paletteTip, setPaletteTip] = useState<{ type: string; top: number; left: number } | null>(null);
-  const { fitView } = useReactFlow();
+  const { fitView, screenToFlowPosition } = useReactFlow();
   const registryReady = Object.keys(registry).length > 0;
 
   useEffect(() => {
@@ -667,7 +667,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
     ));
   }, [isValidConnection, nodes, registry, setEdges, setNodes, snapshot]);
 
-  const addNode = useCallback((type: string) => {
+  const addNode = useCallback((type: string, position?: { x: number; y: number }) => {
     snapshot();
     setDirty(true);
     const id = newNodeId(type, nodes.map((n) => n.id));
@@ -679,9 +679,37 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
       : type === "retrieval" ? { top_k: 4, include_docs: true, hybrid: false, rerank: false, include_qa: true, qa_threshold: 0.3, qa_top_k: 3, min_score: 0.18, announce_empty: true }
       : type === "classifier" ? { labels: ["question", "request", "complaint"], output_key: "intent" }
       : {};
-    setNodes((nds) => [...nds, { id, type: "forge", position: { x: 360 + (n % 4) * 36, y: 140 + (n % 4) * 36 }, data: { nodeType: type, config: defConfig } }]);
+    const pos = position || { x: 360 + (n % 4) * 36, y: 140 + (n % 4) * 36 };
+    setNodes((nds) => [...nds, { id, type: "forge", position: pos, data: { nodeType: type, config: defConfig } }]);
     setSelId(id);
   }, [nodes, setNodes, snapshot]);
+
+  const onPaletteDragStart = useCallback((event: React.DragEvent, nodeType: string) => {
+    event.dataTransfer.setData("application/reactflow", nodeType);
+    event.dataTransfer.effectAllowed = "move";
+    setPaletteTip(null);
+  }, []);
+
+  const onDragOver = useCallback((event: React.DragEvent) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const onDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault();
+      const type = event.dataTransfer.getData("application/reactflow");
+      if (!type) return;
+
+      const position = screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+
+      addNode(type, position);
+    },
+    [screenToFlowPosition, addNode]
+  );
 
   const updateConfig = useCallback((cfg: Record<string, any>) => {
     if (!selId) return;
@@ -1097,7 +1125,9 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
                     const meta = NODE_META[it.type] || { icon: "n_agent", color: "var(--fg-2)" };
                     return (
                       <button key={it.type} className="row gap2" onClick={() => addNode(it.type)}
-                        style={{ padding: "7px 8px", borderRadius: 7, border: "1px solid var(--line)", background: "var(--bg-2)", cursor: "pointer", textAlign: "left" }}
+                        draggable
+                        onDragStart={(e) => onPaletteDragStart(e, it.type)}
+                        style={{ padding: "7px 8px", borderRadius: 7, border: "1px solid var(--line)", background: "var(--bg-2)", cursor: "grab", textAlign: "left" }}
                         onMouseEnter={(e) => {
                           e.currentTarget.style.borderColor = meta.color;
                           const r = e.currentTarget.getBoundingClientRect();
@@ -1147,7 +1177,7 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
         })()}
 
         {/* canvas */}
-        <div className="grow forge-canvas" style={{ position: "relative", minWidth: 0, height: "100%" }}>
+        <div className="grow forge-canvas" style={{ position: "relative", minWidth: 0, height: "100%" }} onDragOver={onDragOver} onDrop={onDrop}>
           {/* Hide React Flow's native edge layer - we draw connections via EdgeOverlay. */}
           <style>{`.forge-canvas .react-flow__edge { display: none; }`}</style>
           <NodeTypesContext.Provider value={registry}>
@@ -1160,6 +1190,8 @@ function CanvasInner({ project, workflowId, onWorkflowChange, onBack, onRun, onR
                 nodes={flowNodes} edges={edges} nodeTypes={nodeTypes}
                 onNodesChange={onNodesChangeSynced} onEdgesChange={onEdgesChangeSynced} onConnect={onConnect}
                 onNodeDragStart={() => snapshot()}
+                onDragOver={onDragOver}
+                onDrop={onDrop}
                 isValidConnection={isValidConnection as any}
                 onNodeClick={(_, n) => {
                   setSelId(n.id);
