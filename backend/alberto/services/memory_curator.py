@@ -317,7 +317,17 @@ Remember: Output strictly valid JSON conforming to the schema. Preserve user tec
                     return res
                 if isinstance(res, dict):
                     return MemoryCuratorOutput.model_validate(res)
-                raw_text = getattr(res, "content", str(res))
+                if res is None:
+                    # Model did not trigger tool call or returned None; fall back to plain prompt
+                    logger.debug("Structured model invocation returned None; falling back to direct prompt")
+                    response = await model.ainvoke(messages)
+                    raw_text = response.content if hasattr(response, "content") else str(response)
+                    if isinstance(raw_text, list):
+                        raw_text = "".join(str(p) for p in raw_text)
+                    return cls._parse_output(raw_text)
+                raw_text = getattr(res, "content", None)
+                if raw_text is None:
+                    raw_text = str(res)
                 return cls._parse_output(raw_text)
             else:
                 response = await model.ainvoke(messages)
@@ -333,14 +343,26 @@ Remember: Output strictly valid JSON conforming to the schema. Preserve user tec
             )
 
     @classmethod
-    def _parse_output(cls, raw_text: str) -> MemoryCuratorOutput:
+    def _parse_output(cls, raw_text: Any) -> MemoryCuratorOutput:
         """Robustly parse and validate JSON from model output."""
+        if raw_text is None:
+            return MemoryCuratorOutput(should_learn=False)
+        if not isinstance(raw_text, str):
+            raw_text = str(raw_text)
         cleaned = raw_text.strip()
+        if not cleaned or cleaned.lower() in ("none", "null", ""):
+            return MemoryCuratorOutput(should_learn=False)
+
         # Handle markdown ```json code blocks
         if "```" in cleaned:
             match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
             if match:
                 cleaned = match.group(1).strip()
+        elif "{" in cleaned and "}" in cleaned:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                cleaned = cleaned[start : end + 1].strip()
 
         try:
             data = json.loads(cleaned)
@@ -461,13 +483,24 @@ Output strictly a JSON list of objects matching the schema:
             return []
 
     @classmethod
-    def _parse_suggestions(cls, raw_text: str) -> list[CuratorAdvisorySuggestion]:
+    def _parse_suggestions(cls, raw_text: Any) -> list[CuratorAdvisorySuggestion]:
         """Robustly parse advisory suggestions from model output."""
+        if raw_text is None:
+            return []
+        if not isinstance(raw_text, str):
+            raw_text = str(raw_text)
         cleaned = raw_text.strip()
+        if not cleaned or cleaned.lower() in ("none", "null", ""):
+            return []
         if "```" in cleaned:
             match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
             if match:
                 cleaned = match.group(1).strip()
+        elif "[" in cleaned and "]" in cleaned:
+            start = cleaned.find("[")
+            end = cleaned.rfind("]")
+            if start != -1 and end != -1 and end > start:
+                cleaned = cleaned[start : end + 1].strip()
         try:
             data = json.loads(cleaned)
             if isinstance(data, dict) and "suggestions" in data:
@@ -482,6 +515,9 @@ Output strictly a JSON list of objects matching the schema:
                     logger.debug("Skipping invalid suggestion item: %s", ve)
             return results
         except Exception as e:
+            if not ("[" in raw_text and "]" in raw_text):
+                logger.debug("Review suggestions response contained no JSON array: %s", raw_text[:120])
+                return []
             logger.warning("Failed to parse review suggestions JSON: %s (Raw: %s)", e, raw_text[:200])
             return []
 

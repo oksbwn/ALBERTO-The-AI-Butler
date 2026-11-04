@@ -392,3 +392,51 @@ async def test_extract_does_not_commit_session(sample_proj: Project):
         )
 
         mock_session.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_structured_none_fallback_and_none_raw_handling(sample_proj: Project):
+    """When model or with_structured_output returns None, safely handle without JSONDecodeError."""
+    # 1. Direct _parse_output handles None and "None" cleanly without error
+    out1 = MemoryCuratorService._parse_output(None)
+    assert out1.should_learn is False
+    assert out1.extraction_error is None
+
+    out2 = MemoryCuratorService._parse_output("None")
+    assert out2.should_learn is False
+    assert out2.extraction_error is None
+
+    out3 = MemoryCuratorService._parse_output("")
+    assert out3.should_learn is False
+    assert out3.extraction_error is None
+
+    # 2. When structured_model returns None, fallback to plain model ainvoke
+    mock_model = MagicMock(spec=["ainvoke", "with_structured_output", "supports_tools"])
+    mock_model.supports_tools = True
+    mock_structured = MagicMock()
+    mock_structured.ainvoke = AsyncMock(return_value=None)
+    mock_model.with_structured_output = MagicMock(return_value=mock_structured)
+
+    valid_json = json.dumps({
+        "schema_version": 1,
+        "should_learn": False,
+        "memories": [],
+        "entities": [],
+        "relationships": [],
+        "conflicts": [],
+    })
+    mock_model.ainvoke = AsyncMock(return_value=MagicMock(content=valid_json))
+
+    async with SessionLocal() as session:
+        with patch.object(MemoryCuratorService, "get_curator_model", return_value=(mock_model, "test-model")):
+            result = await MemoryCuratorService.extract(
+                session=session,
+                tenant_id=sample_proj.tenant_id,
+                project_id=sample_proj.id,
+                user_message="I like python.",
+                ai_response="Nice.",
+            )
+            assert result.should_learn is False
+            assert result.extraction_error is None
+            mock_model.ainvoke.assert_awaited_once()
+

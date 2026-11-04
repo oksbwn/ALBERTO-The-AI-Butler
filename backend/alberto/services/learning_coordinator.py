@@ -434,6 +434,7 @@ class LearningCoordinator:
                 candidate_entities=curator_output.entities,
                 candidate_relationships=curator_output.relationships,
                 source_ref=f"turn:{source_event_id}",
+                session=session,
             )
             if graph_val["requires_review"]:
                 requires_review = True

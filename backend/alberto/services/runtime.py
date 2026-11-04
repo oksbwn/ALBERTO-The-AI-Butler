@@ -96,11 +96,16 @@ async def build_compile_context(
                 log.warning("Server key %s unresolved: %s", s.id, e)
 
     default_model_id = pconfig.get("default_model_id") or tenant_settings.get("default_model_id")
+    if not default_model_id and reg_rows:
+        enabled_models = [r for r in reg_rows if getattr(r, "enabled", True)]
+        if enabled_models:
+            default_model_id = enabled_models[0].id
+
     explicit = default_model_id or pconfig.get("default_model") or tenant_settings.get("default_model")
     if explicit and not str(explicit).startswith("fake"):
         default_model = explicit
     else:
-        default_model = explicit or settings.default_model
+        default_model = explicit or (reg_rows[0].id if reg_rows else settings.default_model)
 
     ctx = CompileContext(
         tenant_id=tenant_id,

@@ -152,8 +152,8 @@ DEFAULT_RELATIONSHIP_TYPES: list[dict[str, Any]] = [
     {
         "canonical_key": "RUNS",
         "description": "Host, device, or platform executes a software system, service, or model.",
-        "allowed_source_types": ["device", "platform", "modelrunner"],
-        "allowed_target_types": ["operating_system", "application", "model", "service"],
+        "allowed_source_types": ["device", "hardware", "host", "platform", "modelrunner"],
+        "allowed_target_types": ["operating_system", "application", "model", "service", "framework", "software"],
         "direction_semantics": "source_to_target",
         "aliases": ["EXECUTES"],
     },
@@ -308,6 +308,7 @@ DEFAULT_ENTITY_MAPPINGS: dict[str, str] = {
     "transformers": "framework",
     "langchain": "framework",
     "docker": "application",
+    "llm": "model",
 }
 
 
