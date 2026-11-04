@@ -152,7 +152,11 @@ fi
 
 echo "Starting FastAPI backend on port ${BACKEND_PORT}..."
 export PYTHONPATH="${REPO_ROOT}/backend${PYTHONPATH:+:${PYTHONPATH}}"
-"${PYTHON_BIN}" -m uvicorn alberto.main:app --host 0.0.0.0 --port "${BACKEND_PORT}" --reload --reload-dir "${REPO_ROOT}/backend/alberto" &
+RELOAD_ARGS="--reload --reload-dir ${REPO_ROOT}/backend/alberto"
+if [ "${ALBERTO_RELOAD:-1}" = "0" ]; then
+  RELOAD_ARGS=""
+fi
+"${PYTHON_BIN}" -m uvicorn alberto.main:app --host 0.0.0.0 --port "${BACKEND_PORT}" ${RELOAD_ARGS} &
 BACKEND_PID=$!
 
 sleep 1

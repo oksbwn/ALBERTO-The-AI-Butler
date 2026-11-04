@@ -17,6 +17,7 @@ import {
   KnowledgeGraphScreen,
   KnowledgeMemoryScreen,
 } from "@/components/screens/knowledge";
+import { OntologyReviewQueue } from "@/components/screens/ontology-review-queue";
 import { TracesScreen } from "@/components/screens/traces";
 import { AuthCredentialsScreen } from "@/components/screens/auth-credentials";
 import { SettingsScreen } from "@/components/screens/settings";
@@ -39,7 +40,7 @@ const SCREEN_LABEL: Record<string, string> = {
   channels: "Channels", triggers: "Triggers", datasets: "Evaluations", handoff: "Agent Inbox",
   "knowledge-playground": "Playground", "knowledge-docs": "Documents", "knowledge-vector": "Vector Store",
   "knowledge-qa": "Q&A Pairs", "knowledge-graph": "Knowledge Graph", "knowledge-memory": "Long-Term Memory",
-  "knowledge-explorer": "Playground",
+  "knowledge-explorer": "Playground", "ontology-review-queue": "HITL Review Queue",
 };
 const PARENT: Record<string, [string, string]> = {
   "workflow-canvas": ["workflows", "Workflows"],
@@ -52,7 +53,7 @@ const PARENT: Record<string, [string, string]> = {
   "knowledge-playground": ["knowledge-playground", "Knowledge"], "knowledge-docs": ["knowledge-playground", "Knowledge"],
   "knowledge-vector": ["knowledge-playground", "Knowledge"], "knowledge-qa": ["knowledge-playground", "Knowledge"],
   "knowledge-graph": ["knowledge-playground", "Knowledge"], "knowledge-memory": ["knowledge-playground", "Knowledge"],
-  "knowledge-explorer": ["knowledge-playground", "Knowledge"],
+  "knowledge-explorer": ["knowledge-playground", "Knowledge"], "ontology-review-queue": ["knowledge-memory", "Knowledge"],
 };
 
 function App() {
@@ -189,6 +190,7 @@ function App() {
       case "knowledge-qa": return <KnowledgeQaScreen project={project} />;
       case "knowledge-graph": return <KnowledgeGraphScreen project={project} />;
       case "knowledge-memory": return <KnowledgeMemoryScreen project={project} />;
+      case "ontology-review-queue": return <div className="col grow" style={{ minHeight: 0, overflowY: "auto", padding: "16px 24px" }}><OntologyReviewQueue project={project} /></div>;
       case "triggers": return <TriggersScreen project={project} />;
       case "datasets": return <DatasetsScreen project={project} />;
       case "handoff": return <HandoffScreen project={project} />;
@@ -228,6 +230,7 @@ function App() {
           right={topRight}
           project={project}
           onCommand={() => setCmdOpen(true)}
+          onNav={navScreen}
         />
         <div key={(view.screen || "") + (project?.id || "") + refreshNonce} className="col grow" style={{ minHeight: 0 }}>
           {body}

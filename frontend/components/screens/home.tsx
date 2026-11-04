@@ -115,6 +115,7 @@ export function HomeScreen({
         <ChatScreen
           project={project}
           onMutate={onMutate}
+          onNav={onNav}
           target={chatTarget}
           onTargetChange={setChatTarget}
         />

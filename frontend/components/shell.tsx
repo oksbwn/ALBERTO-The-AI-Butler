@@ -5,6 +5,7 @@ import { Icon } from "./icons";
 import { Avatar, Tile } from "./primitives";
 import { PROJECT_NAV, NavLeaf, NavGroup } from "@/lib/data";
 import { Markdown } from "./markdown";
+import { api } from "@/lib/api";
 
 /* ---------------- Theme hook ---------------- */
 export function useTheme(): [string, (t: string) => void] {
@@ -182,9 +183,110 @@ export function LearningIndicatorToggle({ project }: { project: any }) {
   );
 }
 
+/* ---------------- HITL Review Indicator ---------------- */
+export function HitlReviewIndicator({
+  project,
+  onNav,
+}: {
+  project?: { id: string; name: string } | null;
+  onNav?: (screen: string) => void;
+}) {
+  const [pendingCount, setPendingCount] = useState<number>(0);
+
+  useEffect(() => {
+    if (!project?.id) return;
+    let live = true;
+    const fetchCounts = () => {
+      api.projectCounts(project.id)
+        .then((res: any) => {
+          if (live && res && typeof res.pending_reviews === "number") {
+            setPendingCount(res.pending_reviews);
+          }
+        })
+        .catch(() => {});
+    };
+    fetchCounts();
+
+    const onChange = () => fetchCounts();
+    window.addEventListener("alberto:counts-changed", onChange);
+    window.addEventListener("forge:counts-changed", onChange);
+    const timer = setInterval(fetchCounts, 8000);
+
+    return () => {
+      live = false;
+      window.removeEventListener("alberto:counts-changed", onChange);
+      window.removeEventListener("forge:counts-changed", onChange);
+      clearInterval(timer);
+    };
+  }, [project?.id]);
+
+  if (!project) return null;
+
+  const hasPending = pendingCount > 0;
+
+  return (
+    <button
+      onClick={() => onNav?.("ontology-review-queue")}
+      className="row gap2"
+      title={
+        hasPending
+          ? `${pendingCount} item(s) awaiting Human-in-the-Loop review. Click to open review queue.`
+          : "Human-in-the-Loop Review Queue (0 pending)"
+      }
+      aria-label="HITL Review Queue"
+      style={{
+        height: 32,
+        padding: "0 10px",
+        borderRadius: 6,
+        cursor: "pointer",
+        fontSize: 12,
+        fontWeight: 600,
+        fontFamily: "var(--font-ui)",
+        border: hasPending
+          ? "1px solid rgba(245, 158, 11, 0.5)"
+          : "1px solid var(--line)",
+        background: hasPending
+          ? "rgba(245, 158, 11, 0.14)"
+          : "var(--bg-2)",
+        color: hasPending ? "var(--warn, #f59e0b)" : "var(--fg-2)",
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        transition: "all 0.15s ease",
+        boxShadow: hasPending ? "0 0 10px rgba(245, 158, 11, 0.25)" : "none",
+      }}
+    >
+      <Icon
+        name={hasPending ? "shield-alert" : "shield-check"}
+        size={14}
+        style={{
+          color: hasPending ? "var(--warn, #f59e0b)" : "var(--fg-2)",
+          flex: "none",
+        }}
+      />
+      <span>HITL Review</span>
+      <span
+        style={{
+          padding: "1px 6px",
+          borderRadius: 10,
+          fontSize: 10.5,
+          fontWeight: 700,
+          background: hasPending ? "var(--warn, #f59e0b)" : "var(--bg-3)",
+          color: hasPending ? "#000" : "var(--fg-2)",
+          minWidth: 18,
+          textAlign: "center",
+          lineHeight: "15px",
+        }}
+      >
+        {pendingCount}
+      </span>
+    </button>
+  );
+}
+
 /* ---------------- Topbar ---------------- */
 export interface Crumb { label: string; onClick?: () => void }
-export function Topbar({ crumbs, right, left, onCommand, project }: { crumbs: Crumb[]; right?: ReactNode; left?: ReactNode; onCommand: () => void; project?: any }) {
+export function Topbar({ crumbs, right, left, onCommand, project, onNav }: { crumbs: Crumb[]; right?: ReactNode; left?: ReactNode; onCommand: () => void; project?: any; onNav?: (screen: string) => void }) {
   const [theme, setTheme] = useTheme();
 
   return (
@@ -202,6 +304,7 @@ export function Topbar({ crumbs, right, left, onCommand, project }: { crumbs: Cr
         ))}
       </div>
       <div style={{ flex: 1 }} />
+      {project && <HitlReviewIndicator project={project} onNav={onNav} />}
       {project && <LearningIndicatorToggle project={project} />}
       <button className="row gap2" onClick={onCommand}
         style={{ height: 32, padding: "0 10px", border: "1px solid var(--line-strong)", borderRadius: 6, background: "var(--bg-1)", cursor: "pointer", color: "var(--fg-2)", fontSize: 12.5 }}>

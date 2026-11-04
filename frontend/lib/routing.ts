@@ -41,6 +41,8 @@ export const PATH_TO_SCREEN: Record<string, string> = {
   "/knowledge-graph": "knowledge-graph",
   "/knowledge/memory": "knowledge-memory",
   "/knowledge-memory": "knowledge-memory",
+  "/knowledge/reviews": "ontology-review-queue",
+  "/knowledge-reviews": "ontology-review-queue",
 
   // Integrations module
   "/integrations": "integrations",
@@ -105,6 +107,7 @@ export const SCREEN_TO_PATH: Record<string, string> = {
   "knowledge-qa": "/knowledge/qa",
   "knowledge-graph": "/knowledge/graph",
   "knowledge-memory": "/knowledge/memory",
+  "ontology-review-queue": "/knowledge/reviews",
 
   // Integrations module
   "integrations-playground": "/integrations/playground",

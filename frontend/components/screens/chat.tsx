@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "@/components/icons";
 import { Tile, Avatar } from "@/components/primitives";
 import { Markdown } from "@/components/markdown";
-import { api, openSSE, Workflow, Agent, Conversation, ConversationDetail } from "@/lib/api";
+import { api, openSSE, Workflow, Agent, Conversation, ConversationDetail, TurnKnowledge } from "@/lib/api";
 import { useModels } from "@/lib/models";
 
 function newThreadId() {
@@ -42,6 +42,7 @@ interface ChatMsg {
   compactedCount?: number;
   tokensSaved?: number;
   compactedTurns?: CompactedTurn[];
+  knowledge?: TurnKnowledge | null;
 }
 
 function TokenMetricsBadge({ msg }: { msg: ChatMsg }) {
@@ -252,9 +253,202 @@ export const SYSTEM_SUB_AGENTS: Agent[] = [
   },
 ];
 
+function KnowledgeExtractedBadge({
+  knowledge,
+  onOpenReview,
+  onOpenKnowledge,
+}: {
+  knowledge?: TurnKnowledge | null;
+  onOpenReview?: () => void;
+  onOpenKnowledge?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [open]);
+
+  if (!knowledge) return null;
+
+  const isCompleted = knowledge.status === "completed";
+  const isReview = knowledge.status === "review_required" || knowledge.requires_review;
+  const isPending = knowledge.status === "pending";
+
+  if (!isCompleted && !isReview && !isPending) return null;
+
+  const memCount = knowledge.memories?.length || 0;
+  const entCount = knowledge.entities?.length || 0;
+  const relCount = knowledge.relationships?.length || 0;
+  const totalItems = memCount + entCount + relCount;
+
+  if (totalItems === 0 && !knowledge.error) return null;
+
+  const badgeBg = isCompleted
+    ? "rgba(34, 197, 94, 0.12)"
+    : isReview
+    ? "rgba(245, 158, 11, 0.14)"
+    : "rgba(59, 130, 246, 0.1)";
+
+  const badgeBorder = isCompleted
+    ? "1px solid rgba(34, 197, 94, 0.35)"
+    : isReview
+    ? "1px solid rgba(245, 158, 11, 0.45)"
+    : "1px solid rgba(59, 130, 246, 0.3)";
+
+  const badgeColor = isCompleted
+    ? "var(--ok, #22c55e)"
+    : isReview
+    ? "var(--warn, #f59e0b)"
+    : "var(--accent, #3b82f6)";
+
+  const iconName = isCompleted ? "brain" : isReview ? "shield-alert" : "sparkles";
+  const labelText = isCompleted
+    ? `Learned ${memCount > 0 ? `${memCount} fact${memCount > 1 ? "s" : ""}` : "knowledge"}`
+    : isReview
+    ? "Review Required"
+    : "Curating…";
+
+  return (
+    <div ref={containerRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="row gap1"
+        style={{
+          padding: "2px 8px",
+          borderRadius: 12,
+          fontSize: 11,
+          fontWeight: 600,
+          background: badgeBg,
+          border: badgeBorder,
+          color: badgeColor,
+          cursor: "pointer",
+          height: 22,
+          alignItems: "center",
+          gap: 4,
+          transition: "all 0.15s ease",
+        }}
+        title="Knowledge extracted from this turn. Click to inspect."
+      >
+        <Icon name={iconName} size={11} style={{ color: badgeColor }} />
+        <span>{labelText}</span>
+      </button>
+
+      {open && (
+        <div
+          className="card fade-in"
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + 6px)",
+            left: 0,
+            width: 320,
+            maxWidth: "90vw",
+            zIndex: 99,
+            padding: "12px 14px",
+            background: "var(--bg-1)",
+            border: "1px solid var(--line-strong)",
+            borderRadius: 8,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+            fontSize: 12,
+            lineHeight: "18px",
+          }}
+        >
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontWeight: 700, color: badgeColor, display: "flex", alignItems: "center", gap: 5 }}>
+              <Icon name={iconName} size={13} />
+              {isCompleted ? "Knowledge Extracted & Saved" : isReview ? "Awaiting HITL Review" : "Extracting Knowledge…"}
+            </span>
+            <button
+              onClick={() => setOpen(false)}
+              style={{ background: "none", border: "none", color: "var(--fg-2)", cursor: "pointer", padding: 0 }}
+            >
+              ✕
+            </button>
+          </div>
+
+          {knowledge.error && (
+            <div style={{ marginBottom: 8, padding: "6px 8px", background: "rgba(245, 158, 11, 0.1)", borderLeft: "3px solid #f59e0b", borderRadius: 4, color: "var(--warn, #f59e0b)", fontSize: 11.5 }}>
+              {knowledge.error}
+            </div>
+          )}
+
+          {memCount > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontWeight: 600, color: "var(--fg-1)", marginBottom: 4, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                Learned Facts
+              </div>
+              {knowledge.memories.map((m, idx) => (
+                <div key={idx} style={{ padding: "3px 0", color: "var(--fg-0)", wordBreak: "break-word" }}>
+                  • {m}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {(entCount > 0 || relCount > 0) && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontWeight: 600, color: "var(--fg-1)", marginBottom: 4, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                Knowledge Graph
+              </div>
+              {knowledge.entities?.map((e, idx) => (
+                <div key={`e-${idx}`} style={{ color: "var(--fg-0)", padding: "1px 0" }}>
+                  • <span style={{ fontWeight: 600 }}>{e.name}</span> <span style={{ opacity: 0.6, fontSize: 10.5 }}>({e.kind})</span>
+                </div>
+              ))}
+              {knowledge.relationships?.map((r, idx) => (
+                <div key={`r-${idx}`} style={{ color: "var(--fg-0)", padding: "1px 0" }}>
+                  • {r.source} <span style={{ color: "var(--accent)" }}>[{r.kind}]</span> {r.target}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="row gap2" style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--line)", justifyContent: "flex-end" }}>
+            {isReview && onOpenReview && (
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                onClick={() => {
+                  setOpen(false);
+                  onOpenReview();
+                }}
+                style={{ fontSize: 11.5, height: 26, padding: "0 10px" }}
+              >
+                Open Review Queue →
+              </button>
+            )}
+            {isCompleted && onOpenKnowledge && (
+              <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                onClick={() => {
+                  setOpen(false);
+                  onOpenKnowledge();
+                }}
+                style={{ fontSize: 11.5, height: 26, padding: "0 10px" }}
+              >
+                View in Knowledge Base →
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ChatScreen({
   project,
   onMutate,
+  onNav,
   externalInput,
   onExternalInputConsumed,
   persona = "assistant",
@@ -263,6 +457,7 @@ export function ChatScreen({
 }: {
   project: any;
   onMutate?: () => void;
+  onNav?: (screen: string) => void;
   externalInput?: string;
   onExternalInputConsumed?: () => void;
   persona?: "assistant" | "memory_curator" | "tool_manager" | "integration_manager" | string;
@@ -618,6 +813,7 @@ export function ChatScreen({
             decodeDurationSecs: tm?.decode_duration_secs ?? undefined,
             totalDurationSecs: tm?.total_duration_secs ?? undefined,
             durationSecs: tm?.decode_duration_secs ?? undefined,
+            knowledge: (t as any)?.knowledge || null,
           });
         }
       });
@@ -909,6 +1105,30 @@ export function ChatScreen({
       setBusy(false);
       if (finalMsg && autoSpeak) {
         speakText(finalMsg);
+      }
+      if (project?.id) {
+        window.dispatchEvent(new CustomEvent("alberto:counts-changed"));
+        window.dispatchEvent(new CustomEvent("forge:counts-changed"));
+        setTimeout(async () => {
+          try {
+            const detail = await api.getConversation(project.id, threadRef.current);
+            if (detail?.turns && detail.turns.length > 0) {
+              const lastTurn = detail.turns[detail.turns.length - 1];
+              if (lastTurn?.knowledge) {
+                setMsgs((prev) => {
+                  const copy = [...prev];
+                  const lastAsstIdx = copy.map((x) => x.role).lastIndexOf("assistant");
+                  if (lastAsstIdx >= 0) {
+                    copy[lastAsstIdx] = { ...copy[lastAsstIdx], knowledge: lastTurn.knowledge };
+                  }
+                  return copy;
+                });
+                window.dispatchEvent(new CustomEvent("alberto:counts-changed"));
+                window.dispatchEvent(new CustomEvent("forge:counts-changed"));
+              }
+            }
+          } catch {}
+        }, 2200);
       }
     }
   }
@@ -1948,6 +2168,13 @@ export function ChatScreen({
                           <span style={{ fontSize: 11 }}>{currentlySpeaking === i ? "Stop" : "Voice"}</span>
                         </button>
                         <TokenMetricsBadge msg={m} />
+                        {m.knowledge && (
+                          <KnowledgeExtractedBadge
+                            knowledge={m.knowledge}
+                            onOpenReview={() => onNav?.("ontology-review-queue")}
+                            onOpenKnowledge={() => onNav?.("knowledge-memory")}
+                          />
+                        )}
                       </div>
                     )}
                   </div>

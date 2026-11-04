@@ -242,7 +242,17 @@ export interface ChunkDetail { id: string; text: string; source_id?: string | nu
 export interface Trace { id: string; run_id: string; workflow_id?: string | null; name: string; status: string; started_at?: string | null; ended_at?: string | null; latency_ms: number; total_tokens: number; total_cost_usd: number; }
 export interface Span { id: string; parent_span_id?: string | null; name: string; kind: string; latency_ms: number; input?: any; output?: any; model?: string | null; input_tokens: number; output_tokens: number; cost_usd: number; error?: string | null; }
 export interface Conversation { thread_id: string; actor: string; source: string; end_user_id?: string | null; workflow_id?: string | null; turns: number; total_tokens: number; total_cost_usd: number; started_at?: string | null; last_activity?: string | null; status: string; preview: string; }
-export interface Turn { trace_id: string; run_id: string; source: string; user_message?: string | null; ai_response?: string | null; status: string; error?: string | null; latency_ms: number; total_tokens: number; total_cost_usd: number; started_at?: string | null; meta?: Record<string, any>; }
+export interface TurnKnowledge {
+  event_id: string;
+  status: string;
+  requires_review: boolean;
+  error?: string | null;
+  memories: string[];
+  entities: { name: string; kind: string }[];
+  relationships: { source: string; kind: string; target: string }[];
+}
+
+export interface Turn { trace_id: string; run_id: string; source: string; user_message?: string | null; ai_response?: string | null; status: string; error?: string | null; latency_ms: number; total_tokens: number; total_cost_usd: number; started_at?: string | null; meta?: Record<string, any>; knowledge?: TurnKnowledge | null; }
 export interface ConversationDetail { conversation: Conversation; turns: Turn[]; }
 export interface Facets { actors: string[]; sources: string[]; }
 export interface Secret { id: string; name: string; kind: string; version: number; }
@@ -622,7 +632,7 @@ export interface ProjectStats {
 // Sidebar badge counts (keys match countKey in data.ts PROJECT_NAV). One cheap call
 // replaces six full-list fetches that were only ever read for their `.length`.
 export interface ProjectCounts {
-  workflows: number; agents: number; tools: number; components: number; knowledge: number; auth: number; handoffs: number; connectors: number;
+  workflows: number; agents: number; tools: number; components: number; knowledge: number; auth: number; handoffs: number; connectors: number; pending_reviews?: number;
 }
 
 export interface DashboardStats {
