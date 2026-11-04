@@ -32,6 +32,7 @@ class ProjectCountsOut(BaseModel):
     auth: int
     handoffs: int
     connectors: int = 0
+    pending_reviews: int = 0
 
 
 class ProjectCreate(BaseModel):
@@ -110,6 +111,7 @@ class TurnOut(BaseModel):
     total_cost_usd: float
     started_at: datetime | None = None
     meta: dict = Field(default_factory=dict)
+    knowledge: dict | None = None
 
 
 class ConversationDetailOut(BaseModel):

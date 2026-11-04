@@ -18,12 +18,37 @@ from alberto.services.conversations import ConversationService, summarize
 router = APIRouter(prefix="/v1/projects/{project_id}/conversations", tags=["conversations"])
 
 
-def _turn(t) -> TurnOut:
+def _turn(t, event: Any | None = None) -> TurnOut:
+    k_data = None
+    if event:
+        payload = event.extraction_payload or {}
+        output = payload.get("curator_output") or {}
+        memories = [m.get("content") for m in output.get("memories", []) if m.get("content")]
+        entities = [
+            {"name": e.get("name"), "kind": e.get("kind")}
+            for e in output.get("entities", [])
+            if e.get("name")
+        ]
+        relationships = [
+            {"source": r.get("source_ref"), "kind": r.get("kind"), "target": r.get("target_ref")}
+            for r in output.get("relationships", [])
+            if r.get("source_ref") and r.get("target_ref")
+        ]
+        k_data = {
+            "event_id": event.id,
+            "status": event.status,
+            "requires_review": event.requires_review,
+            "error": event.error,
+            "memories": memories,
+            "entities": entities,
+            "relationships": relationships,
+        }
     return TurnOut(
         trace_id=t.id, run_id=t.run_id, source=t.source or "", user_message=t.user_message,
         ai_response=t.ai_response, status=t.status, error=t.error, latency_ms=t.latency_ms,
         total_tokens=t.total_tokens, total_cost_usd=t.total_cost_usd, started_at=t.started_at,
         meta=t.meta or {},
+        knowledge=k_data,
     )
 
 
@@ -78,4 +103,18 @@ async def get_conversation(
     turns = await ConversationService.turns(session, tenant_id, project_id, thread_id)
     if not turns:
         raise HTTPException(404, "Conversation not found")
-    return {"conversation": summarize(thread_id, turns), "turns": [_turn(t) for t in turns]}
+
+    from alberto.models.entities import MemoryLearningEvent
+    from sqlalchemy import select
+
+    trace_ids = [t.id for t in turns]
+    events_res = await session.execute(
+        select(MemoryLearningEvent).where(
+            MemoryLearningEvent.tenant_id == tenant_id,
+            MemoryLearningEvent.project_id == project_id,
+            MemoryLearningEvent.source_event_id.in_(trace_ids),
+        )
+    )
+    events_by_trace = {e.source_event_id: e for e in events_res.scalars().all()}
+
+    return {"conversation": summarize(thread_id, turns), "turns": [_turn(t, events_by_trace.get(t.id)) for t in turns]}

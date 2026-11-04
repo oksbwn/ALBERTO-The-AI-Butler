@@ -59,6 +59,16 @@ class ProjectService:
             )
         )
         out["handoffs"] = int(open_handoffs or 0)
+
+        from alberto.models.entities import MemoryLearningEvent
+        pending_reviews = await session.scalar(
+            select(func.count()).select_from(MemoryLearningEvent).where(
+                MemoryLearningEvent.tenant_id == tenant_id,
+                MemoryLearningEvent.project_id == project_id,
+                MemoryLearningEvent.status == "review_required",
+            )
+        )
+        out["pending_reviews"] = int(pending_reviews or 0)
         return out
 
     @staticmethod
