@@ -573,6 +573,113 @@ class OntologyRegistryService:
         return list(res.scalars().all())
 
     @classmethod
+    async def get_all_relationship_specs(
+        cls, session: AsyncSession | None, tenant_id: str, project_id: str
+    ) -> list[dict[str, Any]]:
+        """Retrieve all active relationship definitions with endpoint constraints."""
+        specs: dict[str, dict[str, Any]] = {}
+        for d in DEFAULT_RELATIONSHIP_TYPES:
+            specs[d["canonical_key"]] = {
+                "canonical_key": d["canonical_key"],
+                "allowed_source_types": [s.lower() for s in d.get("allowed_source_types", [])],
+                "allowed_target_types": [t.lower() for t in d.get("allowed_target_types", [])],
+                "direction_semantics": d.get("direction_semantics", "source_to_target"),
+                "status": "approved",
+            }
+
+        if session is not None:
+            try:
+                stmt = select(OntologyRelationshipType).where(
+                    OntologyRelationshipType.tenant_id == tenant_id,
+                    OntologyRelationshipType.project_id == project_id,
+                )
+                db_types = (await session.execute(stmt)).scalars().all()
+                for t in db_types:
+                    specs[t.canonical_key] = {
+                        "canonical_key": t.canonical_key,
+                        "allowed_source_types": [s.lower() for s in (t.allowed_source_types or [])],
+                        "allowed_target_types": [tgt.lower() for tgt in (t.allowed_target_types or [])],
+                        "direction_semantics": t.direction_semantics or "source_to_target",
+                        "status": t.status,
+                    }
+            except Exception as e:
+                logger.debug("Could not fetch relationship types from DB: %s", e)
+
+        return list(specs.values())
+
+    @classmethod
+    async def validate_or_normalize_relationship(
+        cls,
+        session: AsyncSession | None,
+        tenant_id: str,
+        project_id: str,
+        rel_kind: str,
+        src_kind: str,
+        tgt_kind: str,
+        src_name: str = "",
+        tgt_name: str = "",
+    ) -> tuple[str, bool, str | None]:
+        """Validate relationship endpoints against the dynamic ontology.
+
+        If endpoints are inverted:
+        - Auto-normalizes to an approved reciprocal relationship type if one exists in the ontology.
+        - Otherwise returns a direction mismatch warning.
+
+        Returns:
+            (normalized_rel_kind, is_inverted, warning_message)
+        """
+        all_specs = await cls.get_all_relationship_specs(session, tenant_id, project_id)
+        current_spec = next((s for s in all_specs if s["canonical_key"] == rel_kind), None)
+
+        if not current_spec:
+            return rel_kind, False, None
+
+        allowed_src = set(current_spec["allowed_source_types"])
+        allowed_tgt = set(current_spec["allowed_target_types"])
+
+        if not allowed_src or not allowed_tgt:
+            return rel_kind, False, None
+
+        src_k = (src_kind or "").strip().lower()
+        tgt_k = (tgt_kind or "").strip().lower()
+
+        if src_k in allowed_src and tgt_k in allowed_tgt:
+            return rel_kind, False, None
+
+        if src_k in allowed_tgt and tgt_k in allowed_src:
+            best_reciprocal: dict[str, Any] | None = None
+            best_score = -1
+
+            for cand in all_specs:
+                if cand["canonical_key"] == rel_kind or cand.get("status") != "approved":
+                    continue
+                cand_src = set(cand["allowed_source_types"])
+                cand_tgt = set(cand["allowed_target_types"])
+
+                if src_k in cand_src and tgt_k in cand_tgt:
+                    score = len(cand_src & allowed_tgt) + len(cand_tgt & allowed_src)
+                    if score > best_score:
+                        best_score = score
+                        best_reciprocal = cand
+
+            if best_reciprocal:
+                logger.info(
+                    "Ontology reciprocal normalization: '%s' -> '%s' for '%s' (%s) and '%s' (%s)",
+                    rel_kind,
+                    best_reciprocal["canonical_key"],
+                    src_name,
+                    src_k,
+                    tgt_name,
+                    tgt_k,
+                )
+                return best_reciprocal["canonical_key"], False, None
+
+            warning = f"Possible inverted relationship direction: '{src_name}' ({src_k}) {rel_kind} '{tgt_name}' ({tgt_k})"
+            return rel_kind, True, warning
+
+        return rel_kind, False, None
+
+    @classmethod
     async def register_entity_type(
         cls,
         session: AsyncSession,

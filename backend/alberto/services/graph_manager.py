@@ -163,26 +163,14 @@ class GraphManagerService:
             c_canon = cls.canonicalize_name(c_name)
             k = (cand.kind or "").strip().lower()
 
-            # 1. Learned entity mapping lookup (e.g. macOS -> operating_system, Mac mini -> device)
+            # 1. Learned entity mapping lookup (dynamic ontology-driven classification)
             mapped_type = await OntologyRegistryService.get_entity_mapping(
                 session, tenant_id, project_id, c_canon
             )
-            if mapped_type:
-                if mapped_type == "operating_system" and k in ("device", "host", "hardware", "concept"):
-                    logger.info("Learned ontology kind normalization: '%s' is an operating system, not %s", c_name, k)
-                    cand.kind = "operating_system"
-                    k = "operating_system"
-                elif mapped_type == "device" and k in ("operating_system", "platform", "application", "framework"):
-                    logger.info("Learned ontology kind normalization: '%s' is a physical device, not %s", c_name, k)
-                    cand.kind = "device"
-                    k = "device"
-                elif mapped_type == "application" and k in ("device", "host", "unknown_software", "software", "tool"):
-                    logger.info("Learned ontology kind normalization: '%s' is an application, not %s", c_name, k)
-                    cand.kind = "application"
-                    k = "application"
-                elif k != mapped_type and (k in ("device", "concept", "hardware", "unknown_software") or k not in CANONICAL_ENTITY_KINDS):
-                    cand.kind = mapped_type
-                    k = mapped_type
+            if mapped_type and k != mapped_type:
+                logger.info("Learned ontology kind normalization: '%s' is %s, not %s", c_name, mapped_type, k)
+                cand.kind = mapped_type
+                k = mapped_type
 
             # 2. Dynamic ontology entity-type resolution
             resolved_k, k_status = await OntologyRegistryService.resolve_entity_type(
@@ -340,23 +328,25 @@ class GraphManagerService:
                 requires_review = True
                 review_reasons.append(f"Low confidence ({rel_conf:.2f}) on relationship candidate '{clean_kind}'")
 
-            # Directional semantic validation
+            # Dynamic ontology-driven directional semantic validation and reciprocal normalization
             src_ent = by_id.get(src_id) or next((e for e in resolved_entities if e.id == src_id), None)
             tgt_ent = by_id.get(tgt_id) or next((e for e in resolved_entities if e.id == tgt_id), None)
             if src_ent and tgt_ent:
                 src_k = (src_ent.kind or "").lower()
                 tgt_k = (tgt_ent.kind or "").lower()
-                if clean_kind == "RUNS" and src_k in ("application", "framework", "service", "model") and tgt_k in ("device", "host", "platform", "hardware"):
-                    # Auto-normalize inverted RUNS (model/app RUNS device) to canonical RUNS_ON
-                    clean_kind = "RUNS_ON"
-                elif clean_kind == "RUNS_ON" and src_k in ("device", "host", "platform", "hardware") and tgt_k in ("application", "framework", "service", "model"):
-                    # Auto-normalize inverted RUNS_ON (device RUNS_ON model) to RUNS
-                    clean_kind = "RUNS" 
-                elif clean_kind == "DEPLOYED_VIA" and tgt_k in ("application", "framework") and src_k in ("platform", "device"):
+                clean_kind, is_inv, warning = await OntologyRegistryService.validate_or_normalize_relationship(
+                    session=session,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    rel_kind=clean_kind,
+                    src_kind=src_k,
+                    tgt_kind=tgt_k,
+                    src_name=src_ent.name,
+                    tgt_name=tgt_ent.name,
+                )
+                if is_inv and warning:
                     requires_review = True
-                    review_reasons.append(
-                        f"Possible inverted deployment direction: '{src_ent.name}' DEPLOYED_VIA '{tgt_ent.name}'"
-                    )
+                    review_reasons.append(warning)
 
             rel_id = make_relationship_id(src_id, clean_kind, tgt_id)
             relationship = GraphRelationship(
