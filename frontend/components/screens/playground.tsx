@@ -240,7 +240,14 @@ export function PlaygroundScreen({
     }));
   }, [activeSession?.proposal]);
 
-  const proposal = activeSession?.proposal;
+  const hasProposal = Boolean(
+    activeSession?.proposal &&
+      (activeSession.proposal.title ||
+        activeSession.proposal.executable ||
+        activeSession.proposal.strategy ||
+        activeSession.proposal.workflow_id)
+  );
+  const proposal = hasProposal ? activeSession!.proposal : null;
 
   return (
     <div
@@ -423,16 +430,35 @@ export function PlaygroundScreen({
                         </div>
                       </div>
                       <div className="row gap1" style={{ alignItems: "center" }}>
-                        <span className="pill" style={{ background: "var(--accent-glow)", color: "var(--accent)", fontSize: 10 }}>
-                          {proposal.strategy}
-                        </span>
-                        <StatusPill status={proposal.validation?.valid ? "active" : "error"} />
+                        {proposal.strategy && (
+                          <span className="pill" style={{ background: "var(--accent-glow)", color: "var(--accent)", fontSize: 10 }}>
+                            {proposal.strategy}
+                          </span>
+                        )}
+                        <StatusPill
+                          status={
+                            proposal.validation?.valid === true
+                              ? "active"
+                              : proposal.validation?.valid === false
+                              ? "error"
+                              : "draft"
+                          }
+                          label={
+                            proposal.validation?.valid === true
+                              ? "Valid"
+                              : proposal.validation?.valid === false
+                              ? "Invalid"
+                              : "Draft"
+                          }
+                        />
                       </div>
                     </div>
 
-                    <div className="fg-1" style={{ fontSize: 12, lineHeight: "17px" }}>
-                      {proposal.explanation}
-                    </div>
+                    {proposal.explanation && (
+                      <div className="fg-1" style={{ fontSize: 12, lineHeight: "17px" }}>
+                        {proposal.explanation}
+                      </div>
+                    )}
 
                     {/* Proposed Specialist Agents */}
                     {proposal.proposed_agents?.length > 0 && (
@@ -493,7 +519,7 @@ export function PlaygroundScreen({
                         className="btn btn-xs btn-ghost"
                         onClick={() =>
                           setExternalChatInput(
-                            `Can you explain the design decisions and optimize the proposed workflow "${proposal.title}"?`
+                            `Can you explain the design decisions and optimize the proposed workflow "${proposal.title || "proposed workflow"}"?`
                           )
                         }
                         title="Inquire in Automation Manager chat"
@@ -505,7 +531,7 @@ export function PlaygroundScreen({
                         className="btn btn-xs btn-ghost"
                         onClick={() =>
                           setExternalChatInput(
-                            `What potential failure modes or edge cases exist in the "${proposal.title}" pipeline?`
+                            `What potential failure modes or edge cases exist in the "${proposal.title || "proposed"}" pipeline?`
                           )
                         }
                         title="Risk analysis in chat"

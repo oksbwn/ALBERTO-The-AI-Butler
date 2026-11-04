@@ -627,6 +627,19 @@ export function WorkflowExecutionPanel({
         </div>
       </div>
 
+      {/* Empty State Banner when no workflows exist */}
+      {!workflow && (!wfs || wfs.length === 0) && (
+        <div style={{ margin: "14px 16px 0", padding: "12px 14px", background: "var(--bg-surface)", border: "1px solid var(--line)", borderRadius: 8 }}>
+          <div className="row gap2" style={{ alignItems: "center" }}>
+            <Icon name="workflows" size={16} style={{ color: "var(--accent)" }} />
+            <div style={{ fontSize: 12, fontWeight: 600 }}>No Workflows in this Project Yet</div>
+          </div>
+          <div className="fg-2" style={{ fontSize: 11.5, marginTop: 4 }}>
+            Ask the Automation Manager on the right to design a workflow, or create one in the Low-Code Designer.
+          </div>
+        </div>
+      )}
+
       {/* Manual Input Bar (when not hideControls) */}
       {!hideControls && (
         <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--line)", background: "var(--bg-surface)", flex: "none" }}>

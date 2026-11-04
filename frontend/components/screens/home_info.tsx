@@ -1,11 +1,31 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Icon } from "../icons";
-import { api, DashboardStats, ProjectCounts } from "@/lib/api";
+import { StatusPill } from "../primitives";
+import {
+  api,
+  type Conversation,
+  type ProjectCounts,
+} from "@/lib/api";
+
+
+function formatTimeAgo(iso?: string | null): string {
+  if (!iso) return "recently";
+  try {
+    const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (diff < 60) return "just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+  } catch {
+    return "recently";
+  }
+}
 
 /**
- * HomeInfoScreen - Compact landing page info & vitals dashboard.
- * Designed to fit standard viewport heights without vertical scrolling.
+ * HomeInfoScreen - AI Butler Concierge Hub.
+ * Displays butler intelligence vitals, memory health, quick action shortcuts,
+ * and recent interactions in a clean, professional, local-first dashboard.
  */
 export function HomeInfoScreen({
   project,
@@ -17,28 +37,28 @@ export function HomeInfoScreen({
   onMutate?: () => void;
 }) {
   const [counts, setCounts] = useState<ProjectCounts | null>(null);
-  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [recentConversations, setRecentConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const fetchStats = async () => {
+  const fetchHubData = async () => {
     if (!project?.id) return;
     setLoading(true);
     try {
-      const [c, s] = await Promise.allSettled([
+      const [c, convos] = await Promise.allSettled([
         api.projectCounts(project.id),
-        api.dashboardStats(),
+        api.listConversations(project.id, { limit: 4 }),
       ]);
       if (c.status === "fulfilled") setCounts(c.value);
-      if (s.status === "fulfilled") setStats(s.value);
+      if (convos.status === "fulfilled") setRecentConversations(convos.value || []);
     } catch {
-      // stats fallback
+      // fallback
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchStats();
+    fetchHubData();
   }, [project?.id]);
 
   return (
@@ -51,8 +71,6 @@ export function HomeInfoScreen({
         flexDirection: "column",
         padding: "16px 20px",
         overflowY: "auto",
-        scrollbarWidth: "none", // Hide scrollbar in Firefox
-        msOverflowStyle: "none", // Hide scrollbar in IE/Edge
       }}
     >
       <div
@@ -62,31 +80,34 @@ export function HomeInfoScreen({
           margin: "0 auto",
           display: "flex",
           flexDirection: "column",
-          gap: 12,
+          gap: 14,
         }}
       >
-        {/* 1. Header */}
+        {/* 1. Header & Butler Concierge Status */}
         <div className="row spread" style={{ alignItems: "center" }}>
           <div>
-            <h2 className="t-h2" style={{ margin: 0, fontSize: 18 }}>
-              Home Overview
-            </h2>
-            <div className="fg-2 t-caption" style={{ marginTop: 2, fontSize: 12 }}>
-              System vitals, active capabilities, and extensible modules.
+            <div className="row gap2" style={{ alignItems: "center" }}>
+              <h2 className="t-h2" style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>
+                Alberto Home
+              </h2>
+              <StatusPill status="active" label="Butler Online" />
+            </div>
+            <div className="fg-2 t-caption" style={{ marginTop: 3, fontSize: 11.5 }}>
+              AI Home Butler concierge, active automations, and persistent memory.
             </div>
           </div>
           <button
             className="iconbtn"
-            title="Refresh stats"
-            onClick={fetchStats}
+            title="Refresh concierge status"
+            onClick={fetchHubData}
             disabled={loading}
-            style={{ width: 28, height: 28 }}
+            style={{ width: 30, height: 30 }}
           >
             <Icon name="activity" size={14} className={loading ? "spin" : ""} />
           </button>
         </div>
 
-        {/* 2. Quick Metric Cards (Compact) */}
+        {/* 2. Top Metric Cards: Clear Butler Concepts */}
         <div
           style={{
             display: "grid",
@@ -94,170 +115,118 @@ export function HomeInfoScreen({
             gap: 10,
           }}
         >
+          {/* Automations */}
           <div
             className="card"
-            style={{ padding: "10px 12px", cursor: onNav ? "pointer" : "default" }}
+            style={{
+              padding: "11px 13px",
+              cursor: onNav ? "pointer" : "default",
+              transition: "border-color 0.15s ease",
+            }}
             onClick={() => onNav?.("workflows")}
+            title="View automated home routines and pipelines"
           >
             <div className="row spread" style={{ alignItems: "center", marginBottom: 4 }}>
-              <span className="t-caption fg-2" style={{ fontSize: 11.5 }}>Workflows</span>
-              <Icon name="workflow" size={14} style={{ color: "var(--accent)" }} />
+              <span className="t-caption fg-2" style={{ fontSize: 11.5, fontWeight: 600 }}>
+                Automations
+              </span>
+              <Icon name="workflows" size={15} style={{ color: "var(--accent)" }} />
             </div>
-            <div className="t-h1" style={{ fontSize: 20, fontWeight: 700 }}>
+            <div className="t-h1" style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.1 }}>
               {counts?.workflows ?? 0}
             </div>
-            <div className="t-micro fg-2" style={{ fontSize: 10.5, marginTop: 1 }}>Automations</div>
+            <div className="t-micro fg-2" style={{ fontSize: 10.5, marginTop: 2 }}>
+              Home Routines
+            </div>
           </div>
 
+          {/* Specialist Agents */}
           <div
             className="card"
-            style={{ padding: "10px 12px", cursor: onNav ? "pointer" : "default" }}
+            style={{
+              padding: "11px 13px",
+              cursor: onNav ? "pointer" : "default",
+              transition: "border-color 0.15s ease",
+            }}
             onClick={() => onNav?.("agents")}
+            title="View autonomous sub-agents and personas"
           >
             <div className="row spread" style={{ alignItems: "center", marginBottom: 4 }}>
-              <span className="t-caption fg-2" style={{ fontSize: 11.5 }}>Agents</span>
-              <Icon name="bot" size={14} style={{ color: "var(--io-control)" }} />
+              <span className="t-caption fg-2" style={{ fontSize: 11.5, fontWeight: 600 }}>
+                Specialists
+              </span>
+              <Icon name="bot" size={15} style={{ color: "var(--io-control)" }} />
             </div>
-            <div className="t-h1" style={{ fontSize: 20, fontWeight: 700 }}>
+            <div className="t-h1" style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.1 }}>
               {counts?.agents ?? 0}
             </div>
-            <div className="t-micro fg-2" style={{ fontSize: 10.5, marginTop: 1 }}>ReAct loops</div>
+            <div className="t-micro fg-2" style={{ fontSize: 10.5, marginTop: 2 }}>
+              Active Personas
+            </div>
           </div>
 
+          {/* Connected Skills / Tools */}
           <div
             className="card"
-            style={{ padding: "10px 12px", cursor: onNav ? "pointer" : "default" }}
+            style={{
+              padding: "11px 13px",
+              cursor: onNav ? "pointer" : "default",
+              transition: "border-color 0.15s ease",
+            }}
             onClick={() => onNav?.("tools")}
+            title="View integrated tools, devices, and connectors"
           >
             <div className="row spread" style={{ alignItems: "center", marginBottom: 4 }}>
-              <span className="t-caption fg-2" style={{ fontSize: 11.5 }}>Capabilities</span>
-              <Icon name="tools" size={14} style={{ color: "var(--signal)" }} />
+              <span className="t-caption fg-2" style={{ fontSize: 11.5, fontWeight: 600 }}>
+                Skills & Tools
+              </span>
+              <Icon name="tools" size={15} style={{ color: "var(--signal)" }} />
             </div>
-            <div className="t-h1" style={{ fontSize: 20, fontWeight: 700 }}>
+            <div className="t-h1" style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.1 }}>
               {(counts?.tools ?? 0) + (counts?.connectors ?? 0)}
             </div>
-            <div className="t-micro fg-2" style={{ fontSize: 10.5, marginTop: 1 }}>Tools & Sets</div>
+            <div className="t-micro fg-2" style={{ fontSize: 10.5, marginTop: 2 }}>
+              Connected Skills
+            </div>
           </div>
 
+          {/* Memory & Knowledge */}
           <div
             className="card"
-            style={{ padding: "10px 12px", cursor: onNav ? "pointer" : "default" }}
+            style={{
+              padding: "11px 13px",
+              cursor: onNav ? "pointer" : "default",
+              transition: "border-color 0.15s ease",
+            }}
             onClick={() => onNav?.("knowledge")}
+            title="View long-term memories, facts, and knowledge base"
           >
             <div className="row spread" style={{ alignItems: "center", marginBottom: 4 }}>
-              <span className="t-caption fg-2" style={{ fontSize: 11.5 }}>Knowledge</span>
-              <Icon name="book-open" size={14} style={{ color: "var(--io-vector)" }} />
+              <span className="t-caption fg-2" style={{ fontSize: 11.5, fontWeight: 600 }}>
+                Memory
+              </span>
+              <Icon name="brain" size={15} style={{ color: "#a855f7" }} />
             </div>
-            <div className="t-h1" style={{ fontSize: 20, fontWeight: 700 }}>
+            <div className="t-h1" style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.1 }}>
               {counts?.knowledge ?? 0}
             </div>
-            <div className="t-micro fg-2" style={{ fontSize: 10.5, marginTop: 1 }}>RAG & Q&A</div>
-          </div>
-        </div>
-
-        {/* 3. System Architecture & Runtime (Inline Pill Grid) */}
-        <div className="card" style={{ padding: "12px 14px" }}>
-          <div className="row spread" style={{ alignItems: "center", marginBottom: 8 }}>
-            <div className="row gap2" style={{ alignItems: "center" }}>
-              <Icon name="server" size={14} style={{ color: "var(--accent)" }} />
-              <span style={{ fontWeight: 600, fontSize: 13 }}>System Architecture</span>
-            </div>
-            <span className="t-micro fg-2">Runtime v1.0 · Local-First</span>
-          </div>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(4, 1fr)",
-              gap: 8,
-              fontSize: 12,
-            }}
-          >
-            <div style={{ padding: "8px 10px", background: "var(--bg-2)", borderRadius: 6 }}>
-              <div className="fg-2 t-micro" style={{ fontSize: 10 }}>Engine Runtime</div>
-              <div style={{ fontWeight: 600, marginTop: 2, fontSize: 12 }}>FastAPI + LangGraph</div>
-            </div>
-            <div style={{ padding: "8px 10px", background: "var(--bg-2)", borderRadius: 6 }}>
-              <div className="fg-2 t-micro" style={{ fontSize: 10 }}>Database</div>
-              <div style={{ fontWeight: 600, marginTop: 2, fontSize: 12 }}>SQLite (Local)</div>
-            </div>
-            <div style={{ padding: "8px 10px", background: "var(--bg-2)", borderRadius: 6 }}>
-              <div className="fg-2 t-micro" style={{ fontSize: 10 }}>Endpoint</div>
-              <div style={{ fontWeight: 600, marginTop: 2, fontSize: 12 }}>127.0.0.1:8000</div>
-            </div>
-            <div style={{ padding: "8px 10px", background: "var(--bg-2)", borderRadius: 6 }}>
-              <div className="fg-2 t-micro" style={{ fontSize: 10 }}>Privacy</div>
-              <div style={{ fontWeight: 600, marginTop: 2, fontSize: 12, color: "var(--ok)" }}>100% On-Premise</div>
+            <div className="t-micro fg-2" style={{ fontSize: 10.5, marginTop: 2 }}>
+              Recalled Facts & Docs
             </div>
           </div>
         </div>
 
-        {/* 4. Execution Metrics Bar */}
-        {stats && (
-          <div className="card" style={{ padding: "12px 14px" }}>
-            <div className="row spread" style={{ alignItems: "center", marginBottom: 8 }}>
-              <div className="row gap2" style={{ alignItems: "center" }}>
-                <Icon name="activity" size={14} style={{ color: "var(--signal)" }} />
-                <span style={{ fontWeight: 600, fontSize: 13 }}>Execution Metrics</span>
-              </div>
-              {onNav && (
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => onNav("overview")}
-                  style={{ fontSize: 11.5, padding: "2px 6px", height: 24 }}
-                >
-                  Analytics <Icon name="chevright" size={12} />
-                </button>
-              )}
-            </div>
-            <div className="row spread" style={{ gap: 12 }}>
-              <div>
-                <div className="fg-2 t-micro" style={{ fontSize: 10.5 }}>Runs (7 days)</div>
-                <div style={{ fontSize: 16, fontWeight: 700, marginTop: 1 }}>
-                  {stats.runs_7d.toLocaleString()}
-                </div>
-              </div>
-              <div>
-                <div className="fg-2 t-micro" style={{ fontSize: 10.5 }}>Success Rate</div>
-                <div style={{ fontSize: 16, fontWeight: 700, marginTop: 1, color: "var(--ok)" }}>
-                  {stats.runs_7d ? `${stats.success_rate}%` : "100%"}
-                </div>
-              </div>
-              <div>
-                <div className="fg-2 t-micro" style={{ fontSize: 10.5 }}>Avg Latency</div>
-                <div style={{ fontSize: 16, fontWeight: 700, marginTop: 1 }}>
-                  {stats.avg_latency_ms ? `${stats.avg_latency_ms}ms` : "<100ms"}
-                </div>
-              </div>
-              <div>
-                <div className="fg-2 t-micro" style={{ fontSize: 10.5 }}>Total Executions</div>
-                <div style={{ fontSize: 16, fontWeight: 700, marginTop: 1 }}>
-                  {stats.total_runs ? stats.total_runs.toLocaleString() : stats.runs_7d.toLocaleString()}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
 
-        {/* 5. Extensible Content Section (Future Widget Slot) */}
-        <div
-          className="card"
-          style={{
-            padding: "12px 14px",
-            border: "1px dashed var(--line-strong)",
-            background: "var(--bg-1)",
-          }}
-        >
-          <div className="row spread" style={{ alignItems: "center", marginBottom: 6 }}>
+        {/* 4. Quick Butler Actions (Direct interactive shortcuts) */}
+        <div className="card" style={{ padding: "12px 14px", background: "var(--bg-card)" }}>
+          <div className="row spread" style={{ alignItems: "center", marginBottom: 10 }}>
             <div className="row gap2" style={{ alignItems: "center" }}>
-              <Icon name="widget" size={14} style={{ color: "var(--accent)" }} />
-              <span style={{ fontWeight: 600, fontSize: 13 }}>Custom Widgets & Integrations</span>
+              <Icon name="workflow" size={15} style={{ color: "var(--accent)" }} />
+              <span style={{ fontWeight: 600, fontSize: 13 }}>Quick Butler Actions</span>
             </div>
-            <span className="badge" style={{ fontSize: 10, padding: "1px 6px" }}>
-              Extensible Slot
+            <span className="fg-2 t-micro" style={{ fontSize: 10.5 }}>
+              Concierge Shortcuts
             </span>
-          </div>
-          <div className="fg-2 t-caption" style={{ marginBottom: 8, fontSize: 11.5 }}>
-            Ready for Home Assistant sensors, IoT controls, or custom widget cards.
           </div>
 
           <div
@@ -267,38 +236,239 @@ export function HomeInfoScreen({
               gap: 8,
             }}
           >
+            {/* Action 1: Automate a Task */}
             <div
+              className="row gap2"
               style={{
-                padding: "8px 10px",
+                padding: "10px 12px",
                 borderRadius: 6,
-                border: "1px dashed var(--line)",
-                background: "var(--bg-2)",
-                textAlign: "center",
-                fontSize: 11.5,
-                color: "var(--fg-2)",
+                background: "var(--bg-surface)",
+                border: "1px solid var(--line)",
+                cursor: onNav ? "pointer" : "default",
+                alignItems: "center",
+                transition: "background 0.15s, border-color 0.15s",
               }}
+              onClick={() => onNav?.("playground")}
             >
-              <Icon name="plug" size={15} style={{ margin: "0 auto 4px", opacity: 0.6 }} />
-              <div>IoT & Devices Slot</div>
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 6,
+                  background: "rgba(99, 102, 241, 0.12)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <Icon name="sparkles" size={16} style={{ color: "var(--accent)" }} />
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 12.5, lineHeight: 1.2 }}>Automate a Task</div>
+                <div className="fg-2 t-caption truncate" style={{ fontSize: 11, marginTop: 2 }}>
+                  Design a new intelligent workflow pipeline
+                </div>
+              </div>
             </div>
 
+            {/* Action 2: Teach Alberto */}
             <div
+              className="row gap2"
               style={{
-                padding: "8px 10px",
+                padding: "10px 12px",
                 borderRadius: 6,
-                border: "1px dashed var(--line)",
-                background: "var(--bg-2)",
-                textAlign: "center",
-                fontSize: 11.5,
-                color: "var(--fg-2)",
+                background: "var(--bg-surface)",
+                border: "1px solid var(--line)",
+                cursor: onNav ? "pointer" : "default",
+                alignItems: "center",
+                transition: "background 0.15s, border-color 0.15s",
               }}
+              onClick={() => onNav?.("knowledge-docs")}
             >
-              <Icon name="bell" size={15} style={{ margin: "0 auto 4px", opacity: 0.6 }} />
-              <div>Schedules & Alerts Slot</div>
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 6,
+                  background: "rgba(168, 85, 247, 0.12)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <Icon name="book-open" size={16} style={{ color: "#a855f7" }} />
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 12.5, lineHeight: 1.2 }}>Teach Alberto</div>
+                <div className="fg-2 t-caption truncate" style={{ fontSize: 11, marginTop: 2 }}>
+                  Store facts, house manuals, or notes in memory
+                </div>
+              </div>
+            </div>
+
+            {/* Action 3: Connect Devices & Tools */}
+            <div
+              className="row gap2"
+              style={{
+                padding: "10px 12px",
+                borderRadius: 6,
+                background: "var(--bg-surface)",
+                border: "1px solid var(--line)",
+                cursor: onNav ? "pointer" : "default",
+                alignItems: "center",
+                transition: "background 0.15s, border-color 0.15s",
+              }}
+              onClick={() => onNav?.("integrations")}
+            >
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 6,
+                  background: "rgba(245, 158, 11, 0.12)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <Icon name="plug-zap" size={16} style={{ color: "var(--signal)" }} />
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 12.5, lineHeight: 1.2 }}>Connect Devices & Tools</div>
+                <div className="fg-2 t-caption truncate" style={{ fontSize: 11, marginTop: 2 }}>
+                  Configure MCP tools, smart home, & connectors
+                </div>
+              </div>
+            </div>
+
+            {/* Action 4: Audit Executions */}
+            <div
+              className="row gap2"
+              style={{
+                padding: "10px 12px",
+                borderRadius: 6,
+                background: "var(--bg-surface)",
+                border: "1px solid var(--line)",
+                cursor: onNav ? "pointer" : "default",
+                alignItems: "center",
+                transition: "background 0.15s, border-color 0.15s",
+              }}
+              onClick={() => onNav?.("traces")}
+            >
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 6,
+                  background: "rgba(16, 185, 129, 0.12)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <Icon name="activity" size={16} style={{ color: "var(--ok)" }} />
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 12.5, lineHeight: 1.2 }}>Audit Executions</div>
+                <div className="fg-2 t-caption truncate" style={{ fontSize: 11, marginTop: 2 }}>
+                  View run traces, model turns, and safety logs
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
+        {/* 5. Recent Activity & Conversations Timeline */}
+        <div className="card" style={{ padding: "12px 14px", background: "var(--bg-card)" }}>
+          <div className="row spread" style={{ alignItems: "center", marginBottom: 10 }}>
+            <div className="row gap2" style={{ alignItems: "center" }}>
+              <Icon name="inbox" size={15} style={{ color: "var(--accent)" }} />
+              <span style={{ fontWeight: 600, fontSize: 13 }}>Recent Butler Interactions</span>
+            </div>
+            {onNav && (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => onNav("traces")}
+                style={{ fontSize: 11, padding: "2px 8px", height: 24 }}
+              >
+                All History <Icon name="chevright" size={11} />
+              </button>
+            )}
+          </div>
+
+          {recentConversations.length > 0 ? (
+            <div className="col gap2">
+              {recentConversations.map((c) => (
+                <div
+                  key={c.thread_id}
+                  className="row spread"
+                  style={{
+                    padding: "8px 10px",
+                    background: "var(--bg-surface)",
+                    borderRadius: 6,
+                    border: "1px solid var(--line)",
+                    alignItems: "center",
+                    gap: 10,
+                  }}
+                >
+                  <div className="row gap2" style={{ alignItems: "center", minWidth: 0, flex: 1 }}>
+                    <div
+                      style={{
+                        width: 26,
+                        height: 26,
+                        borderRadius: 5,
+                        background: "rgba(99, 102, 241, 0.1)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                      }}
+                    >
+                      <Icon name="bot" size={13} style={{ color: "var(--accent)" }} />
+                    </div>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="truncate" style={{ fontSize: 12, fontWeight: 600 }}>
+                        {c.preview || "Conversation Turn"}
+                      </div>
+                      <div className="fg-2 t-micro" style={{ fontSize: 10.5, marginTop: 1 }}>
+                        {c.turns} {c.turns === 1 ? "turn" : "turns"} · {formatTimeAgo(c.last_activity || c.started_at)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <StatusPill
+                    status={c.status === "done" ? "done" : c.status === "error" ? "error" : "running"}
+                    label={c.status === "done" ? "Completed" : c.status === "error" ? "Error" : "Active"}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div
+              style={{
+                padding: "16px 12px",
+                textAlign: "center",
+                color: "var(--fg-2)",
+                fontSize: 12,
+                background: "var(--bg-surface)",
+                borderRadius: 6,
+                border: "1px dashed var(--line)",
+              }}
+            >
+              <Icon name="bot" size={20} style={{ margin: "0 auto 6px", opacity: 0.5 }} />
+              <div style={{ fontWeight: 600, color: "var(--fg-1)", marginBottom: 2 }}>
+                No recent interactions yet
+              </div>
+              <div style={{ fontSize: 11, maxWidth: 360, margin: "0 auto" }}>
+                Ask Alberto a question in the chat panel on the right or launch an automation to begin.
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
