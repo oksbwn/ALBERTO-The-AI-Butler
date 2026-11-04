@@ -446,3 +446,56 @@ async def test_regression_macos_and_olmx_distinct(test_project, adapter):
         source_ref="turn:1",
     )
     assert cand_olmx.kind == "application"
+
+
+@pytest.mark.asyncio
+async def test_cross_turn_relationship_resolution_and_runs_on_normalization(test_project, adapter):
+    """Ensure existing entities referenced across turns by name/alias resolve properly,
+    and model RUNS device relationships auto-normalize to RUNS_ON without review pauses."""
+    from alberto.knowledge.graph import GraphEntity
+
+    # 1. Seed existing entity from previous turn
+    mac_entity = GraphEntity(
+        id="ent_device_mac_mini",
+        tenant_id=test_project.tenant_id,
+        project_id=test_project.id,
+        name="MAC mini",
+        kind="device",
+        canonical_name="mac mini",
+        description="User Mac mini server",
+        confidence=1.0,
+    )
+    await adapter.create_or_update_entity(mac_entity)
+
+    # 2. Next turn proposes model and RUNS relationship pointing to 'MAC mini'
+    cand_model = EntityCandidate(
+        temporary_id="e1",
+        name="gemma 12 B",
+        kind="model",
+        confidence=1.0,
+        evidence_refs=["turn:2"],
+    )
+    cand_rel = RelationshipCandidate(
+        source_ref="e1",
+        target_ref="MAC mini",
+        kind="RUNS",
+        confidence=1.0,
+        evidence_refs=["turn:2"],
+    )
+
+    async with SessionLocal() as session:
+        val = await GraphManagerService.resolve_and_validate(
+            tenant_id=test_project.tenant_id,
+            project_id=test_project.id,
+            candidate_entities=[cand_model],
+            candidate_relationships=[cand_rel],
+            source_ref="turn:2",
+            session=session,
+            adapter=adapter,
+        )
+
+    assert not val["requires_review"], f"Unexpected review required: {val['review_reasons']}"
+    assert len(val["resolved_relationships"]) == 1
+    rel = val["resolved_relationships"][0]
+    assert rel.target_id == "ent_device_mac_mini"
+    assert rel.kind == "RUNS_ON"

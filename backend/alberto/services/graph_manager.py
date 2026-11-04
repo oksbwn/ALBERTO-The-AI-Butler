@@ -107,6 +107,7 @@ class GraphManagerService:
         candidate_relationships: list[RelationshipCandidate],
         source_ref: str = "memory_curator",
         session: Any | None = None,
+        adapter: Any | None = None,
     ) -> dict[str, Any]:
         """Resolve canonical identities and validate candidates deterministically WITHOUT mutating graph.
 
@@ -119,7 +120,7 @@ class GraphManagerService:
                 "review_reasons": list[str],
             }
         """
-        adapter = get_graph_adapter()
+        adapter = adapter or get_graph_adapter()
         review_reasons: list[str] = []
         requires_review = False
 
@@ -135,6 +136,17 @@ class GraphManagerService:
 
         resolved_entities: list[GraphEntity] = []
         resolved_entity_map: dict[str, str] = {ent.id: ent.id for ent in existing_entities}
+        for ent in existing_entities:
+            if ent.name:
+                resolved_entity_map[ent.name.strip().lower()] = ent.id
+                resolved_entity_map[ent.name.strip()] = ent.id
+            if ent.canonical_name:
+                resolved_entity_map[ent.canonical_name.strip().lower()] = ent.id
+            canon = cls.canonicalize_name(ent.canonical_name or ent.name)
+            if canon:
+                resolved_entity_map[canon] = ent.id
+            for alias in cls._extract_aliases(ent):
+                resolved_entity_map[alias.lower()] = ent.id
 
         # 2. Resolve Entities
         for cand in candidate_entities:
@@ -275,9 +287,24 @@ class GraphManagerService:
         for rel in candidate_relationships:
             src_key = rel.source_ref.strip().lower()
             tgt_key = rel.target_ref.strip().lower()
+            src_canon = cls.canonicalize_name(rel.source_ref)
+            tgt_canon = cls.canonicalize_name(rel.target_ref)
 
-            src_id = resolved_entity_map.get(rel.source_ref) or resolved_entity_map.get(src_key)
-            tgt_id = resolved_entity_map.get(rel.target_ref) or resolved_entity_map.get(tgt_key)
+            src_id = (
+                resolved_entity_map.get(rel.source_ref)
+                or resolved_entity_map.get(src_key)
+                or resolved_entity_map.get(src_canon)
+            )
+            tgt_id = (
+                resolved_entity_map.get(rel.target_ref)
+                or resolved_entity_map.get(tgt_key)
+                or resolved_entity_map.get(tgt_canon)
+            )
+
+            if not src_id and src_canon in by_canonical and len(by_canonical[src_canon]) == 1:
+                src_id = by_canonical[src_canon][0].id
+            if not tgt_id and tgt_canon in by_canonical and len(by_canonical[tgt_canon]) == 1:
+                tgt_id = by_canonical[tgt_canon][0].id
 
             if not src_id or not tgt_id:
                 requires_review = True
@@ -319,11 +346,12 @@ class GraphManagerService:
             if src_ent and tgt_ent:
                 src_k = (src_ent.kind or "").lower()
                 tgt_k = (tgt_ent.kind or "").lower()
-                if clean_kind == "RUNS" and src_k in ("application", "framework", "service") and tgt_k in ("device", "host", "platform"):
-                    requires_review = True
-                    review_reasons.append(
-                        f"Possible inverted relationship direction: '{src_ent.name}' ({src_k}) RUNS '{tgt_ent.name}' ({tgt_k})"
-                    )
+                if clean_kind == "RUNS" and src_k in ("application", "framework", "service", "model") and tgt_k in ("device", "host", "platform", "hardware"):
+                    # Auto-normalize inverted RUNS (model/app RUNS device) to canonical RUNS_ON
+                    clean_kind = "RUNS_ON"
+                elif clean_kind == "RUNS_ON" and src_k in ("device", "host", "platform", "hardware") and tgt_k in ("application", "framework", "service", "model"):
+                    # Auto-normalize inverted RUNS_ON (device RUNS_ON model) to RUNS
+                    clean_kind = "RUNS" 
                 elif clean_kind == "DEPLOYED_VIA" and tgt_k in ("application", "framework") and src_k in ("platform", "device"):
                     requires_review = True
                     review_reasons.append(
@@ -359,9 +387,10 @@ class GraphManagerService:
         project_id: str,
         resolved_entities: list[GraphEntity],
         resolved_relationships: list[GraphRelationship],
+        adapter: Any | None = None,
     ) -> dict[str, list[str]]:
         """Apply pre-validated, approved entities and relationships to LadybugDB."""
-        adapter = get_graph_adapter()
+        adapter = adapter or get_graph_adapter()
         applied_entities: list[str] = []
         applied_relationships: list[str] = []
 

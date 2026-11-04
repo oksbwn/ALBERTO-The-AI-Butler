@@ -160,8 +160,8 @@ DEFAULT_RELATIONSHIP_TYPES: list[dict[str, Any]] = [
     {
         "canonical_key": "RUNS_ON",
         "description": "Software, container, or service executes on a host, platform, or hardware device.",
-        "allowed_source_types": ["application", "service", "modelrunner", "operating_system"],
-        "allowed_target_types": ["device", "platform", "operating_system"],
+        "allowed_source_types": ["application", "service", "modelrunner", "operating_system", "model"],
+        "allowed_target_types": ["device", "platform", "operating_system", "host", "hardware"],
         "direction_semantics": "source_to_target",
         "aliases": ["EXECUTED_ON", "HOSTED_BY"],
     },
