@@ -27,6 +27,7 @@ import { ChannelsScreen, TriggersScreen, DatasetsScreen, HandoffScreen } from "@
 import { Icon } from "@/components/icons";
 import { api, Agent, ComponentT, Project, Tool, Workflow } from "@/lib/api";
 import { AuthGate } from "@/components/login";
+import { pathToScreen, screenToPath } from "@/lib/routing";
 
 type View = { screen: string };
 
@@ -55,7 +56,9 @@ const PARENT: Record<string, [string, string]> = {
 };
 
 function App() {
-  const [view, setView] = useState<View>({ screen: "home" });
+  const [view, setView] = useState<View>(() => ({
+    screen: typeof window !== "undefined" ? pathToScreen(window.location.pathname) : "home",
+  }));
   const [cmdOpen, setCmdOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [project, setProject] = useState<Project | null>(null);
@@ -84,6 +87,26 @@ function App() {
 
   useEffect(() => { reloadProject(); }, []);
   useEffect(() => {
+    const handlePopState = () => {
+      const screen = pathToScreen(window.location.pathname);
+      setView({ screen });
+    };
+    const initial = pathToScreen(window.location.pathname);
+    setView((cur) => (cur.screen === initial ? cur : { screen: initial }));
+
+    // Normalize URL path to the canonical deterministic 2-level path (e.g. / -> /home/overview)
+    if (typeof window !== "undefined") {
+      const canonical = screenToPath(initial);
+      if (window.location.pathname !== canonical) {
+        window.history.replaceState({ screen: initial }, "", canonical);
+      }
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setCmdOpen((o) => !o); }
     };
@@ -91,13 +114,20 @@ function App() {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
-  const go = (v: any) => {
-    setView({ screen: v.screen || "home" });
-  };
-
   const navScreen = (screen: string) => {
     if (screen !== "tools") setFocusToolSet(null);
     setView({ screen });
+    if (typeof window !== "undefined") {
+      const path = screenToPath(screen);
+      if (window.location.pathname !== path) {
+        window.history.pushState({ screen }, "", path);
+      }
+    }
+  };
+
+  const go = (v: any) => {
+    const screen = v?.screen || "home";
+    navScreen(screen);
   };
 
   // Breadcrumbs: show active screen hierarchy, without project name on top

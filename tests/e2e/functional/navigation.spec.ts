@@ -27,26 +27,48 @@ test.describe("Alberto Shell & Main Navigation E2E", () => {
     // 1. Home / Assistant
     await page.goto("/");
     await expect(page.locator(".topbar")).toBeVisible();
+    await expect(page).toHaveURL(/\/home\/overview/);
 
     // 2. Automate -> Workflows
     await navigateTo(page, "Workflows");
     await expect(page.locator(".topbar")).toContainText("Workflows");
+    await expect(page).toHaveURL(/\/automate\/workflows/);
 
     // 3. Automate -> Playground
     await navigateTo(page, "Playground");
     await expect(page.locator(".topbar")).toContainText("Automate");
+    await expect(page).toHaveURL(/\/automate\/playground/);
 
     // 4. Agents
     await navigateTo(page, "Agents");
     await expect(page.locator(".topbar")).toContainText("Agents");
+    await expect(page).toHaveURL(/\/automate\/agents/);
 
     // 5. Integrations
     await navigateTo(page, "Integrations");
     await expect(page.locator(".topbar")).toContainText("Integrations");
+    await expect(page).toHaveURL(/\/integrations\/connectors/);
 
     // 6. Settings
     await navigateTo(page, "Settings");
     await expect(page.locator(".topbar")).toContainText("Settings");
+    await expect(page).toHaveURL(/\/settings\/general/);
+
+    // 7. Browser history back / forward navigation
+    await page.goBack();
+    await expect(page).toHaveURL(/\/integrations\/connectors/);
+    await page.goForward();
+    await expect(page).toHaveURL(/\/settings\/general/);
+  });
+
+  test("supports direct deep-link loading of deterministic 2-level routes", async ({ page }) => {
+    await page.goto("/automate/workflows");
+    await expect(page.locator(".topbar")).toContainText("Workflows");
+    await expect(page).toHaveURL(/\/automate\/workflows/);
+
+    await page.goto("/automate/playground");
+    await expect(page.locator(".topbar")).toContainText("Automate");
+    await expect(page).toHaveURL(/\/automate\/playground/);
   });
 
   test("toggles console color theme between light and dark", async ({ page }) => {

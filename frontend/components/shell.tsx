@@ -392,7 +392,7 @@ export function ProjectSidebar({
   return (
     <div style={{ width: collapsed ? 58 : 224, transition: "width 0.18s cubic-bezier(0.4, 0, 0.2, 1)", flex: "none", background: "var(--bg-1)", borderRight: "1px solid var(--line)", display: "flex", flexDirection: "column", minHeight: 0, position: "relative" }}>
       <div className="row spread" style={{ height: 52, flex: "none", padding: collapsed ? 0 : "0 14px", borderBottom: "1px solid var(--line)", alignItems: "center", justifyContent: collapsed ? "center" : "space-between" }}>
-        <div className="row gap2" style={{ minWidth: 0, alignItems: "center" }}>
+        <div className="row gap2" onClick={() => onNav("home")} style={{ minWidth: 0, alignItems: "center", cursor: "pointer" }}>
           <Icon name="flame" size={20} style={{ color: "var(--accent)" }} />
           {!collapsed && <div className="t-h2 truncate" style={{ minWidth: 0, letterSpacing: "-0.01em" }}>Alberto</div>}
         </div>

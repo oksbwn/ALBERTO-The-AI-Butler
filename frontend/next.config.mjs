@@ -22,10 +22,15 @@ const nextConfig = {
   async rewrites() {
     // Server-side proxy target, baked at BUILD time for standalone output.
     const api = process.env.ALBERTO_API_URL || process.env.FORGE_API_URL || "http://127.0.0.1:8000";
-    return [
-      { source: "/api/alberto/:path*", destination: `${api}/:path*` },
-      { source: "/api/forge/:path*", destination: `${api}/:path*` },
-    ];
+    return {
+      beforeFiles: [
+        { source: "/api/alberto/:path*", destination: `${api}/:path*` },
+        { source: "/api/forge/:path*", destination: `${api}/:path*` },
+      ],
+      fallback: [
+        { source: "/:path*", destination: "/" },
+      ],
+    };
   },
 };
 export default nextConfig;
