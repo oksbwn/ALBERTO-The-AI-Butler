@@ -203,19 +203,7 @@ echo ""
 # ------------------------------------------------------------------------------
 # 7. Monitor Processes Concurrently
 # ------------------------------------------------------------------------------
-while kill -0 "${BACKEND_PID}" 2>/dev/null && kill -0 "${FRONTEND_PID}" 2>/dev/null; do
-  sleep 1
-done
-
-# If one died, capture failure exit code and trigger cleanup
-if ! kill -0 "${BACKEND_PID}" 2>/dev/null; then
-  wait "${BACKEND_PID}" || EXIT_CODE=$?
-  echo "Backend process exited with code ${EXIT_CODE:-0}"
-  exit "${EXIT_CODE:-1}"
-fi
-
-if ! kill -0 "${FRONTEND_PID}" 2>/dev/null; then
-  wait "${FRONTEND_PID}" || EXIT_CODE=$?
-  echo "Frontend process exited with code ${EXIT_CODE:-0}"
-  exit "${EXIT_CODE:-1}"
-fi
+# Block efficiently until either service exits; triggers cleanup via trap
+wait -n "${BACKEND_PID}" "${FRONTEND_PID}" 2>/dev/null || EXIT_CODE=$?
+echo "A monitored service exited (code: ${EXIT_CODE:-0})"
+exit "${EXIT_CODE:-0}"
