@@ -69,14 +69,18 @@ if [ "${NODE_MAJOR}" -lt 18 ]; then
 fi
 
 PKG_RUNNER=""
-if command -v pnpm >/dev/null 2>&1; then
+if [ -f "${REPO_ROOT}/frontend/package-lock.json" ] && command -v npm >/dev/null 2>&1; then
+  PKG_RUNNER="npm"
+elif [ -f "${REPO_ROOT}/frontend/pnpm-lock.yaml" ] && command -v pnpm >/dev/null 2>&1; then
   PKG_RUNNER="pnpm"
 elif command -v npm >/dev/null 2>&1; then
   PKG_RUNNER="npm"
+elif command -v pnpm >/dev/null 2>&1; then
+  PKG_RUNNER="pnpm"
 elif command -v yarn >/dev/null 2>&1; then
   PKG_RUNNER="yarn"
 else
-  echo "Error: No package manager found (pnpm or npm required)." >&2
+  echo "Error: No package manager found (npm or pnpm required)." >&2
   exit 1
 fi
 
