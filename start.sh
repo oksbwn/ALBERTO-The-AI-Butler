@@ -156,9 +156,18 @@ fi
 
 echo "Starting FastAPI backend on port ${BACKEND_PORT}..."
 export PYTHONPATH="${REPO_ROOT}/backend${PYTHONPATH:+:${PYTHONPATH}}"
-RELOAD_ARGS="--reload --reload-dir ${REPO_ROOT}/backend/alberto"
-if [ "${ALBERTO_RELOAD:-1}" = "0" ]; then
-  RELOAD_ARGS=""
+# On Windows (MSYS/MINGW), uvicorn's multiprocessing reloader deadlocks on pipe handles during concurrent I/O.
+# Default to stable single-process mode on Windows unless explicitly forced via ALBERTO_RELOAD=1.
+IS_WIN=0
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) IS_WIN=1 ;;
+esac
+
+RELOAD_ARGS=""
+if [ "${IS_WIN}" -eq 0 ] && [ "${ALBERTO_RELOAD:-1}" != "0" ]; then
+  RELOAD_ARGS="--reload --reload-dir ${REPO_ROOT}/backend/alberto"
+elif [ "${ALBERTO_RELOAD:-0}" = "1" ]; then
+  RELOAD_ARGS="--reload --reload-dir ${REPO_ROOT}/backend/alberto"
 fi
 "${PYTHON_BIN}" -m uvicorn alberto.main:app --host 0.0.0.0 --port "${BACKEND_PORT}" ${RELOAD_ARGS} < /dev/null &
 BACKEND_PID=$!
