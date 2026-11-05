@@ -160,7 +160,7 @@ RELOAD_ARGS="--reload --reload-dir ${REPO_ROOT}/backend/alberto"
 if [ "${ALBERTO_RELOAD:-1}" = "0" ]; then
   RELOAD_ARGS=""
 fi
-"${PYTHON_BIN}" -m uvicorn alberto.main:app --host 0.0.0.0 --port "${BACKEND_PORT}" ${RELOAD_ARGS} &
+"${PYTHON_BIN}" -m uvicorn alberto.main:app --host 0.0.0.0 --port "${BACKEND_PORT}" ${RELOAD_ARGS} < /dev/null &
 BACKEND_PID=$!
 
 sleep 1
@@ -178,14 +178,11 @@ if [ -n "${PYTHON_BIN}" ] && [ -f "${REPO_ROOT}/backend/alberto/util/process_cle
 fi
 
 echo "Starting Next.js frontend on port ${FRONTEND_PORT}..."
-(
-  cd "${REPO_ROOT}/frontend"
-  if [ "${FRONTEND_PORT}" = "3000" ]; then
-    "${PKG_RUNNER}" run dev
-  else
-    "${PKG_RUNNER}" run dev -- -p "${FRONTEND_PORT}"
-  fi
-) &
+if [ "${FRONTEND_PORT}" = "3000" ]; then
+  "${PKG_RUNNER}" --prefix "${REPO_ROOT}/frontend" run dev < /dev/null &
+else
+  "${PKG_RUNNER}" --prefix "${REPO_ROOT}/frontend" run dev -- -p "${FRONTEND_PORT}" < /dev/null &
+fi
 FRONTEND_PID=$!
 
 sleep 1
