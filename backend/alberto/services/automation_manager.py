@@ -679,13 +679,16 @@ class AutomationManagerService:
         full_text = " ".join(c.get("content", "") for c in clarifications).strip().lower()
         words = full_text.split()
         is_clear = (
-            len(words) >= 6
+            len(words) >= 5
             and any(
                 k in full_text
                 for k in (
                     "schedule", "webhook", "email", "agent", "trigger",
                     "daily", "pipeline", "team", "triage", "support",
-                    "multi", "router", "classifier", "customer"
+                    "multi", "router", "classifier", "customer",
+                    "everyday", "every day", "nightly", "morning", "pm", "am",
+                    "light", "lights", "turn off", "telegram", "home assistant",
+                    "automation", "routine"
                 )
             )
         )
@@ -926,7 +929,7 @@ class AutomationManagerService:
 
         # Determine strategy
         is_multi = any(k in conv_text for k in ("multi", "specialist", "agents", "handoff", "team", "triage"))
-        is_scheduled = any(k in conv_text for k in ("schedule", "daily", "hourly", "cron", "every morning"))
+        is_scheduled = any(k in conv_text for k in ("schedule", "daily", "hourly", "cron", "every morning", "everyday", "every day", "nightly", "11 pm", "11pm", "pm"))
         is_router = any(k in conv_text for k in ("classify", "route", "branch", "category", "intent"))
 
         strategy: PlanningStrategy = "multi_agent" if is_multi else ("hybrid" if is_router else "single_agent")
@@ -954,10 +957,17 @@ class AutomationManagerService:
 
         # 1. Triggers / Entry
         if is_scheduled:
+            cron_expr = "0 9 * * *"
+            if any(k in conv_text for k in ("11 pm", "11pm", "23:00", "23")):
+                cron_expr = "0 23 * * *"
+            elif any(k in conv_text for k in ("morning", "9 am")):
+                cron_expr = "0 9 * * *"
+            elif "hourly" in conv_text:
+                cron_expr = "0 * * * *"
             nodes.append({
                 "id": "trigger_schedule",
                 "type": "schedule",
-                "config": {"cron": "0 9 * * *", "timezone": "UTC"},
+                "config": {"cron": cron_expr, "timezone": "UTC"},
             })
             entry_id = "trigger_schedule"
         else:

@@ -1442,7 +1442,7 @@ class AssistantService:
                     matched = next((t for t in tools_to_bind if t.name == t_name), None)
                     if matched:
                         try:
-                            res = await asyncio.wait_for(matched.ainvoke(tc.get("args") or {}), timeout=20.0)
+                            res = await asyncio.wait_for(matched.ainvoke(tc.get("args") or {}), timeout=90.0)
                             yield {"event": "tool", "data": {"name": t_name, "result": str(res)}}
                             formatted_messages.append(ToolMessage(tool_call_id=tc_id, content=_compact_tool_result(res)))
                         except Exception as te:
