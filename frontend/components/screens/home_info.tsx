@@ -198,7 +198,7 @@ export function HomeInfoScreen({
               cursor: onNav ? "pointer" : "default",
               transition: "border-color 0.15s ease",
             }}
-            onClick={() => onNav?.("knowledge")}
+            onClick={() => onNav?.("knowledge-memory")}
             title="View long-term memories, facts, and knowledge base"
           >
             <div className="row spread" style={{ alignItems: "center", marginBottom: 4 }}>
@@ -208,7 +208,7 @@ export function HomeInfoScreen({
               <Icon name="brain" size={15} style={{ color: "#a855f7" }} />
             </div>
             <div className="t-h1" style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.1 }}>
-              {counts?.knowledge ?? 0}
+              {(counts?.memories ?? 0) + (counts?.knowledge ?? 0)}
             </div>
             <div className="t-micro fg-2" style={{ fontSize: 10.5, marginTop: 2 }}>
               Recalled Facts & Docs

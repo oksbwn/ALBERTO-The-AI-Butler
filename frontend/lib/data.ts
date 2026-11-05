@@ -389,7 +389,7 @@ export const PROJECT_NAV: NavEntry[] = [
       { id: "knowledge-vector", label: "Vector Store", icon: "layers", help: "ChromaDB vector persistence, chunk map visualizer, and embedding health." },
       { id: "knowledge-qa", label: "Q&A Pairs", icon: "n_qa", help: "Curated questions and answers for exact RAG matching." },
       { id: "knowledge-graph", label: "Knowledge Graph", icon: "n_router", help: "LadybugDB graph entities, relations, and ontology." },
-      { id: "knowledge-memory", label: "Long-Term Memory", icon: "brain", help: "Authoritative SQLite & Markdown memory entries." },
+      { id: "knowledge-memory", label: "Long-Term Memory", icon: "brain", countKey: "memories", help: "Authoritative SQLite & Markdown memory entries." },
     ],
   },
   {
