@@ -42,13 +42,14 @@ class ProjectService:
     async def counts(session: AsyncSession, tenant_id: str, project_id: str) -> dict[str, int]:
         """Per-resource counts for the project sidebar badges. Cheap COUNT(*) per table
         (tenant+project scoped) instead of pulling six full lists client-side."""
+        from alberto.services.agents import AgentService
+        await AgentService.ensure_system_agents(session, tenant_id, project_id)
+
         out: dict[str, int] = {}
         for key, model in _COUNT_MODELS.items():
             stmt = select(func.count()).select_from(model).where(
                 model.tenant_id == tenant_id, model.project_id == project_id
             )
-            if model is Agent:
-                stmt = stmt.where(Agent.is_system.is_(False))
             n = await session.scalar(stmt)
             out[key] = int(n or 0)
         open_handoffs = await session.scalar(
@@ -60,7 +61,7 @@ class ProjectService:
         )
         out["handoffs"] = int(open_handoffs or 0)
 
-        from alberto.models.entities import MemoryLearningEvent
+        from alberto.models.entities import Memory, MemoryLearningEvent
         pending_reviews = await session.scalar(
             select(func.count()).select_from(MemoryLearningEvent).where(
                 MemoryLearningEvent.tenant_id == tenant_id,
@@ -69,6 +70,15 @@ class ProjectService:
             )
         )
         out["pending_reviews"] = int(pending_reviews or 0)
+
+        active_memories = await session.scalar(
+            select(func.count()).select_from(Memory).where(
+                Memory.tenant_id == tenant_id,
+                Memory.project_id == project_id,
+                Memory.status == "active",
+            )
+        )
+        out["memories"] = int(active_memories or 0)
         return out
 
     @staticmethod

@@ -33,6 +33,7 @@ class ProjectCountsOut(BaseModel):
     handoffs: int
     connectors: int = 0
     pending_reviews: int = 0
+    memories: int = 0
 
 
 class ProjectCreate(BaseModel):
