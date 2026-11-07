@@ -909,7 +909,7 @@ export function ChatScreen({
         } else if (f.event === "interrupt") {
           interruptPrompt = describeInterrupt(f.data);
         } else if (f.event === "done") {
-          mutated = (f.data?.mutated || []).length > 0;
+          mutated = Array.isArray(f.data?.mutated) ? f.data.mutated.length > 0 : Boolean(f.data?.mutated);
           if (typeof f.data?.completion_tokens === "number") {
             serverCompletionTokens = f.data.completion_tokens;
           }
@@ -987,7 +987,7 @@ export function ChatScreen({
       setLiveTokens(0);
       setBusy(false);
       setPendingApproval(interruptPrompt);
-      if (mutated) onMutate?.();
+      if (mutated || persona === "automation_manager") onMutate?.();
       if (answer && autoSpeak) {
         speakText(answer);
       }

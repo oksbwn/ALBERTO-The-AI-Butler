@@ -482,3 +482,41 @@ async def test_assistant_fast_stream_with_registered_model(sample_project: Proje
 
     assert any(c.get("event") == "messages" for c in chunks)
 
+
+@pytest.mark.asyncio
+async def test_assistant_automation_manager_builds_workflow_proposal_in_playground(sample_project: Project):
+    """When asking Automation Manager in Playground to build a workflow, it generates a proposal and emits mutated."""
+    from alberto.services.automation_manager import AutomationManagerService
+
+    class DummyModel:
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, messages, config=None):
+            from langchain_core.messages import AIMessageChunk
+            yield AIMessageChunk(content="Sure, designing that workflow now.")
+
+    with patch("alberto.services.assistant.resolve_model", return_value=DummyModel()):
+        chunks = []
+        async for chunk in AssistantService._fast_stream(
+            tenant_id=sample_project.tenant_id,
+            project_id=sample_project.id,
+            messages=[{"role": "user", "content": "Build a workflow that routes customer support inquiries"}],
+            persona="automation_manager",
+        ):
+            chunks.append(chunk)
+
+    done_events = [c for c in chunks if c.get("event") == "done"]
+    assert len(done_events) == 1
+    mutated = done_events[0]["data"]["mutated"]
+    assert isinstance(mutated, list) and len(mutated) >= 1
+    assert mutated[0]["kind"] == "automation_session"
+
+    async with SessionLocal() as s:
+        sessions = await AutomationManagerService.list_sessions(s, sample_project.tenant_id, sample_project.id)
+        assert len(sessions) >= 1
+        assert sessions[0].proposal is not None
+        assert sessions[0].proposal.get("executable") is not None
+        assert len(sessions[0].proposal["executable"].get("nodes", [])) >= 2
+
+

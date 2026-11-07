@@ -95,13 +95,38 @@ export function PlaygroundScreen({
   const [loadErr, setLoadErr] = useState<string | null>(null);
 
   // Load project workflows and authoring sessions
-  const loadSessions = useCallback(async () => {
+  const refreshWorkflows = useCallback(() => {
+    if (!project?.id) return;
+    api.listWorkflows(project.id)
+      .then((ws) => {
+        setWfs(ws);
+        const active = ws.find((w) => w.status === "active") || ws[0] || null;
+        setWf(active);
+        if (active) setLoadErr(null);
+      })
+      .catch((e) => setLoadErr(String(e.message || e)));
+  }, [project?.id]);
+
+  const loadSessions = useCallback(async (selectLatest = false) => {
     if (!project?.id) return;
     try {
       const sessList = await api.listAutomationSessions(project.id);
       setSessions(sessList);
-      if (sessList.length > 0 && !activeSession) {
+      if (sessList.length > 0 && (selectLatest || !activeSession)) {
         setActiveSession(sessList[0]);
+        if (sessList[0]?.proposal?.safe_test_results) {
+          setSafeTestResult(sessList[0].proposal.safe_test_results);
+        }
+      } else if (sessList.length > 0 && activeSession) {
+        const updated = sessList.find((s) => s.id === activeSession.id);
+        if (updated && updated.revision !== activeSession.revision) {
+          setActiveSession(updated);
+          if (updated.proposal?.safe_test_results) {
+            setSafeTestResult(updated.proposal.safe_test_results);
+          }
+        }
+      }
+      if (false) { setActiveSession(sessList[0]);
       }
     } catch {
       // ignore
@@ -704,6 +729,10 @@ export function PlaygroundScreen({
           persona="automation_manager"
           externalInput={externalChatInput}
           onExternalInputConsumed={() => setExternalChatInput("")}
+          onMutate={() => {
+            loadSessions(true);
+            refreshWorkflows();
+          }}
         />
       </div>
     </div>

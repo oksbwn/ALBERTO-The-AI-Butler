@@ -688,7 +688,13 @@ class AutomationManagerService:
                     "multi", "router", "classifier", "customer",
                     "everyday", "every day", "nightly", "morning", "pm", "am",
                     "light", "lights", "turn off", "telegram", "home assistant",
-                    "automation", "routine"
+                    "automation", "routine", "workflow", "build", "create",
+                    "design", "generate", "make", "draft", "tool", "llm",
+                    "rag", "knowledge", "onboarding", "alert", "monitor",
+                    "notify", "slack", "fetch", "api", "http", "echo",
+                    "summarize", "report", "transform", "filter", "search",
+                    "retrieve", "approve", "review", "iot", "sensor",
+                    "home", "temperature", "turn"
                 )
             )
         )
