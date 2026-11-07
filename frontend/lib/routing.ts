@@ -139,3 +139,35 @@ export function screenToPath(screen: string): string {
   return SCREEN_TO_PATH[screen] || (screen === "home" ? "/home/overview" : `/${screen}/general`);
 }
 
+export interface NavigationTarget {
+  screen: string;
+  params: Record<string, string>;
+}
+
+export function parsePathAndQuery(urlOrPath: string): NavigationTarget {
+  const [pathname, search] = urlOrPath.split("?");
+  const screen = pathToScreen(pathname);
+  const params: Record<string, string> = {};
+  if (search) {
+    const sp = new URLSearchParams(search);
+    sp.forEach((val, key) => {
+      params[key] = val;
+    });
+  }
+  return { screen, params };
+}
+
+export function buildUrl(screen: string, params?: Record<string, string>): string {
+  const path = screenToPath(screen);
+  if (!params || Object.keys(params).length === 0) {
+    return path;
+  }
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== "") {
+      sp.set(k, v);
+    }
+  }
+  const qs = sp.toString();
+  return qs ? `${path}?${qs}` : path;
+}

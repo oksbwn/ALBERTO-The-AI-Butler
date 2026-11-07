@@ -456,7 +456,7 @@ export function NodeConfigModal({
                       value={selectedUpstreamId}
                       onChange={(e) => setSelectedUpstreamId(e.target.value)}
                     >
-                      <option value="__combined__">Combined ({upstreamNodes.length})</option>
+                      <option value="__combined__">Combined Branches ({upstreamNodes.length})</option>
                       {upstreamNodes.map((u) => (
                         <option key={u.id} value={u.id}>
                           {u.data.config?.name || u.id}
@@ -905,7 +905,7 @@ function MessageTreeViewer({
   collapseAllSignal?: number;
 }) {
   // Global set of expanded path keys for this tree (default collapsed)
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set<string>());
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set<string>([prefix, `${prefix}.payload`]));
 
   // Expand all signal
   useEffect(() => {

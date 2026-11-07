@@ -1,5 +1,5 @@
 "use client";
-/* Forge - root app: routing + chrome assembly (a single navigable SPA, like the handoff). */
+/* Alberto - root app: routing + chrome assembly (a single navigable SPA with URL query deep linking). */
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Topbar, ProjectSidebar, CommandPalette, Crumb } from "@/components/shell";
 import { HomeScreen } from "@/components/screens/home";
@@ -27,9 +27,9 @@ import { TriggersScreen, DatasetsScreen, HandoffScreen } from "@/components/scre
 import { Icon } from "@/components/icons";
 import { api, Agent, ComponentT, Project, Tool, Workflow } from "@/lib/api";
 import { AuthGate } from "@/components/login";
-import { pathToScreen, screenToPath } from "@/lib/routing";
+import { buildUrl, parsePathAndQuery, pathToScreen, screenToPath } from "@/lib/routing";
 
-type View = { screen: string };
+type View = { screen: string; params: Record<string, string> };
 
 const SCREEN_LABEL: Record<string, string> = {
   home: "Home", chat: "Home", overview: "Analytics", automate: "Automate Playground", workflows: "Workflows", "workflow-canvas": "Workflow Canvas",
@@ -56,9 +56,12 @@ const PARENT: Record<string, [string, string]> = {
 };
 
 function App() {
-  const [view, setView] = useState<View>(() => ({
-    screen: typeof window !== "undefined" ? pathToScreen(window.location.pathname) : "home",
-  }));
+  const [view, setView] = useState<View>(() => {
+    if (typeof window !== "undefined") {
+      return parsePathAndQuery(window.location.pathname + window.location.search);
+    }
+    return { screen: "home", params: {} };
+  });
   const [cmdOpen, setCmdOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [project, setProject] = useState<Project | null>(null);
@@ -88,17 +91,22 @@ function App() {
   useEffect(() => { reloadProject(); }, []);
   useEffect(() => {
     const handlePopState = () => {
-      const screen = pathToScreen(window.location.pathname);
-      setView({ screen });
+      const target = parsePathAndQuery(window.location.pathname + window.location.search);
+      setView(target);
     };
-    const initial = pathToScreen(window.location.pathname);
-    setView((cur) => (cur.screen === initial ? cur : { screen: initial }));
+    const initial = parsePathAndQuery(window.location.pathname + window.location.search);
+    setView((cur) =>
+      cur.screen === initial.screen && JSON.stringify(cur.params) === JSON.stringify(initial.params)
+        ? cur
+        : initial
+    );
 
     // Normalize URL path to the canonical deterministic 2-level path (e.g. / -> /home/overview)
     if (typeof window !== "undefined") {
-      const canonical = screenToPath(initial);
-      if (window.location.pathname !== canonical) {
-        window.history.replaceState({ screen: initial }, "", canonical);
+      const canonical = buildUrl(initial.screen, initial.params);
+      const currentFull = window.location.pathname + window.location.search;
+      if (currentFull !== canonical) {
+        window.history.replaceState({ screen: initial.screen, params: initial.params }, "", canonical);
       }
     }
 
@@ -114,13 +122,15 @@ function App() {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
-  const navScreen = (screen: string) => {
+  const navScreen = (screen: string, params?: Record<string, string>) => {
     if (screen !== "tools") setFocusToolSet(null);
-    setView({ screen });
+    const cleanParams = params || {};
+    setView({ screen, params: cleanParams });
     if (typeof window !== "undefined") {
-      const path = screenToPath(screen);
-      if (window.location.pathname !== path) {
-        window.history.pushState({ screen }, "", path);
+      const url = buildUrl(screen, cleanParams);
+      const currentUrl = window.location.pathname + window.location.search;
+      if (currentUrl !== url) {
+        window.history.pushState({ screen, params: cleanParams }, "", url);
       }
     }
   };
@@ -166,21 +176,21 @@ function App() {
         return <HomeScreen project={project} onNav={navScreen} onMutate={() => setRefreshNonce((n) => n + 1)} />;
       case "overview": return <AnalyticsScreen project={project} onNav={navScreen} />;
       case "automate":
-      case "playground": return <PlaygroundScreen project={project} onOpenWorkflow={(w: Workflow) => { setSelWorkflow(w); navScreen("workflow-canvas"); }} onNav={navScreen} />;
-      case "workflows": return <WorkflowsScreen project={project} onOpen={(w) => { setSelWorkflow(w); navScreen("workflow-canvas"); }} onNav={navScreen} />;
-      case "workflow-canvas": return <WorkflowCanvas project={project} workflowId={selWorkflow?.id} onWorkflowChange={setSelWorkflow} onBack={() => navScreen("workflows")} onRun={() => navScreen("playground")} onRegisterFlush={(fn) => { canvasFlushRef.current = fn; }} />;
-      case "agents": return <AgentsScreen project={project} onOpen={(a) => { setSelAgent(a); navScreen("agent-config"); }} />;
-      case "agent-config": return <AgentConfigScreen project={project} agentId={selAgent?.id} onBack={() => navScreen("agents")} />;
-      case "tools": return <ToolsScreen key={focusToolSet || "all"} project={project} focusSetId={focusToolSet} onOpen={(t) => { setSelTool(t); navScreen("tool-builder"); }} />;
-      case "tool-builder": return <ToolBuilderScreen project={project} toolId={selTool?.id} onBack={() => navScreen("tools")} />;
-      case "components": return <ComponentsScreen project={project} onOpen={(c) => { setSelComponent(c); navScreen("component-builder"); }} />;
-      case "component-builder": return <ComponentBuilderScreen project={project} componentId={selComponent?.id} onBack={() => navScreen("components")} />;
+      case "playground": return <PlaygroundScreen project={project} onOpenWorkflow={(w: Workflow) => { setSelWorkflow(w); navScreen("workflow-canvas", { id: w.id }); }} onNav={navScreen} />;
+      case "workflows": return <WorkflowsScreen project={project} onOpen={(w) => { setSelWorkflow(w); navScreen("workflow-canvas", { id: w.id }); }} onNav={navScreen} />;
+      case "workflow-canvas": return <WorkflowCanvas project={project} workflowId={selWorkflow?.id || view.params?.id || view.params?.workflowId} onWorkflowChange={setSelWorkflow} onBack={() => navScreen("workflows")} onRun={() => navScreen("playground")} onRegisterFlush={(fn) => { canvasFlushRef.current = fn; }} />;
+      case "agents": return <AgentsScreen project={project} onOpen={(a) => { setSelAgent(a); navScreen("agent-config", { id: a.id }); }} />;
+      case "agent-config": return <AgentConfigScreen project={project} agentId={selAgent?.id || view.params?.id || view.params?.agentId} onBack={() => navScreen("agents")} />;
+      case "tools": return <ToolsScreen key={focusToolSet || "all"} project={project} focusSetId={focusToolSet} onOpen={(t) => { setSelTool(t); navScreen("tool-builder", { id: t.id }); }} />;
+      case "tool-builder": return <ToolBuilderScreen project={project} toolId={selTool?.id || view.params?.id || view.params?.toolId} onBack={() => navScreen("tools")} />;
+      case "components": return <ComponentsScreen project={project} onOpen={(c) => { setSelComponent(c); navScreen("component-builder", { id: c.id }); }} />;
+      case "component-builder": return <ComponentBuilderScreen project={project} componentId={selComponent?.id || view.params?.id || view.params?.componentId} onBack={() => navScreen("components")} />;
       case "auth": return <AuthCredentialsScreen project={project} onNav={navScreen} />;
       case "integrations":
       case "connectors":
-      case "mcp": return <IntegrationsScreen project={project} onNav={navScreen} onOpenTool={(t) => { setSelTool(t); navScreen("tool-builder"); }} />;
+      case "mcp": return <IntegrationsScreen project={project} onNav={navScreen} onOpenTool={(t) => { setSelTool(t); navScreen("tool-builder", { id: t.id }); }} />;
       case "integrations-playground": return <IntegrationsPlaygroundScreen project={project} onNav={navScreen} />;
-      case "channels": return <IntegrationsScreen project={project} initialTab="my" onNav={navScreen} onOpenTool={(t) => { setSelTool(t); navScreen("tool-builder"); }} />;
+      case "channels": return <IntegrationsScreen project={project} initialTab="my" onNav={navScreen} onOpenTool={(t) => { setSelTool(t); navScreen("tool-builder", { id: t.id }); }} />;
       case "knowledge":
       case "knowledge-playground":
       case "knowledge-explorer": return <KnowledgePlaygroundScreen project={project} />;
