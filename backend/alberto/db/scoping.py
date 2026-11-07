@@ -31,6 +31,7 @@ def tenant_scoped(stmt: Select, model, tenant_id: str, *, project_id: str | None
 # routes and by `tenant_guard(...)` around non-request work (runs, dispatch, scheduler). It is
 # defense-in-depth ON TOP OF the explicit `WHERE tenant_id=` scoping - never the only guard.
 _current_tenant: ContextVar[str | None] = ContextVar("forge_current_tenant", default=None)
+_skip_tenant_guard: ContextVar[bool] = ContextVar("forge_skip_tenant_guard", default=False)
 
 
 def set_current_tenant(tenant_id: str | None):
@@ -50,3 +51,18 @@ def tenant_guard(tenant_id: str | None):
         yield
     finally:
         _current_tenant.reset(token)
+
+
+@contextmanager
+def bypass_tenant_guard():
+    """Temporarily bypass the automatic tenant scoping guard (e.g., system seeding,
+    auth user resolution, superadmin operations)."""
+    token = _skip_tenant_guard.set(True)
+    try:
+        yield
+    finally:
+        _skip_tenant_guard.reset(token)
+
+
+def is_tenant_guard_bypassed() -> bool:
+    return _skip_tenant_guard.get()

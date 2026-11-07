@@ -12,10 +12,11 @@ from datetime import datetime
 
 from sqlalchemy import String, event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, with_loader_criteria
 from sqlalchemy.pool import NullPool
 
 from alberto.config import settings
+from alberto.db.scoping import current_tenant, is_tenant_guard_bypassed
 
 
 class Base(DeclarativeBase):
@@ -58,6 +59,74 @@ def _set_sqlite_pragma(dbapi_connection, connection_record):
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
+@event.listens_for(Session, "do_orm_execute")
+def _enforce_tenant_scoping(execute_state):
+    """Automatic Multi-Tenant Scoping Guard.
+
+    When `current_tenant()` is active, every ORM SELECT, UPDATE, and DELETE statement
+    targeting a model with a `tenant_id` attribute is automatically constrained to the
+    active tenant. Can be explicitly bypassed with `skip_tenant_guard=True` execution option
+    or the `bypass_tenant_guard()` context manager.
+    """
+    if is_tenant_guard_bypassed():
+        return
+    if execute_state.execution_options.get("skip_tenant_guard", False):
+        return
+
+    active_tenant = current_tenant()
+    if not active_tenant:
+        return
+
+    if execute_state.is_select:
+        stmt = execute_state.statement
+        tenant_models = [m.class_ for m in Base.registry.mappers if hasattr(m.class_, "tenant_id")]
+        for model in tenant_models:
+            stmt = stmt.options(
+                with_loader_criteria(model, model.tenant_id == active_tenant, include_aliases=True)
+            )
+        execute_state.statement = stmt
+
+    elif execute_state.is_update or execute_state.is_delete:
+        stmt = execute_state.statement
+        entity = (
+            getattr(stmt, "entity_description", {}).get("entity")
+            if hasattr(stmt, "entity_description")
+            else None
+        )
+        if entity and hasattr(entity, "tenant_id"):
+            stmt = stmt.where(entity.tenant_id == active_tenant)
+            execute_state.statement = stmt
+
+
+@event.listens_for(Session, "before_flush")
+def _enforce_tenant_integrity(session, flush_context, instances):
+    """Enforce tenant scoping on entity inserts and dirty mutations."""
+    if is_tenant_guard_bypassed():
+        return
+
+    active_tenant = current_tenant()
+    if not active_tenant:
+        return
+
+    for obj in session.new:
+        if hasattr(obj, "tenant_id"):
+            val = getattr(obj, "tenant_id", None)
+            if val is None:
+                setattr(obj, "tenant_id", active_tenant)
+            elif val != active_tenant:
+                raise PermissionError(
+                    f"Cross-tenant insert violation: entity {obj.__class__.__name__} "
+                    f"attempted to insert tenant_id='{val}' while active tenant is '{active_tenant}'"
+                )
+
+    for obj in session.dirty:
+        if hasattr(obj, "tenant_id"):
+            val = getattr(obj, "tenant_id", None)
+            if val is not None and val != active_tenant:
+                raise PermissionError(
+                    f"Cross-tenant update violation: entity {obj.__class__.__name__} "
+                    f"attempted to set tenant_id='{val}' while active tenant is '{active_tenant}'"
+                )
 
 
 async def init_db() -> None:
