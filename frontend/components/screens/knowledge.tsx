@@ -1,7 +1,7 @@
 "use client";
 
 /* Knowledge module root router & re-exports.
-   Each knowledge type is maintained in its own dedicated screen file:
+   Each knowledge type is maintained in its own dedicated screen file under components/screens/knowledge/:
    - knowledge-playground.tsx: Multi-source recall tester, sub-agent simulation, & grounding matrix
    - knowledge-docs.tsx: Vector RAG files, folder hierarchy, chunk distributions, & search debugger
    - knowledge-qa.tsx: Curated Q&A pairs, category filters, & intent deflection matcher
@@ -9,20 +9,20 @@
    - knowledge-memory.tsx: Authoritative SQLite memories, synced Markdown files, & learning queue
 */
 
-import { KnowledgePlaygroundScreen } from "./knowledge-playground";
-import { KnowledgeDocsScreen } from "./knowledge-docs";
-import { KnowledgeVectorScreen } from "./knowledge-vector";
-import { KnowledgeQaScreen } from "./knowledge-qa";
-import { KnowledgeGraphScreen } from "./knowledge-graph";
-import { KnowledgeMemoryScreen } from "./knowledge-memory";
+import { KnowledgePlaygroundScreen } from "./knowledge/knowledge-playground";
+import { KnowledgeDocsScreen } from "./knowledge/knowledge-docs";
+import { KnowledgeVectorScreen } from "./knowledge/knowledge-vector";
+import { KnowledgeQaScreen } from "./knowledge/knowledge-qa";
+import { KnowledgeGraphScreen } from "./knowledge/knowledge-graph";
+import { KnowledgeMemoryScreen } from "./knowledge/knowledge-memory";
 
-export { KnowledgePlaygroundScreen } from "./knowledge-playground";
-export { KnowledgeDocsScreen } from "./knowledge-docs";
-export { KnowledgeVectorScreen } from "./knowledge-vector";
-export { KnowledgeQaScreen } from "./knowledge-qa";
-export { KnowledgeGraphScreen } from "./knowledge-graph";
-export { KnowledgeMemoryScreen } from "./knowledge-memory";
-export { KnowledgeHistory } from "./knowledge-history";
+export { KnowledgePlaygroundScreen } from "./knowledge/knowledge-playground";
+export { KnowledgeDocsScreen } from "./knowledge/knowledge-docs";
+export { KnowledgeVectorScreen } from "./knowledge/knowledge-vector";
+export { KnowledgeQaScreen } from "./knowledge/knowledge-qa";
+export { KnowledgeGraphScreen } from "./knowledge/knowledge-graph";
+export { KnowledgeMemoryScreen } from "./knowledge/knowledge-memory";
+export { KnowledgeHistory } from "./knowledge/knowledge-history";
 
 export type KnowledgeSubNav = "playground" | "explorer" | "docs" | "vector" | "qa" | "graph" | "memory";
 

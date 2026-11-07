@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Icon } from "../icons";
-import { Drawer } from "../primitives";
+import { Icon } from "@/components/icons";
+import { Drawer } from "@/components/primitives";
 import { api, ActivityEntry } from "@/lib/api";
 
 export function knRelTime(iso?: string | null): string {

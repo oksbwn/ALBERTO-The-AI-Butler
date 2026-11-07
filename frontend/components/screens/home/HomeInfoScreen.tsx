@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Icon } from "../icons";
-import { StatusPill } from "../primitives";
+import { Icon } from "@/components/icons";
+import { StatusPill } from "@/components/primitives";
 import {
   api,
   type Conversation,

@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Icon } from "../icons";
-import { Segmented } from "../primitives";
+import { Icon } from "@/components/icons";
+import { Segmented } from "@/components/primitives";
 import { api, SearchHit } from "@/lib/api";
 import { ChunkMap } from "./chunk-map";
 import { KnowledgeHistory } from "./knowledge-history";

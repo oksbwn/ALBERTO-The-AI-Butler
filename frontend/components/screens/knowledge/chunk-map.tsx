@@ -9,8 +9,8 @@ import {
   useEdgesState, useNodesState, useReactFlow, type Edge, type Node, type NodeProps,
 } from "@xyflow/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Icon } from "../icons";
-import { Segmented } from "../primitives";
+import { Icon } from "@/components/icons";
+import { Segmented } from "@/components/primitives";
 import { api, ChunkDetail, ChunkMapResult, ChunkPoint } from "@/lib/api";
 
 // How many chunks to plot. More points = a fuller picture but slower to project (PCA/SVD); the

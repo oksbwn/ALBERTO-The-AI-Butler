@@ -1,16 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Icon } from "../icons";
+import { Icon } from "@/components/icons";
 import {
   api,
   GraphStats,
   OntologyEntityType,
   OntologyRelationshipType,
 } from "@/lib/api";
-import { KnowledgeGraphExplorer } from "../canvas/KnowledgeGraphExplorer";
+import { KnowledgeGraphExplorer } from "@/components/canvas/KnowledgeGraphExplorer";
 import { KnowledgeHistory } from "./knowledge-history";
-import { OntologyReviewQueue } from "./ontology-review-queue";
+import { OntologyReviewQueue } from "@/components/screens/ontology-review-queue";
 
 export function KnowledgeGraphScreen({ project }: { project: any }) {
   const [tab, setTab] = useState<"visualizer" | "entities" | "ontology" | "approvals" | "engine">("visualizer");

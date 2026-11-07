@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Icon } from "../icons";
-import { Field, Modal } from "../primitives";
+import { Icon } from "@/components/icons";
+import { Field, Modal } from "@/components/primitives";
 import {
   api,
   LearningEventItem,
@@ -11,7 +11,7 @@ import {
   MemoryRecordDetail,
 } from "@/lib/api";
 import { KnowledgeHistory } from "./knowledge-history";
-import { OntologyReviewQueue } from "./ontology-review-queue";
+import { OntologyReviewQueue } from "@/components/screens/ontology-review-queue";
 
 export function KnowledgeMemoryScreen({ project }: { project: any }) {
   const [tab, setTab] = useState<"records" | "markdown" | "reviews" | "settings">("records");

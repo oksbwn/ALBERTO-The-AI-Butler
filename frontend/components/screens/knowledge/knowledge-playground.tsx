@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Icon } from "../icons";
+import { Icon } from "@/components/icons";
 import { api } from "@/lib/api";
-import { ChatScreen } from "./chat";
+import { ChatScreen } from "@/components/screens/chat";
 import { KnowledgeHistory } from "./knowledge-history";
 
 const STORE_CONFIG: Record<

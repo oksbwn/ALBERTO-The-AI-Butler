@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Icon } from "../icons";
-import { Field, Modal, Segmented, StatusPill } from "../primitives";
+import { Icon } from "@/components/icons";
+import { Field, Modal, Segmented, StatusPill } from "@/components/primitives";
 import { api, KbSource, SearchHit } from "@/lib/api";
 import { KnowledgeHistory } from "./knowledge-history";
 
