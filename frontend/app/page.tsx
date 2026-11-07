@@ -21,10 +21,9 @@ import { OntologyReviewQueue } from "@/components/screens/ontology-review-queue"
 import { TracesScreen } from "@/components/screens/traces";
 import { AuthCredentialsScreen } from "@/components/screens/auth-credentials";
 import { SettingsScreen } from "@/components/screens/settings";
-import { ConnectorsScreen } from "@/components/screens/connectors";
 import { IntegrationsScreen } from "@/components/screens/integrations";
 import { IntegrationsPlaygroundScreen } from "@/components/screens/integrations-playground";
-import { ChannelsScreen, TriggersScreen, DatasetsScreen, HandoffScreen } from "@/components/screens/platform";
+import { TriggersScreen, DatasetsScreen, HandoffScreen } from "@/components/screens/platform";
 import { Icon } from "@/components/icons";
 import { api, Agent, ComponentT, Project, Tool, Workflow } from "@/lib/api";
 import { AuthGate } from "@/components/login";

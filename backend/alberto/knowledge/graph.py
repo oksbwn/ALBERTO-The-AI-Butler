@@ -497,6 +497,17 @@ class LadybugGraphAdapter:
     def _delete_relationship_sync(self, tenant_id: str, project_id: str, rel_id: str) -> bool:
         assert self._conn is not None
         with self._write_lock:
+            res: Any = self._execute(
+                """
+                MATCH ()-[r:RelatesTo]->()
+                WHERE r.id = $id AND r.tenant_id = $tenant_id AND r.project_id = $project_id
+                RETURN count(r)
+                """,
+                {"id": rel_id, "tenant_id": tenant_id, "project_id": project_id},
+            )
+            if not res.has_next() or res.get_next()[0] == 0:
+                return False
+
             self._execute(
                 """
                 MATCH ()-[r:RelatesTo]->()
@@ -771,29 +782,6 @@ class LadybugGraphAdapter:
             return GraphPath(nodes=nodes, relationships=rels, length=length)
 
         return None
-
-    def _delete_relationship_sync(self, tenant_id: str, project_id: str, rel_id: str) -> bool:
-        assert self._conn is not None
-        res: Any = self._execute(
-            """
-            MATCH ()-[r:RelatesTo]->()
-            WHERE r.id = $id AND r.tenant_id = $tenant_id AND r.project_id = $project_id
-            RETURN count(r)
-            """,
-            {"id": rel_id, "tenant_id": tenant_id, "project_id": project_id},
-        )
-        if not res.has_next() or res.get_next()[0] == 0:
-            return False
-
-        self._execute(
-            """
-            MATCH ()-[r:RelatesTo]->()
-            WHERE r.id = $id AND r.tenant_id = $tenant_id AND r.project_id = $project_id
-            DELETE r
-            """,
-            {"id": rel_id, "tenant_id": tenant_id, "project_id": project_id},
-        )
-        return True
 
     def _get_stats_sync(self, tenant_id: str, project_id: str) -> GraphStats:
         assert self._conn is not None

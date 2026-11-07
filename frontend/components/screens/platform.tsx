@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Icon } from "../icons";
 import { Field, Modal } from "../primitives";
-import { api, Channel, Dataset, EvalReport, EvalResult, Handoff, Trigger, Workflow, openSSE } from "@/lib/api";
+import { api, Dataset, EvalReport, EvalResult, Handoff, Trigger, Workflow, openSSE } from "@/lib/api";
 
 /* Validate the Cases JSON before it is POSTed: it must be a non-empty array of objects
    that each carry a string `input`. Returns the parsed cases (or null) + a human error so
@@ -74,71 +74,6 @@ function useWorkflows(pid?: string) {
   const [wfs, setWfs] = useState<Workflow[]>([]);
   useEffect(() => { if (pid) api.listWorkflows(pid).then(setWfs).catch(() => setWfs([])); }, [pid]);
   return wfs;
-}
-
-/* ============ CHANNELS ============ */
-type ChannelForm = { id?: string; type: string; name: string; workflow_id: string; config: any };
-const BLANK_CHANNEL: ChannelForm = { type: "email", name: "", workflow_id: "", config: {} };
-
-export function ChannelsScreen({ project }: { project: any }) {
-  const [channels, setChannels] = useState<Channel[]>([]);
-  const wfs = useWorkflows(project?.id);
-  const [open, setOpen] = useState(false);
-  const [form, setForm] = useState<ChannelForm>(BLANK_CHANNEL);
-  const reload = useCallback(() => { if (project?.id) api.listChannels(project.id).then(setChannels).catch(() => setChannels([])); }, [project?.id]);
-  useEffect(() => { reload(); }, [reload]);
-
-  const setSmtp = (patch: any) => setForm((f) => ({ ...f, config: { ...f.config, smtp: { ...(f.config.smtp || {}), ...patch } } }));
-  const smtp = (form.config || {}).smtp || {};
-
-  async function save() {
-    if (!form.name.trim()) return;
-    if (form.id) await api.updateChannel(project.id, form.id, { name: form.name, workflow_id: form.workflow_id || undefined, config: form.config });
-    else await api.createChannel(project.id, { type: form.type, name: form.name, workflow_id: form.workflow_id || undefined, config: form.config });
-    setOpen(false); setForm(BLANK_CHANNEL); reload();
-  }
-  function edit(ch: Channel) { setForm({ id: ch.id, type: ch.type, name: ch.name, workflow_id: ch.workflow_id || "", config: ch.config || {} }); setOpen(true); }
-  async function remove(id: string) { if (window.confirm("Delete this channel?")) { await api.deleteChannel(project.id, id); reload(); } }
-  const urlOf = (ch: Channel) => ch.inbound_url;
-
-  return (
-    <Shell>
-      <Header title="Channels" subtitle="Deploy a workflow to an email surface."
-        action={<button className="btn btn-primary btn-sm" onClick={() => { setForm(BLANK_CHANNEL); setOpen(true); }}><Icon name="plus" size={14} />New channel</button>} />
-      <div className="col gap2">
-        {channels.map((ch) => (
-          <div key={ch.id} className="card" style={{ padding: 14 }}>
-            <div className="row spread">
-              <div className="row gap2"><Icon name="msg" size={16} /><span className="t-h3">{ch.name}</span><span className="typechip">{ch.type}</span>{!ch.enabled && <span className="pill pill-muted">disabled</span>}</div>
-              <div className="row gap2"><button className="btn btn-secondary btn-sm" onClick={() => edit(ch)}><Icon name="edit" size={13} />Configure</button><button className="iconbtn" title="Delete" onClick={() => remove(ch.id)}><Icon name="trash" size={14} /></button></div>
-            </div>
-            {urlOf(ch) && <div className="mono-sm fg-2" style={{ marginTop: 8, wordBreak: "break-all" }}>{urlOf(ch)}</div>}
-          </div>
-        ))}
-        {channels.length === 0 && <div className="fg-2 t-caption">No channels yet. Create one to deploy this project's workflow.</div>}
-      </div>
-      <Modal open={open} onClose={() => setOpen(false)} title={form.id ? "Configure channel" : "New channel"} width={500}
-        footer={<><button className="btn btn-ghost" onClick={() => setOpen(false)}>Cancel</button><button className="btn btn-primary" onClick={save}>{form.id ? "Save" : "Create"}</button></>}>
-        <Field label="Name"><input className="input" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Support channel" /></Field>
-        <Field label="Workflow" help="Which workflow handles messages on this channel."><select className="select" value={form.workflow_id} onChange={(e) => setForm((f) => ({ ...f, workflow_id: e.target.value }))}><option value="">First active workflow</option>{wfs.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}</select></Field>
-
-        {form.type === "email" && (
-          <>
-            <div className="field-help" style={{ marginTop: 0 }}>Outbound SMTP for replies. Inbound mail is posted to the channel&apos;s inbound URL by your provider (Mailgun/SendGrid/Postmark) or an IMAP relay.</div>
-            <div className="row gap3">
-              <Field label="SMTP host"><input className="input mono" value={smtp.host || ""} onChange={(e) => setSmtp({ host: e.target.value })} placeholder="smtp.sendgrid.net" /></Field>
-              <Field label="Port"><input className="input mono" type="number" value={smtp.port ?? 587} onChange={(e) => setSmtp({ port: Number(e.target.value) })} /></Field>
-            </div>
-            <div className="row gap3">
-              <Field label="Username"><input className="input mono" value={smtp.username || ""} onChange={(e) => setSmtp({ username: e.target.value })} /></Field>
-              <Field label="From address"><input className="input mono" value={smtp.from || ""} onChange={(e) => setSmtp({ from: e.target.value })} placeholder="support@yourco.com" /></Field>
-            </div>
-            <Field label="Password secret ref" help="A secret holding the SMTP password (Settings → Secrets)."><input className="input mono" value={smtp.password_ref || ""} onChange={(e) => setSmtp({ password_ref: e.target.value })} placeholder="secret://proj/smtp_password" /></Field>
-          </>
-        )}
-      </Modal>
-    </Shell>
-  );
 }
 
 /* ============ TRIGGERS ============ */

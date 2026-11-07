@@ -172,7 +172,7 @@ class Settings(BaseSettings):
         if isinstance(v, dict):
             return {str(k): str(val) for k, val in v.items()}
         s = str(v).strip()
-        if not s:
+        if not s or s.startswith("#"):
             return {}
         import json as _json
 
@@ -192,7 +192,7 @@ class Settings(BaseSettings):
         if isinstance(v, dict):
             return {str(k): dict(val) for k, val in v.items() if isinstance(val, dict)}
         s = str(v).strip()
-        if not s:
+        if not s or s.startswith("#"):
             return {}
         import json as _json
 
