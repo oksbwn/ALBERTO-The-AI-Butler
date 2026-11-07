@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alberto.deps import CurrentUser, current_tenant_id, get_current_user, get_session, require_role
-from alberto.models import McpClient
+from alberto.services.integrations.mcp_clients import McpClientService, serialize_mcp_client
 
+log = logging.getLogger("alberto.routers.mcp_clients")
 router = APIRouter(prefix="/v1/projects/{project_id}/mcp-clients", tags=["mcp-clients"])
 
 
@@ -21,8 +22,6 @@ class McpClientIn(BaseModel):
     args: dict = {}
     headers_ref: str | None = None
     enabled: bool = True
-    # Attach an Auth Provider instead of (or as well as) a static header secret - this is how a
-    # server behind OAuth is reached, with refresh and optional per-user credentials.
     auth_provider_id: str | None = None
     learning_enabled: bool = False
 
@@ -30,56 +29,15 @@ class McpClientIn(BaseModel):
 class McpClientPatch(BaseModel):
     name: str | None = None
     enabled: bool | None = None
-    disabled_tools: list | None = None  # remote tool names toggled off
+    disabled_tools: list | None = None
     url: str | None = None
     headers_ref: str | None = None
     auth_provider_id: str | None = None
     learning_enabled: bool | None = None
 
 
-def _out(m: McpClient) -> dict:
-    return {
-        "id": m.id,
-        "name": m.name,
-        "transport": m.transport,
-        "url": m.url,
-        "command": m.command,
-        "args": m.args,
-        "headers_ref": m.headers_ref,
-        "enabled": m.enabled,
-        "disabled_tools": m.disabled_tools or [],
-        "auth_provider_id": m.auth_provider_id,
-        "capabilities": m.capabilities or {},
-        "last_discovered_at": m.last_discovered_at.isoformat() if m.last_discovered_at else None,
-        "schema_fingerprint": m.schema_fingerprint,
-        "learning_enabled": m.learning_enabled,
-    }
-
-
-@router.get("")
-async def list_clients(project_id: str, session: AsyncSession = Depends(get_session),
-                       tenant_id: str = Depends(current_tenant_id)):
-    """Registered MCP servers, each flagged with the connector that owns it (if any).
-
-    A connector-owned server already surfaces its tools as a tool set, so anything picking tools
-    for an agent should offer the SET and skip the server - listing both makes one integration
-    look like two, and granting either does the same thing.
-    """
-    from alberto.models import ConnectorInstall
-
-    rows = list((await session.execute(
-        select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.project_id == project_id)
-    )).scalars())
-    owned = {
-        i.mcp_client_id: i.slug
-        for i in (await session.execute(
-            select(ConnectorInstall).where(
-                ConnectorInstall.tenant_id == tenant_id, ConnectorInstall.project_id == project_id,
-            )
-        )).scalars()
-        if i.mcp_client_id
-    }
-    return [{**_out(m), "connector_slug": owned.get(m.id)} for m in rows]
+class McpLearningToggleIn(BaseModel):
+    learning_enabled: bool
 
 
 def _validate_stdio_security(transport: str | None, command: str | None, user: CurrentUser) -> None:
@@ -114,17 +72,38 @@ def _validate_stdio_security(transport: str | None, command: str | None, user: C
             )
 
 
+@router.get("")
+async def list_clients(
+    project_id: str,
+    session: AsyncSession = Depends(get_session),
+    tenant_id: str = Depends(current_tenant_id),
+):
+    """Registered MCP servers, each flagged with the connector that owns it (if any)."""
+    return await McpClientService.list(session, tenant_id, project_id)
+
+
 @router.post("", status_code=201)
-async def create_client(project_id: str, body: McpClientIn, session: AsyncSession = Depends(get_session),
-                        tenant_id: str = Depends(current_tenant_id),
-                        user: CurrentUser = Depends(require_role("editor"))):
+async def create_client(
+    project_id: str,
+    body: McpClientIn,
+    session: AsyncSession = Depends(get_session),
+    tenant_id: str = Depends(current_tenant_id),
+    user: CurrentUser = Depends(require_role("editor")),
+):
     _validate_stdio_security(body.transport, body.command, user)
-    m = McpClient(tenant_id=tenant_id, project_id=project_id, name=body.name, transport=body.transport,
-                  url=body.url, command=body.command, args=body.args, headers_ref=body.headers_ref,
-                  enabled=body.enabled, auth_provider_id=body.auth_provider_id)
-    session.add(m)
-    await session.commit()
-    await session.refresh(m)
+    m = await McpClientService.create(
+        session,
+        tenant_id,
+        project_id,
+        name=body.name,
+        transport=body.transport,
+        url=body.url,
+        command=body.command,
+        args=body.args,
+        headers_ref=body.headers_ref,
+        enabled=body.enabled,
+        auth_provider_id=body.auth_provider_id,
+    )
     try:
         from alberto.services.mcp_discovery import McpDiscoveryService
         await McpDiscoveryService.discover_and_update(
@@ -135,58 +114,39 @@ async def create_client(project_id: str, body: McpClientIn, session: AsyncSessio
             context={"end_user_id": user.id},
         )
     except Exception as e:
-        import logging
-        logging.getLogger("alberto.routers.mcp_clients").warning(f"Initial discovery failed for {m.name}: {e}")
-    return _out(m)
+        log.warning(f"Initial discovery failed for {m.name}: {e}")
+    return serialize_mcp_client(m)
 
 
 @router.patch("/{client_id}")
-async def update_client(project_id: str, client_id: str, body: McpClientPatch, session: AsyncSession = Depends(get_session),
-                        tenant_id: str = Depends(current_tenant_id),
-                        user: CurrentUser = Depends(require_role("editor"))):
-    m = (await session.execute(
-        select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
-    )).scalar_one_or_none()
+async def update_client(
+    project_id: str,
+    client_id: str,
+    body: McpClientPatch,
+    session: AsyncSession = Depends(get_session),
+    tenant_id: str = Depends(current_tenant_id),
+    user: CurrentUser = Depends(require_role("editor")),
+):
+    m = await McpClientService.get(session, tenant_id, client_id)
     if m is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
     if m.transport == "stdio":
         _validate_stdio_security(m.transport, m.command, user)
-    if body.name is not None:
-        m.name = body.name
-    if body.enabled is not None:
-        m.enabled = body.enabled
-    if body.disabled_tools is not None:
-        m.disabled_tools = body.disabled_tools
-    if body.url is not None:
-        m.url = body.url
-    if body.headers_ref is not None:
-        m.headers_ref = body.headers_ref
-    if body.auth_provider_id is not None:
-        # "" clears the attachment (back to anonymous / headers_ref only).
-        m.auth_provider_id = body.auth_provider_id or None
-    if body.learning_enabled is not None:
-        m.learning_enabled = body.learning_enabled
-    if body.enabled is not None or body.disabled_tools is not None:
-        from alberto.models import Tool
-        existing_tools = list((await session.execute(
-            select(Tool).where(Tool.tenant_id == tenant_id, Tool.project_id == project_id, Tool.kind == "mcp")
-        )).scalars().all())
-        disabled_set = set(m.disabled_tools or [])
-        client_enabled = m.enabled
-        for t in existing_tools:
-            if (t.config or {}).get("mcp_client_id") == m.id:
-                remote_name = (t.config or {}).get("remote_tool_name") or t.name
-                t.enabled = client_enabled and (remote_name not in disabled_set)
-    await session.commit()
-    await session.refresh(m)
-    # Drop the cached connection so running agents pick up the new config (audit F12).
-    from alberto.tools.mcp import invalidate_client
-    await invalidate_client(client_id)
-    return _out(m)
 
-
-class McpLearningToggleIn(BaseModel):
-    learning_enabled: bool
+    m = await McpClientService.update(
+        session,
+        tenant_id,
+        project_id,
+        m,
+        name=body.name,
+        enabled=body.enabled,
+        disabled_tools=body.disabled_tools,
+        url=body.url,
+        headers_ref=body.headers_ref,
+        auth_provider_id=body.auth_provider_id,
+        learning_enabled=body.learning_enabled,
+    )
+    return serialize_mcp_client(m)
 
 
 @router.post("/{client_id}/refresh")
@@ -202,9 +162,7 @@ async def refresh_capabilities(
     from alberto.services.mcp_discovery import McpDiscoveryService
     from alberto.tools.mcp import McpUnavailable, describe_mcp_error
 
-    row = (await session.execute(
-        select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
-    )).scalar_one_or_none()
+    row = await McpClientService.get(session, tenant_id, client_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
 
@@ -216,7 +174,7 @@ async def refresh_capabilities(
             project_id=project_id,
             context={"end_user_id": user.id},
         )
-        return {"ok": True, "discovery": summary, "client": _out(row)}
+        return {"ok": True, "discovery": summary, "client": serialize_mcp_client(row)}
     except McpUnavailable as e:
         return {"ok": False, "error": str(e)}
     except Exception as e:
@@ -233,15 +191,17 @@ async def update_learning_toggle(
     _: CurrentUser = Depends(require_role("editor")),
 ):
     """Toggle tool execution learning permission for this specific integration."""
-    row = (await session.execute(
-        select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
-    )).scalar_one_or_none()
+    row = await McpClientService.get(session, tenant_id, client_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
 
-    row.learning_enabled = body.learning_enabled
-    await session.commit()
-    await session.refresh(row)
+    row = await McpClientService.update(
+        session,
+        tenant_id,
+        project_id,
+        row,
+        learning_enabled=body.learning_enabled,
+    )
     return {"ok": True, "learning_enabled": row.learning_enabled}
 
 
@@ -253,9 +213,7 @@ async def get_capabilities(
     tenant_id: str = Depends(current_tenant_id),
 ):
     """Retrieve cached discovery capabilities and fingerprint without triggering remote connection."""
-    row = (await session.execute(
-        select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
-    )).scalar_one_or_none()
+    row = await McpClientService.get(session, tenant_id, client_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
 
@@ -269,50 +227,41 @@ async def get_capabilities(
 
 
 @router.get("/{client_id}/tools")
-async def list_remote_tools(project_id: str, client_id: str, session: AsyncSession = Depends(get_session),
-                            tenant_id: str = Depends(current_tenant_id),
-                            user: CurrentUser = Depends(get_current_user)):
-    """Connect to the server and list the tools it exposes - drives the 'pick which to add' UI."""
+async def list_remote_tools(
+    project_id: str,
+    client_id: str,
+    session: AsyncSession = Depends(get_session),
+    tenant_id: str = Depends(current_tenant_id),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Connect to the server and list the tools it exposes."""
     from alberto.tools.mcp import McpUnavailable, describe_mcp_error, discover_tools
 
-    row = (await session.execute(
-        select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
-    )).scalar_one_or_none()
+    row = await McpClientService.get(session, tenant_id, client_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
-    # A server behind a per-user auth provider only has THIS caller's token to answer with.
     try:
         tools = await discover_tools(row, tenant_id, project_id, {"end_user_id": user.id})
     except McpUnavailable as e:
         return {"ok": False, "error": str(e)}
-    except Exception as e:  # noqa: BLE001 - surface connect/auth errors to the UI, don't 500
-        # Unwrapped, an anyio task group reports every failure as "unhandled errors in a
-        # TaskGroup", which hides the 401/DNS/TLS cause the user needs to see.
+    except Exception as e:
         return {"ok": False, "error": f"Could not connect: {describe_mcp_error(e)}"}
     return {"ok": True, "tools": tools}
 
 
 @router.delete("/{client_id}")
-async def delete_client(project_id: str, client_id: str, session: AsyncSession = Depends(get_session),
-                        tenant_id: str = Depends(current_tenant_id),
-                        _: CurrentUser = Depends(require_role("editor"))):
-    m = (await session.execute(
-        select(McpClient).where(McpClient.tenant_id == tenant_id, McpClient.id == client_id)
-    )).scalar_one_or_none()
+async def delete_client(
+    project_id: str,
+    client_id: str,
+    session: AsyncSession = Depends(get_session),
+    tenant_id: str = Depends(current_tenant_id),
+    _: CurrentUser = Depends(require_role("editor")),
+):
+    m = await McpClientService.get(session, tenant_id, client_id)
     if m is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp client not found")
-    from sqlalchemy import delete
 
-    from alberto.models import Tool, ToolSetMember
-    from alberto.services.tools import ToolService
-    tools = list((await session.execute(
-        select(Tool).where(Tool.tenant_id == tenant_id, Tool.project_id == project_id, Tool.kind == "mcp")
-    )).scalars().all())
-
-    # Guard: prevent removing integration if any tools are actively used
-    mcp_tool_ids = [t.id for t in tools if (t.config or {}).get("mcp_client_id") == client_id]
-    mcp_tool_names = [t.name for t in tools if (t.config or {}).get("mcp_client_id") == client_id]
-    usages = await ToolService.get_tool_usages(session, tenant_id, project_id, mcp_tool_ids, mcp_tool_names)
+    usages = await McpClientService.delete(session, tenant_id, project_id, m)
     if usages:
         items_desc = ", ".join(f"{u['target_type']} '{u['target_name']}'" for u in usages[:5])
         if len(usages) > 5:
@@ -321,46 +270,4 @@ async def delete_client(project_id: str, client_id: str, session: AsyncSession =
             status.HTTP_409_CONFLICT,
             f"Cannot remove integration: {len(usages)} workflow(s) or agent(s) ({items_desc}) are currently using its tools. Please remove or replace these tools before removing the integration.",
         )
-
-    for t in tools:
-        if (t.config or {}).get("mcp_client_id") == client_id:
-            await ToolService.delete(session, t)
-
-    # Clean up associated ToolSet if any
-    from alberto.models import ToolSet
-    ts_slug = f"mcp-{client_id[:8]}"
-    ts = (await session.execute(
-        select(ToolSet).where(
-            ToolSet.tenant_id == tenant_id,
-            ToolSet.project_id == project_id,
-            (ToolSet.slug == ts_slug) | (ToolSet.name == m.name),
-        )
-    )).scalars().first()
-    if ts is not None:
-        await session.execute(delete(ToolSetMember).where(ToolSetMember.tool_set_id == ts.id))
-        await session.delete(ts)
-
-    # Purge Knowledge Graph projections for this integration and its tools
-    try:
-        from alberto.knowledge.graph import get_graph_adapter, make_entity_id
-        adapter = get_graph_adapter()
-        await adapter.delete_entity(tenant_id, project_id, make_entity_id(tenant_id, project_id, m.name))
-        await adapter.delete_entity(tenant_id, project_id, make_entity_id(tenant_id, project_id, f"int:{m.name}"))
-        await adapter.delete_entities_by_source(tenant_id, project_id, f"mcp:{client_id}")
-        await adapter.delete_entities_by_source(tenant_id, project_id, f"integration:{m.name}")
-        for t in tools:
-            if (t.config or {}).get("mcp_client_id") == client_id:
-                await adapter.delete_entities_by_source(tenant_id, project_id, f"tool:{t.id}")
-                await adapter.delete_entity(tenant_id, project_id, make_entity_id(tenant_id, project_id, f"tool:{t.name}"))
-    except Exception as e:
-        import logging
-        logging.getLogger("alberto.routers.mcp_clients").debug(
-            f"Knowledge graph cleanup skipped/failed for integration {m.name}: {e}"
-        )
-
-    await session.delete(m)
-    await session.commit()
-    from alberto.tools.mcp import invalidate_client
-    await invalidate_client(client_id)
     return {"ok": True}
-

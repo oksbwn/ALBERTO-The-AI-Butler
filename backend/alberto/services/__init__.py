@@ -54,6 +54,7 @@ SERVICE_MAP: dict[str, str] = {
     # integrations
     "channels": "integrations",
     "channel_gateway": "integrations",
+    "mcp_clients": "integrations",
     "mcp_discovery": "integrations",
     "mcp_learning": "integrations",
     "tools": "integrations",
@@ -66,11 +67,13 @@ SERVICE_MAP: dict[str, str] = {
     "auth": "governance",
     "auth_providers": "governance",
     "budget": "governance",
+    "models": "governance",
     "portability": "governance",
     "projects": "governance",
     "quota": "governance",
     "retention": "governance",
     "secrets": "governance",
+    "stats": "governance",
     "validation": "governance",
     "versions": "governance",
 }

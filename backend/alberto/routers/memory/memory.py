@@ -30,8 +30,11 @@ from alberto.schemas.memory_curator import (
     MemoryRecordUpdateIn,
     RelationshipCandidate,
 )
+from alberto.services.agents import AgentService
 from alberto.services.audit import AuditService
+from alberto.services.learning_coordinator import LearningCoordinator
 from alberto.services.memory_curator import MemoryCurator
+from alberto.services.projects import ProjectService
 from alberto.services.unified_memory import UnifiedMemoryManager
 
 router = APIRouter(prefix="/v1/projects/{project_id}/memory", tags=["memory"])
@@ -257,14 +260,7 @@ async def get_learning_settings(
     _: CurrentUser = Depends(require_role("viewer")),
 ):
     """Get conversation learning configuration, status, and effective models."""
-    proj = (
-        await session.execute(
-            select(Project).where(
-                Project.tenant_id == tenant_id,
-                Project.id == project_id,
-            )
-        )
-    ).scalar_one_or_none()
+    proj = await ProjectService.get(session, tenant_id, project_id)
 
     if proj and proj.config and "memory_learning_enabled" in proj.config:
         learning_enabled = bool(proj.config["memory_learning_enabled"])
@@ -273,25 +269,8 @@ async def get_learning_settings(
 
     tool_learning_enabled = bool(proj.config.get("tool_execution_learning_enabled", False)) if proj and proj.config else False
 
-    curator = (
-        await session.execute(
-            select(Agent).where(
-                Agent.tenant_id == tenant_id,
-                Agent.project_id == project_id,
-                Agent.system_key == "memory_curator",
-            )
-        )
-    ).scalar_one_or_none()
-
-    graph_mgr = (
-        await session.execute(
-            select(Agent).where(
-                Agent.tenant_id == tenant_id,
-                Agent.project_id == project_id,
-                Agent.system_key == "graph_manager",
-            )
-        )
-    ).scalar_one_or_none()
+    curator = await AgentService.get_system_agent(session, tenant_id, project_id, "memory_curator")
+    graph_mgr = await AgentService.get_system_agent(session, tenant_id, project_id, "graph_manager")
 
     curator_model = (curator.config.get("model") if curator and curator.config else "") or ""
     graph_model = (graph_mgr.config.get("model") if graph_mgr and graph_mgr.config else "") or ""
@@ -320,14 +299,7 @@ async def update_learning_settings(
     user: CurrentUser = Depends(require_role("editor")),
 ):
     """Update conversation learning configuration (toggle, model overrides). Persists to Project.config."""
-    proj = (
-        await session.execute(
-            select(Project).where(
-                Project.tenant_id == tenant_id,
-                Project.id == project_id,
-            )
-        )
-    ).scalar_one_or_none()
+    proj = await ProjectService.get(session, tenant_id, project_id)
     if not proj:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -348,15 +320,7 @@ async def update_learning_settings(
 
     # Model overrides
     if body.memory_curator_model is not None:
-        curator = (
-            await session.execute(
-                select(Agent).where(
-                    Agent.tenant_id == tenant_id,
-                    Agent.project_id == project_id,
-                    Agent.system_key == "memory_curator",
-                )
-            )
-        ).scalar_one_or_none()
+        curator = await AgentService.get_system_agent(session, tenant_id, project_id, "memory_curator")
         if curator:
             cfg = dict(curator.config)
             cfg["model"] = body.memory_curator_model.strip()
@@ -364,15 +328,7 @@ async def update_learning_settings(
             await session.commit()
 
     if body.graph_manager_model is not None:
-        graph_mgr = (
-            await session.execute(
-                select(Agent).where(
-                    Agent.tenant_id == tenant_id,
-                    Agent.project_id == project_id,
-                    Agent.system_key == "graph_manager",
-                )
-            )
-        ).scalar_one_or_none()
+        graph_mgr = await AgentService.get_system_agent(session, tenant_id, project_id, "graph_manager")
         if graph_mgr:
             cfg = dict(graph_mgr.config)
             cfg["model"] = body.graph_manager_model.strip()
@@ -489,15 +445,7 @@ async def get_learning_event_suggestions(
     """Retrieve or generate advisory recommendations from Memory Curator for review items."""
     from alberto.models import MemoryLearningEvent
 
-    event = (
-        await session.execute(
-            select(MemoryLearningEvent).where(
-                MemoryLearningEvent.id == event_id,
-                MemoryLearningEvent.tenant_id == tenant_id,
-                MemoryLearningEvent.project_id == project_id,
-            )
-        )
-    ).scalar_one_or_none()
+    event = await LearningCoordinator.get_event(session, tenant_id, project_id, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Learning event not found")
 

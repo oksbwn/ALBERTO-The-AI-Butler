@@ -9,7 +9,7 @@ from typing import Any
 
 def __getattr__(name: str) -> Any:
     # Check submodules in alberto.services.governance
-    submodules = ['apikeys', 'audit', 'auth', 'auth_providers', 'budget', 'portability', 'projects', 'quota', 'retention', 'secrets', 'validation', 'versions']
+    submodules = ['apikeys', 'audit', 'auth', 'auth_providers', 'budget', 'models', 'portability', 'projects', 'quota', 'retention', 'secrets', 'stats', 'validation', 'versions']
     if name in submodules:
         mod = importlib.import_module(f'alberto.services.governance.{name}')
         sys.modules[f'alberto.services.governance.{name}'] = mod

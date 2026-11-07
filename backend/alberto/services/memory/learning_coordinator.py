@@ -563,6 +563,21 @@ class LearningCoordinator:
             return event
 
     @classmethod
+    async def get_event(
+        cls,
+        session: AsyncSession,
+        tenant_id: str,
+        project_id: str,
+        event_id: str,
+    ) -> MemoryLearningEvent | None:
+        stmt = select(MemoryLearningEvent).where(
+            MemoryLearningEvent.id == event_id,
+            MemoryLearningEvent.tenant_id == tenant_id,
+            MemoryLearningEvent.project_id == project_id,
+        )
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+    @classmethod
     async def approve_event(
         cls,
         session: AsyncSession,

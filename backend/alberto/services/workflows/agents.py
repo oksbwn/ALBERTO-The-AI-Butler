@@ -197,6 +197,17 @@ class AgentService:
         return row.scalar_one_or_none()
 
     @staticmethod
+    async def get_system_agent(session: AsyncSession, tenant_id: str, project_id: str, system_key: str) -> Agent | None:
+        row = await session.execute(
+            select(Agent).where(
+                Agent.tenant_id == tenant_id,
+                Agent.project_id == project_id,
+                Agent.system_key == system_key,
+            )
+        )
+        return row.scalar_one_or_none()
+
+    @staticmethod
     def validate(config: dict) -> list[dict]:
         return validate_against_id(config, "forge/nodes/agent")
 
