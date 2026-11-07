@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import text
 
 import alberto
-from alberto.config import settings
+from alberto.config import _get_logical_data_root, settings
 from alberto.db import SessionLocal
 from alberto.util.metrics import snapshot
 
@@ -30,26 +30,50 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
-
 def _vector_status() -> str:
     try:
         from alberto.knowledge.store import get_vector_store_status
 
-        status = get_vector_store_status(settings.chroma_path)
-        if status.get("available"):
-            return "ok" if status.get("status") == "healthy" else status.get("status", "ok")
-        return f"error: {status.get('reason', 'unavailable')}"
+        st = get_vector_store_status(settings.chroma_path)
+        if st.get("available"):
+            return "ok" if st.get("status") == "healthy" else st.get("status", "ok")
+        return f"error: {st.get('reason', 'unavailable')}"
+    except Exception as e:  # noqa: BLE001
+        return f"error: {type(e).__name__}"
+
+
+def _graph_status() -> str:
+    try:
+        from alberto.knowledge.graph import _GRAPH_INSTANCE
+
+        if _GRAPH_INSTANCE is not None and getattr(_GRAPH_INSTANCE, "_conn", None) is not None:
+            res = _GRAPH_INSTANCE._conn.execute("RETURN 1 as ping").fetchall()
+            if res:
+                return "ok"
+        return "ok"
+    except Exception as e:  # noqa: BLE001
+        return f"error: {type(e).__name__}"
+
+
+def _disk_status() -> str:
+    try:
+        root = _get_logical_data_root()
+        root.mkdir(parents=True, exist_ok=True)
+        probe = root / ".probe_tmp"
+        probe.write_text("ok", encoding="utf-8")
+        if probe.exists():
+            probe.unlink(missing_ok=True)
+        return "ok"
     except Exception as e:  # noqa: BLE001
         return f"error: {type(e).__name__}"
 
 
 @router.get("/readyz")
 async def readyz(request: Request) -> JSONResponse:
-    """Readiness: can this instance actually serve traffic? Checks the DB, the durable
-    checkpointer, and (when configured) Redis, the vector store, and a worker heartbeat. Returns
-    503 when a GATING dependency is down so a load balancer / k8s probe routes around it
-    (audit P-imp / finding k). The worker is reported but non-gating - the API can still serve
-    while the worker tier is down (runs queue)."""
+    """Readiness: can this instance actually serve traffic? Checks the DB, durable
+    checkpointer, vector store, graph DB, and storage write accessibility.
+    Returns 503 when a gating dependency is down.
+    """
     checks: dict[str, str] = {}
     try:
         async with SessionLocal() as s:
@@ -57,12 +81,28 @@ async def readyz(request: Request) -> JSONResponse:
         checks["db"] = "ok"
     except Exception as e:  # noqa: BLE001
         checks["db"] = f"error: {type(e).__name__}"
-    checks["checkpointer"] = "ok" if getattr(request.app.state, "checkpointer", None) is not None else "missing"
-    checks["vector_store"] = _vector_status()  # reported; non-gating (API serves w/o knowledge)
-    # Gating checks: everything that must be healthy for this instance to serve.
-    gating = ["db", "checkpointer"]
+
+    checks["checkpointer"] = (
+        "ok" if getattr(request.app.state, "checkpointer", None) is not None else "missing"
+    )
+    checks["vector_store"] = _vector_status()
+    checks["graph_db"] = _graph_status()
+    checks["disk"] = _disk_status()
+
+    # Gating checks: DB and disk write accessibility must be healthy.
+    gating = ["db", "disk"]
+    if getattr(request.app.state, "checkpointer", None) is not None:
+        gating.append("checkpointer")
+
     ready = all(checks.get(k) == "ok" for k in gating)
-    return JSONResponse({"ready": ready, "checks": checks}, status_code=200 if ready else 503)
+    return JSONResponse(
+        {
+            "status": "ok" if ready else "degraded",
+            "ready": ready,
+            "checks": checks,
+        },
+        status_code=200 if ready else 503,
+    )
 
 
 @router.get("/metrics")
