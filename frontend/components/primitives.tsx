@@ -315,3 +315,92 @@ export function Menu({ trigger, items, align = "right" }: { trigger: ReactNode; 
     </div>
   );
 }
+
+
+/* ---------------- EditableName ---------------- */
+export function EditableName({
+  value,
+  fallback,
+  className,
+  inputClassName = "input",
+  style,
+  inputStyle,
+  onCommit,
+}: {
+  value?: string | null;
+  fallback: string;
+  className?: string;
+  inputClassName?: string;
+  style?: CSSProperties;
+  inputStyle?: CSSProperties;
+  onCommit: (name: string) => void | Promise<void>;
+}) {
+  const display = (value || "").trim() || fallback;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(display);
+
+  useEffect(() => {
+    if (!editing) setDraft(display);
+  }, [display, editing]);
+
+  const finish = () => {
+    const next = draft.trim();
+    setEditing(false);
+    if (!next || next === display) {
+      setDraft(display);
+      return;
+    }
+    void onCommit(next);
+  };
+
+  if (editing) {
+    return (
+      <input
+        className={inputClassName}
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={finish}
+        onFocus={(e) => e.currentTarget.select()}
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") {
+            setDraft(display);
+            setEditing(false);
+          }
+        }}
+        style={{ minWidth: 0, ...inputStyle }}
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className={className}
+      title={display}
+      onClick={(e) => {
+        e.stopPropagation();
+        setDraft(display);
+        setEditing(true);
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+      style={{
+        display: "block",
+        maxWidth: "100%",
+        minWidth: 0,
+        border: 0,
+        background: "transparent",
+        color: "inherit",
+        padding: 0,
+        textAlign: "left",
+        cursor: "text",
+        ...style,
+      }}
+    >
+      {display}
+    </button>
+  );
+}

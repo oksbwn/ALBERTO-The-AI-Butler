@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "@/components/icons";
-import { Field, Modal, Tile, Toggle } from "@/components/primitives";
+import { EmptyState, Field, Modal, Tile, Toggle } from "@/components/primitives";
 import {
   api,
   ConnectorCatalogEntry,

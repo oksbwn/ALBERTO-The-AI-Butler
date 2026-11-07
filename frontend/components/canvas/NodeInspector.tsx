@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Icon } from "../icons";
-import { StatusPill, Tile, Field, Toggle } from "../primitives";
+import { StatusPill, Tile, Field, Toggle, EditableName } from "../primitives";
 import { FieldsForm, ModelSelect, MultiSelectChips, VariablePicker, type FieldSpec, type UpstreamSource } from "./ConfigForm";
-import { AgentConfig } from "./AgentConfig";
+import { AgentConfig, CollapsibleSection } from "./AgentConfig";
 import { api, Agent, McpClientT, NodeType, Tool, ToolSet, Workflow, type ComponentT } from "@/lib/api";
 import { NODE_META, NODE_HELP, IO_COLOR } from "@/lib/data";
 import { type FlowEdge, type FlowNode } from "@/lib/graph";
