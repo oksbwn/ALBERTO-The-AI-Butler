@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "../icons";
 import { EmptyState, Field, Modal, Segmented, Tabs, Toggle } from "../primitives";
-import { api, clearTokens, DiscoveredModelItemT, InviteResult, MeResult, ModelProviderT, ModelServerT, ProjectVersion, RegisteredModelT, Secret, TeamMember } from "@/lib/api";
+import { api, clearTokens, DiscoveredModelItemT, InviteResult, MeResult, ModelServerT, ProjectVersion, RegisteredModelT, Secret, TeamMember } from "@/lib/api";
 import { invalidateModelCatalog, useEmbeddingModels, useModels, useRerankerModels } from "@/lib/models";
 
 const ROLES = ["owner", "admin", "editor", "viewer", "connector"];

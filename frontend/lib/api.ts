@@ -75,25 +75,6 @@ export interface ModelCatalog {
   reranker: RerankerModelInfo[];
 }
 
-export interface DiscoveredModel {
-  id: string;
-  name: string;
-  provider: string;
-  ctx: string;
-  tools: boolean;
-  vision: boolean;
-}
-
-export interface ModelProviderT {
-  id: string;
-  name: string;
-  type: string;
-  base_url: string;
-  api_key?: string | null;
-  enabled: boolean;
-  discovered_models: DiscoveredModel[];
-}
-
 export interface ModelServerT {
   id: string;
   name: string;
@@ -1177,15 +1158,6 @@ export const api = {
   downloadEmbeddingModel: (modelId: string) =>
     json<{ ok: boolean; model_id: string; cached: boolean; cache_dir?: string }>("/v1/models/embeddings/download", { method: "POST", body: JSON.stringify({ model_id: modelId }) }),
 
-  listModelProviders: () => json<ModelProviderT[]>("/v1/models/providers"),
-  createModelProvider: (body: { name: string; base_url: string; api_key?: string; enabled?: boolean }) =>
-    json<ModelProviderT>("/v1/models/providers", { method: "POST", body: JSON.stringify(body) }),
-  updateModelProvider: (id: string, body: Partial<{ name: string; base_url: string; api_key?: string; enabled: boolean; refresh: boolean }>) =>
-    json<ModelProviderT>(`/v1/models/providers/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-  deleteModelProvider: (id: string) =>
-    fetch(`${BASE}/v1/models/providers/${id}`, { method: "DELETE", headers: authHeader() }),
-  discoverModels: (body: { base_url: string; api_key?: string; provider_name?: string }) =>
-    json<{ ok: boolean; models: DiscoveredModel[]; error?: string }>("/v1/models/discover", { method: "POST", body: JSON.stringify(body) }),
   // version history (workflow | agent | tool | component | auth_provider | kb_source | project)
   listVersions: (entityType: EntityType, entityId: string) =>
     json<EntityVersion[]>(`/v1/versions/${entityType}/${entityId}`),
