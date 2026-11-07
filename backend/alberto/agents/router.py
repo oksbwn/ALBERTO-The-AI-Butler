@@ -35,6 +35,9 @@ class AgentRouter:
     def resolve(cls, persona: str | None = None, user_msg: str = "") -> AgentSpec:
         """Resolve an explicit persona or fallback to a dynamically constructed sub-agent spec."""
         key = (persona or "").strip().lower()
+        if not key and user_msg:
+            from alberto.agents.intent_router.agent import classify_user_intent
+            key = classify_user_intent(user_msg)
         if key in cls._BY_ID:
             return cls._BY_ID[key]
 

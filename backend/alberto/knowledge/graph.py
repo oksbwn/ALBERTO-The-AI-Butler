@@ -1050,7 +1050,7 @@ _GRAPH_INSTANCE: LadybugGraphAdapter | None = None
 def get_graph_adapter() -> LadybugGraphAdapter:
     """Return the singleton LadybugGraphAdapter for the current backend process."""
     global _GRAPH_INSTANCE
-    if _GRAPH_INSTANCE is None:
+    if _GRAPH_INSTANCE is None or _GRAPH_INSTANCE._conn is None:
         from alberto.config import settings
 
         _GRAPH_INSTANCE = LadybugGraphAdapter(
