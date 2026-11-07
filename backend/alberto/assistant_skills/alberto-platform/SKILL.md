@@ -1,5 +1,5 @@
 ---
-name: forge-platform
+name: alberto-platform
 description: Use when designing, building, debugging, or explaining Forge workflows, nodes, state, routing, middleware, tools, or knowledge - especially custom/complex shapes beyond the canned builders, AND for anything about deep agents, sub-agents, or supervisor patterns (how sub-agents are wired on the canvas), or per-environment tool endpoints ({{env.*}}).
 ---
 
