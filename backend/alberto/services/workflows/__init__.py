@@ -6,7 +6,10 @@ import importlib
 import sys
 from typing import Any
 
-from alberto.services.workflows.workflows import WorkflowService
+from alberto.services.workflows.workflows import WorkflowService as WorkflowService
+
+__all__ = ["WorkflowService"]
+
 
 def __getattr__(name: str) -> Any:
     # Check submodules in alberto.services.workflows

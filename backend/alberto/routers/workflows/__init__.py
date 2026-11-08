@@ -6,7 +6,10 @@ import importlib
 import sys
 from typing import Any
 
-from alberto.routers.workflows.workflows import router
+from alberto.routers.workflows.workflows import router as router
+
+__all__ = ["router"]
+
 
 def __getattr__(name: str) -> Any:
     # Check submodules in alberto.routers.workflows

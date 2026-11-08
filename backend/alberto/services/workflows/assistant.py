@@ -17,10 +17,14 @@ from typing import Any
 
 from sqlalchemy import select
 
-from alberto.agents.automation_manager.tools import _assistant_model_ref, _default_agent_model
+from alberto.agents.automation_manager.tools import (
+    _assistant_model_ref as _assistant_model_ref,
+)
+from alberto.agents.automation_manager.tools import (
+    _default_agent_model as _default_agent_model,
+)
 from alberto.agents.base import load_agent_markdown as _load_agent_md
 from alberto.agents.butler.tools import build_assistant_tools
-from alberto.config import settings
 from alberto.db.base import SessionLocal
 from alberto.engine.models import resolve_model
 from alberto.models import Project

@@ -2,24 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from sqlalchemy import (
-    JSON,
     Boolean,
     Float,
     ForeignKey,
-    Index,
     Integer,
-    LargeBinary,
     String,
-    Text,
     UniqueConstraint,
-    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from alberto.db.base import Base, PkTimestamp
+
 
 class ModelServer(PkTimestamp, Base):
     """Configured inference endpoint or cloud provider (Alberto model registry)."""

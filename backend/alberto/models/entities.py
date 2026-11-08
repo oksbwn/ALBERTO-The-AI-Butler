@@ -13,64 +13,64 @@ The ORM models have been decomposed into domain modules:
 
 from __future__ import annotations
 
-from alberto.models.identity import (
-    Tenant,
-    User,
-    ApiKey,
-    ProjectMember,
-    UserSecurity,
-)
-from alberto.models.workflows import (
-    Project,
-    Workflow,
-    Component,
-    Agent,
-    Trigger,
-    HandoffRequest,
-    Dataset,
-    EntityVersion,
-)
-from alberto.models.tools import (
-    Tool,
-    ToolSet,
-    ToolSetMember,
-    AuthProvider,
-    Secret,
-    McpClient,
-    OAuthClient,
-    ConnectorInstall,
-    ToolApprovalRequest,
-    ToolAnalysisJob,
-)
-from alberto.models.execution import (
-    Thread,
-    Run,
-    Trace,
-    AuditLog,
-    Span,
-)
-from alberto.models.memory import (
-    KbSource,
-    QaPair,
-    Memory,
-    MemoryLearningEvent,
-    OntologyEntityType,
-    OntologyRelationshipType,
-    OntologyEntityMapping,
+from alberto.models.automation import (
+    AutomationSession,
+    WorkflowRepairAttempt,
 )
 from alberto.models.channels import (
     Channel,
+    ChannelEvent,
     ChannelIdentity,
     ChannelPairing,
-    ChannelEvent,
+)
+from alberto.models.execution import (
+    AuditLog,
+    Run,
+    Span,
+    Thread,
+    Trace,
+)
+from alberto.models.identity import (
+    ApiKey,
+    ProjectMember,
+    Tenant,
+    User,
+    UserSecurity,
+)
+from alberto.models.memory import (
+    KbSource,
+    Memory,
+    MemoryLearningEvent,
+    OntologyEntityMapping,
+    OntologyEntityType,
+    OntologyRelationshipType,
+    QaPair,
 )
 from alberto.models.models_registry import (
     ModelServer,
     RegisteredModel,
 )
-from alberto.models.automation import (
-    AutomationSession,
-    WorkflowRepairAttempt,
+from alberto.models.tools import (
+    AuthProvider,
+    ConnectorInstall,
+    McpClient,
+    OAuthClient,
+    Secret,
+    Tool,
+    ToolAnalysisJob,
+    ToolApprovalRequest,
+    ToolSet,
+    ToolSetMember,
+)
+from alberto.models.workflows import (
+    Agent,
+    Component,
+    Dataset,
+    EntityVersion,
+    HandoffRequest,
+    Project,
+    Trigger,
+    Workflow,
 )
 
 __all__ = [

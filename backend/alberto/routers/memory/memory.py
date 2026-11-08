@@ -5,12 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alberto.config import settings
 from alberto.deps import CurrentUser, current_tenant_id, get_session, require_role
-from alberto.models import Agent, Project
 from alberto.schemas.dto import (
     MemoryRecallIn,
     MemoryRecallOut,
@@ -443,7 +441,6 @@ async def get_learning_event_suggestions(
     _: CurrentUser = Depends(require_role("viewer")),
 ):
     """Retrieve or generate advisory recommendations from Memory Curator for review items."""
-    from alberto.models import MemoryLearningEvent
 
     event = await LearningCoordinator.get_event(session, tenant_id, project_id, event_id)
     if not event:

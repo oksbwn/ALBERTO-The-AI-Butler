@@ -2,24 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from sqlalchemy import (
     JSON,
     Boolean,
     Float,
-    ForeignKey,
-    Index,
     Integer,
-    LargeBinary,
     String,
     Text,
     UniqueConstraint,
-    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from alberto.db.base import Base, PkTimestamp
+
 
 class KbSource(PkTimestamp, Base):
     __tablename__ = "kb_sources"

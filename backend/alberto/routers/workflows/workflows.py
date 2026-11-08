@@ -232,6 +232,7 @@ async def execute_step(
     import inspect
     import json
     import time
+
     from alberto.engine.registry import get_spec
     from alberto.services.runtime import build_compile_context
 
@@ -333,7 +334,7 @@ async def execute_step(
                     if inspect.isawaitable(res_val):
                         await res_val
                 except Exception as e:
-                    raise HTTPException(422, f"Unauthorized destination URL: {e}")
+                    raise HTTPException(422, f"Unauthorized destination URL: {e}") from e
 
     try:
         spec = get_spec(body.node_type)

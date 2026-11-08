@@ -6,20 +6,15 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
-    Boolean,
-    Float,
-    ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     String,
     Text,
-    UniqueConstraint,
-    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from alberto.db.base import Base, PkTimestamp
+
 
 class AutomationSession(PkTimestamp, Base):
     """Persistent conversational workflow authoring session."""

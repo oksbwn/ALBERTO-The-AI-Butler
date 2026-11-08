@@ -8,6 +8,8 @@ The per-turn span waterfall is still served by GET .../traces/{trace_id}.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,8 +106,9 @@ async def get_conversation(
     if not turns:
         raise HTTPException(404, "Conversation not found")
 
-    from alberto.models.entities import MemoryLearningEvent
     from sqlalchemy import select
+
+    from alberto.models.entities import MemoryLearningEvent
 
     trace_ids = [t.id for t in turns]
     events_res = await session.execute(

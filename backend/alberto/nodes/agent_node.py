@@ -228,7 +228,6 @@ class MemoryRecallMiddleware(AgentMiddleware):
             return ""
 
         import hashlib
-        import time
 
         from alberto.services.context_assembler import ContextAssembler
         from alberto.services.retrieval_policy import RetrievalPolicy

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -13,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from alberto.engine.providers import (
-    ProviderAdapter,
     get_adapter_for_server,
     normalize_base_url,
 )

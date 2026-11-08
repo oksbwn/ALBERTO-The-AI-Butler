@@ -6,7 +6,10 @@ import importlib
 import sys
 from typing import Any
 
-from alberto.services.memory.memory import MemoryService
+from alberto.services.memory.memory import MemoryService as MemoryService
+
+__all__ = ["MemoryService"]
+
 
 def __getattr__(name: str) -> Any:
     # Check submodules in alberto.services.memory

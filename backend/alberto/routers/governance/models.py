@@ -20,7 +20,6 @@ from alberto.engine.providers import (
     get_adapter_for_server,
     normalize_base_url,
 )
-from alberto.models import ModelServer
 from alberto.services.governance.models import ModelRegistryService
 
 log = logging.getLogger("forge.routers.models")
@@ -379,9 +378,9 @@ async def register_model(
             project_id=body.project_id,
         )
     except ValueError as e:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
     except KeyError as e:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(e))
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
 
     server = await ModelRegistryService.get_server(session, user.tenant_id, model.server_id)
     return RegisteredModelOut(

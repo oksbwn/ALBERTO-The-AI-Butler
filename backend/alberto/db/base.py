@@ -112,7 +112,7 @@ def _enforce_tenant_integrity(session, flush_context, instances):
         if hasattr(obj, "tenant_id"):
             val = getattr(obj, "tenant_id", None)
             if val is None:
-                setattr(obj, "tenant_id", active_tenant)
+                obj.tenant_id = active_tenant
             elif val != active_tenant:
                 raise PermissionError(
                     f"Cross-tenant insert violation: entity {obj.__class__.__name__} "

@@ -6,7 +6,10 @@ import importlib
 import sys
 from typing import Any
 
-from alberto.routers.memory.memory import router
+from alberto.routers.memory.memory import router as router
+
+__all__ = ["router"]
+
 
 def __getattr__(name: str) -> Any:
     # Check submodules in alberto.routers.memory
