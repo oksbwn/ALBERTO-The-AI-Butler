@@ -16,6 +16,9 @@ vi.mock("@/lib/api", async () => {
       runStreamUrl: vi.fn(),
       listVersions: vi.fn(),
       restoreVersion: vi.fn(),
+      listServers: vi.fn().mockResolvedValue([]),
+      listRegistryModels: vi.fn().mockResolvedValue([]),
+      getEmbeddingModelStatus: vi.fn().mockResolvedValue(null),
     },
     openSSE: vi.fn(),
   };
@@ -36,6 +39,9 @@ beforeEach(() => {
     id: "p1", name: "Forge", slug: "forge", description: "", status: "active", config: {},
   });
   apiMock.listSecrets.mockResolvedValue([]);
+  apiMock.listServers.mockResolvedValue([]);
+  apiMock.listRegistryModels.mockResolvedValue([]);
+  apiMock.getEmbeddingModelStatus.mockResolvedValue(null);
   apiMock.listComponents.mockResolvedValue([]);
   apiMock.listWorkflows.mockResolvedValue([
     { id: "wf1", project_id: "p1", name: "Support", status: "active", active_version: 1, executable: {}, canvas: {} },

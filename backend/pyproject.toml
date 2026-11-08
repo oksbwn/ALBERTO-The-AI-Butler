@@ -96,7 +96,13 @@ packages = ["alberto"]
 asyncio_mode = "auto"
 testpaths = ["../tests/backend"]
 pythonpath = ["."]
-filterwarnings = ["ignore::DeprecationWarning"]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+  "ignore::PendingDeprecationWarning",
+  "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+  "ignore:.*HTTP_422_UNPROCESSABLE_ENTITY.*",
+  "ignore::UserWarning:huggingface_hub.*",
+]
 
 [tool.mypy]
 python_version = "3.11"

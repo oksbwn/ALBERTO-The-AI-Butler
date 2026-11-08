@@ -125,11 +125,11 @@ export function SettingsScreen({ project }: { project: any }) {
     setLoadingRegistry(true);
     try {
       const [s, m] = await Promise.all([
-        api.listServers(),
-        api.listRegistryModels(project?.id),
+        api.listServers().catch(() => []),
+        api.listRegistryModels(project?.id).catch(() => []),
       ]);
-      setModelServers(s);
-      setRegisteredModels(m);
+      setModelServers(Array.isArray(s) ? s : []);
+      setRegisteredModels(Array.isArray(m) ? m : []);
       invalidateModelCatalog();
     } catch (e) {
       console.error("Failed to load model registry:", e);
@@ -578,7 +578,7 @@ export function SettingsScreen({ project }: { project: any }) {
                 <div className="card" style={{ padding: 0, overflow: "hidden", marginBottom: 16 }}>
                   <div className="row spread" style={{ padding: "14px 18px", borderBottom: "1px solid var(--line)", alignItems: "flex-start" }}>
                     <div>
-                      <div className="t-h2">Registered Models ({registeredModels.length})</div>
+                      <div className="t-h2">Registered Models ({(registeredModels || []).length})</div>
                       <div className="field-help" style={{ marginTop: 2, marginBottom: 0 }}>
                         Only registered, enabled models appear in Alberto execution selectors. Unregistered engines or cloud models are never exposed.
                       </div>
@@ -588,7 +588,7 @@ export function SettingsScreen({ project }: { project: any }) {
                     </button>
                   </div>
 
-                  {registeredModels.length === 0 ? (
+                  {(registeredModels || []).length === 0 ? (
                     <div style={{ padding: 18 }}>
                       <EmptyState
                         icon="sparkles"
@@ -628,7 +628,7 @@ export function SettingsScreen({ project }: { project: any }) {
                           </tr>
                         </thead>
                         <tbody>
-                          {registeredModels.map((m) => (
+                          {(registeredModels || []).map((m) => (
                             <tr key={m.id} style={{ background: m.is_default ? "var(--bg-1)" : "transparent" }}>
                               <td style={{ paddingLeft: 18, paddingRight: 12 }}>
                                 <div style={{ fontWeight: 600, color: "var(--fg-0)" }}>{m.display_name}</div>
@@ -1687,7 +1687,7 @@ export function SettingsScreen({ project }: { project: any }) {
             </div>
             <div className="col gap1" style={{ maxHeight: 360, overflowY: "auto" }}>
               {discoverModalList.map((m) => {
-                const alreadyReg = registeredModels.some(
+                const alreadyReg = (registeredModels || []).some(
                   (r) => r.server_id === discoverServerModal?.id && r.model_name === m.model_name
                 );
                 return (
